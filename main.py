@@ -2,14 +2,14 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from CONFIG.conf import BOT_TOKEN
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from CONFIG.settings import BOT_TOKEN
 from DATABASE.base import init_db, add_user, get_user
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Инициализация бота и диспетчера
+# Инициализация бота и диспетчераы
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -30,7 +30,7 @@ async def cmd_start(message: types.Message):
     )
     
     await message.answer(
-        "🐹 Добро пожаловать в Hamster Combat!\n\n"
+        "👻 Добро пожаловать в RYAOHO!\n\n"
         "Тапай по хомяку, зарабатывай монеты и улучшай свои навыки!",
         reply_markup=keyboard
     )
