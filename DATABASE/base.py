@@ -24,7 +24,7 @@ class User(Base):
     profit_per_tap = Column(Integer, default=1)
     energy = Column(Integer, default=1000)
     max_energy = Column(Integer, default=1000)
-    level = Column(Integer, default=1)
+    level = Column(Integer, default=0)
     
     # Уровни улучшений
     multitap_level = Column(Integer, default=0)

@@ -133,7 +133,7 @@ async def recover_energy(data: EnergyData):
     # Восстанавливаем 1 энергии в секунду (вызывается раз в 3 секунды)
     max_energy = user.get("max_energy", 1000)
     if user["energy"] < max_energy:
-        user["energy"] = min(max_energy, user["energy"] + 5)  # +3 за 3 секунды
+        user["energy"] = min(max_energy, user["energy"] + 10)  # +3 за 3 секунды
         await update_user(data.user_id, user)
     
     return {"energy": user["energy"]}
