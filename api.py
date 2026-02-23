@@ -102,11 +102,11 @@ async def process_upgrade(data: UpgradeData):
     
     # Обновляем параметры
     if data.boost_type == 'multitap':
-        user["profit_per_tap"] = 125 + 62 * user["multitap_level"]
+        user["profit_per_tap"] = 1 + 62 * user["multitap_level"]
     elif data.boost_type == 'profit':
         user["profit_per_hour"] = 3200 + user["profit_level"] * 100
     elif data.boost_type == 'energy':
-        user["max_energy"] = 500 + user["energy_level"] * 100
+        user["max_energy"] = 1000 + user["energy_level"] * 100
         user["energy"] = user["max_energy"]
     
     await update_user(data.user_id, user)
@@ -118,9 +118,9 @@ async def process_upgrade(data: UpgradeData):
         "coins": user["coins"],
         "new_level": user[f"{data.boost_type}_level"],
         "next_cost": next_price,
-        "profit_per_tap": user.get("profit_per_tap", 125),
+        "profit_per_tap": user.get("profit_per_tap", 1),
         "profit_per_hour": user.get("profit_per_hour", 3200),
-        "max_energy": user.get("max_energy", 500)
+        "max_energy": user.get("max_energy", 1000)
     }
 
 @app.post("/api/recover-energy")
@@ -178,7 +178,7 @@ async def get_upgrade_prices(user_id: int):
         'multitap': user.get('multitap_level', 0),
         'profit': user.get('profit_level', 0),
         'energy': user.get('energy_level', 0),
-        'boost': user.get('boost_level', 0) # Убедись, что это поле есть в БД
+        'boost': user.get('boost_level', 0) 
     }
 
     prices = {}
