@@ -40,9 +40,9 @@ async def get_user_data(user_id: int):
     return {
         "coins": user["coins"],
         "profit_per_hour": user.get("profit_per_hour", 3200),
-        "profit_per_tap": user.get("profit_per_tap", 125),
-        "energy": user.get("energy", 500),
-        "max_energy": user.get("max_energy", 500),
+        "profit_per_tap": user.get("profit_per_tap", 1),
+        "energy": user.get("energy", 1000),
+        "max_energy": user.get("max_energy", 1000),
         "level": user.get("level", 3),
         "multitap_level": user.get("multitap_level", 2),
         "profit_level": user.get("profit_level", 0),
@@ -83,7 +83,7 @@ async def process_upgrade(data: UpgradeData):
     prices = {
         'multitap': [500, 2000, 5000, 20000, 50000],
         'profit': [1000, 5000, 15000, 50000, 200000],
-        'energy': [800, 3000, 10000, 30000, 100000],
+        'energy': [1000, 3000, 10000, 30000, 100000],
         'boost': [500, 2000, 8000, 30000, 100000]
     }
     
@@ -131,9 +131,9 @@ async def recover_energy(data: EnergyData):
         raise HTTPException(status_code=404, detail="User not found")
     
     # Восстанавливаем 1 энергии в секунду (вызывается раз в 3 секунды)
-    max_energy = user.get("max_energy", 500)
+    max_energy = user.get("max_energy", 1000)
     if user["energy"] < max_energy:
-        user["energy"] = min(max_energy, user["energy"] + 3)  # +3 за 3 секунды
+        user["energy"] = min(max_energy, user["energy"] + 5)  # +3 за 3 секунды
         await update_user(data.user_id, user)
     
     return {"energy": user["energy"]}

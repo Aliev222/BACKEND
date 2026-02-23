@@ -82,14 +82,14 @@ async def add_user(user_id: int, username: str = None):
             user_id=user_id,
             username=username or f"user_{user_id}",
             coins=0,
-            profit_per_hour=3200,
-            profit_per_tap=125,
-            energy=500,
-            max_energy=500,
-            level=3,
-            multitap_level=2,
-            profit_level=0,
-            energy_level=0
+            profit_per_hour=100,
+            profit_per_tap=1,
+            energy=1000,
+            max_energy=1000,
+            level=1,
+            multitap_level=1,
+            profit_level=1,
+            energy_level=1,
         )
         session.add(new_user)
         await session.commit()
