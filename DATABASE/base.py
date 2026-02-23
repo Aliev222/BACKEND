@@ -20,11 +20,11 @@ class User(Base):
     coins = Column(BigInteger, default=0)
     
     # Новые поля для кликера
-    profit_per_hour = Column(BigInteger, default=3200)
+    profit_per_hour = Column(BigInteger, default=100)
     profit_per_tap = Column(Integer, default=1)
-    energy = Column(Integer, default=500)
+    energy = Column(Integer, default=1000)
     max_energy = Column(Integer, default=1000)
-    level = Column(Integer, default=3)
+    level = Column(Integer, default=1)
     
     # Уровни улучшений
     multitap_level = Column(Integer, default=0)

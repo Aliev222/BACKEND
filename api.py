@@ -119,7 +119,7 @@ async def process_upgrade(data: UpgradeData):
         "new_level": user[f"{data.boost_type}_level"],
         "next_cost": next_price,
         "profit_per_tap": user.get("profit_per_tap", 1),
-        "profit_per_hour": user.get("profit_per_hour", 3200),
+        "profit_per_hour": user.get("profit_per_hour", 100),
         "max_energy": user.get("max_energy", 1000)
     }
 
