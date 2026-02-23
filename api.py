@@ -102,7 +102,7 @@ async def process_upgrade(data: UpgradeData):
     
     # Обновляем параметры
     if data.boost_type == 'multitap':
-        user["profit_per_tap"] = 125 * (1 + user["multitap_level"] * 0.5)
+        user["profit_per_tap"] = 125 + 62 * user["multitap_level"]
     elif data.boost_type == 'profit':
         user["profit_per_hour"] = 3200 + user["profit_level"] * 100
     elif data.boost_type == 'energy':
@@ -145,9 +145,10 @@ async def passive_income(data: EnergyData):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Начисляем пассивный доход (в час / 3600 = в секунду)
+    # Начисляем пассивный доход - ОКРУГЛЯЕМ!
     profit_per_second = user.get("profit_per_hour", 3200) / 3600
-    user["coins"] += profit_per_second
+    # Добавляем целое число, отбрасывая дробную часть
+    user["coins"] += int(profit_per_second)  # ← ИЗМЕНЕНО!
     
     await update_user(data.user_id, user)
     
