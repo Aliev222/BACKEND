@@ -43,8 +43,8 @@ async def get_user_data(user_id: int):
         "profit_per_tap": user.get("profit_per_tap", 1),
         "energy": user.get("energy", 1000),
         "max_energy": user.get("max_energy", 1000),
-        "level": user.get("level", 3),
-        "multitap_level": user.get("multitap_level", 2),
+        "level": user.get("level", 0),
+        "multitap_level": user.get("multitap_level", 0),
         "profit_level": user.get("profit_level", 0),
         "energy_level": user.get("energy_level", 0)
     }
