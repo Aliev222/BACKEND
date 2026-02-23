@@ -1,4 +1,4 @@
-BOT_TOKEN = "8374393783:AAHOMUF7iHWrEqT7oh_FmqyN--74HiO15ss"
+BOT_TOKEN = "8774109698:AAGVLoQ_OsD018N9JnSSJNvDh2WVlVhr-4c"
 
 # Настройки базы данных
 DATABASE_URL = "sqlite+aiosqlite:///database.db"
