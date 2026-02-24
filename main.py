@@ -42,7 +42,7 @@ async def cmd_start(message: types.Message):
     await message.answer(
         f"👋 Привет, {username}!\n\n"
         f"💰 Твой баланс: {existing_user['coins'] if existing_user else 0} монет\n"
-        f"⚡ Уровень: {existing_user['level'] if existing_user else 1}\n\n"
+        f"Уровень: {existing_user.get('level', 1) if existing_user else 1}\n\n"
         f"Нажми кнопку ниже, чтобы играть:",
         reply_markup=keyboard
     )
