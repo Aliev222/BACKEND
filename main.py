@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from CONFIG.settings import BOT_TOKEN
-from DATABASE.base import init_db, create_user, get_user
+from DATABASE.base import init_db, add_user, get_user
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -20,13 +20,22 @@ async def cmd_start(message: types.Message):
     username = message.from_user.username
     
     # Проверяем, есть ли пользователь в базе
-    existing_user = await get_user(user_id)
+    user_data = await get_user(user_id)
     
-    if existing_user:
+    if user_data:
         print(f"👋 Пользователь {username} уже существует в базе")
+        # Используем словарь
+        user_coins = user_data.get('coins', 0)
+        user_energy = user_data.get('energy', 1000)
+        user_max_energy = user_data.get('max_energy', 1000)
     else:
-        # Добавляем только если нет
-        await create_user(user_id, username)
+        # Добавляем нового пользователя
+        await add_user(user_id, username)
+        # Получаем данные словарем
+        user_data = await get_user(user_id)
+        user_coins = user_data.get('coins', 0) if user_data else 0
+        user_energy = user_data.get('energy', 1000) if user_data else 1000
+        user_max_energy = user_data.get('max_energy', 1000) if user_data else 1000
         print(f"✅ Новый пользователь {username} добавлен в базу")
     
     # Создаём кнопку для Mini App
@@ -41,8 +50,8 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         f"👋 Привет, {username}!\n\n"
-        f"💰 Твой баланс: {existing_user['coins'] if existing_user else 0} монет\n"
-        f"Уровень: {existing_user.get('level', 1) if existing_user else 1}\n\n"
+        f"💰 Монет: {user_coins}\n"
+        f"⚡ Энергия: {user_energy}/{user_max_energy}\n\n"
         f"Нажми кнопку ниже, чтобы играть:",
         reply_markup=keyboard
     )

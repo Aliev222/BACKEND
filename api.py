@@ -4,7 +4,7 @@ from pydantic import BaseModel
 import asyncio
 import uvicorn
 
-from DATABASE.base import get_user, create_user, update_user, init_db
+from DATABASE.base import get_user, add_user as create_user, update_user, init_db
 
 # ==================== КОНФИГУРАЦИЯ ====================
 
@@ -78,12 +78,25 @@ async def get_user_data(user_id: int):
         await create_user(user_id)
         user = await get_user(user_id)
 
-    # Добавляем вычисляемые значения
-    user["max_tap_value"] = get_tap_value(user["multitap_level"])
-    user["max_hour_value"] = get_hour_value(user["profit_level"])
-    user["max_energy_value"] = get_max_energy(user["energy_level"])
+    # ВЫЧИСЛЯЕМ РЕАЛЬНОЕ ЗНАЧЕНИЕ ЗА КЛИК
+    actual_tap_value = get_tap_value(user["multitap_level"])
+    actual_hour_value = get_hour_value(user["profit_level"])
+    actual_energy_value = get_max_energy(user["energy_level"])
 
-    return user
+    return {
+        "coins": user["coins"],
+        "energy": user["energy"],
+        "max_energy": user["max_energy"],
+        # 👇 ИСПОЛЬЗУЕМ ВЫЧИСЛЕННЫЕ ЗНАЧЕНИЯ
+        "profit_per_tap": actual_tap_value,
+        "profit_per_hour": actual_hour_value,
+        "multitap_level": user["multitap_level"],
+        "profit_level": user["profit_level"],
+        "energy_level": user["energy_level"],
+        "max_tap_value": actual_tap_value,
+        "max_hour_value": actual_hour_value,
+        "max_energy_value": actual_energy_value
+    }
 
 
 @app.post("/api/click")
@@ -166,10 +179,11 @@ async def process_upgrade(request: UpgradeRequest):
         "coins": updated_user["coins"],
         "new_level": updated_user[f"{boost_type}_level"],
         "next_cost": UPGRADE_PRICES[boost_type][current_level + 1] if current_level + 1 < len(UPGRADE_PRICES[boost_type]) else 0,
+        # 👇 ВОЗВРАЩАЕМ АКТУАЛЬНОЕ ЗНАЧЕНИЕ
         "profit_per_tap": get_tap_value(updated_user["multitap_level"]),
         "profit_per_hour": get_hour_value(updated_user["profit_level"]),
         "max_energy": updated_user["max_energy"]
-    }
+}
 
 
 @app.post("/api/recover-energy")
