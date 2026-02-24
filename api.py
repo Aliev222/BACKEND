@@ -69,6 +69,15 @@ def get_max_energy(level: int) -> int:
 
 # ==================== API ЭНДПОИНТЫ ====================
 
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "message": "Ryoho API is running",
+        "version": "1.0"
+    }
+
+
 @app.get("/api/user/{user_id}")
 async def get_user_data(user_id: int):
     """Получить данные пользователя"""
