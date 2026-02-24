@@ -265,7 +265,10 @@ async def get_upgrade_prices(user_id: int):
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
+    import os
     # Создаем таблицы
     asyncio.run(init_db())
+    # Получаем порт из переменной окружения (для Render) или используем 8000 локально
+    port = int(os.environ.get("PORT", 8000))
     # Запускаем сервер
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=port)
