@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
 import uvicorn
+from datetime import datetime, timedelta
 
 from DATABASE.base import get_user, add_user as create_user, update_user, init_db
 
@@ -16,7 +17,7 @@ UPGRADE_PRICES = {
 }
 
 # Значения за уровень
-TAP_VALUES = [1, 2, 5, 10, 20, 40, 80, 160, 320, 640, 1280]           # Мультитап
+TAP_VALUES = [1, 2, 5, 10, 20, 40, 80, 160, 320, 640, 1280]                      # Мультитап
 HOUR_VALUES = [100, 150, 250, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000]  # Прибыль в час
 ENERGY_VALUES = [1000, 1100, 1250, 1500, 2000, 3000, 5000, 8000, 13000, 21000, 34000]  # Макс энергия
 
@@ -87,7 +88,6 @@ async def get_user_data(user_id: int):
         "coins": user["coins"],
         "energy": user["energy"],
         "max_energy": user["max_energy"],
-        # 👇 ИСПОЛЬЗУЕМ ВЫЧИСЛЕННЫЕ ЗНАЧЕНИЯ
         "profit_per_tap": actual_tap_value,
         "profit_per_hour": actual_hour_value,
         "multitap_level": user["multitap_level"],
@@ -179,11 +179,10 @@ async def process_upgrade(request: UpgradeRequest):
         "coins": updated_user["coins"],
         "new_level": updated_user[f"{boost_type}_level"],
         "next_cost": UPGRADE_PRICES[boost_type][current_level + 1] if current_level + 1 < len(UPGRADE_PRICES[boost_type]) else 0,
-        # 👇 ВОЗВРАЩАЕМ АКТУАЛЬНОЕ ЗНАЧЕНИЕ
         "profit_per_tap": get_tap_value(updated_user["multitap_level"]),
         "profit_per_hour": get_hour_value(updated_user["profit_level"]),
         "max_energy": updated_user["max_energy"]
-}
+    }
 
 
 @app.post("/api/recover-energy")
@@ -192,43 +191,60 @@ async def recover_energy(data: UserIdRequest):
     user = await get_user(data.user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     if user["energy"] >= user["max_energy"]:
         return {"energy": user["energy"]}
-    
+
     # ПРОПОРЦИОНАЛЬНОЕ ВОССТАНОВЛЕНИЕ
     max_energy = user["max_energy"]
-    
+
     # Восстанавливаем 2% от максимума (но минимум 1)
     recovery = max(1, int(max_energy * 0.02))  # 2% за раз
-    
-    # Можно регулировать процент:
-    # 1% = max_energy * 0.01
-    # 3% = max_energy * 0.03
-    # 5% = max_energy * 0.05
-    
+
     new_energy = min(max_energy, user["energy"] + recovery)
-    
+
     await update_user(data.user_id, {"energy": new_energy})
-    
+
     return {"energy": new_energy}
+
 
 @app.post("/api/passive-income")
 async def passive_income(request: UserIdRequest):
-    """Начислить пассивный доход"""
+    """Начислить пассивный доход (раз в 5 минут)"""
     user = await get_user(request.user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Доход в секунду (profit_per_hour / 3600)
-    hour_value = get_hour_value(user["profit_level"])
-    second_income = hour_value // 3600
+    # Получаем время последнего начисления
+    last_income = user.get('last_passive_income')
+    now = datetime.utcnow()
 
-    if second_income > 0:
-        user["coins"] += second_income
-        await update_user(request.user_id, {"coins": user["coins"]})
+    # Если никогда не начисляли или прошло больше 5 минут
+    if not last_income or (now - last_income) >= timedelta(minutes=5):
+        # Доход в час
+        hour_value = get_hour_value(user["profit_level"])
 
-    return {"coins": user["coins"]}
+        # Сколько заработано за 5 минут (1/12 часа)
+        income_5min = hour_value // 12
+
+        if income_5min > 0:
+            user["coins"] += income_5min
+            await update_user(request.user_id, {
+                "coins": user["coins"],
+                "last_passive_income": now
+            })
+
+            return {
+                "coins": user["coins"],
+                "income": income_5min,
+                "message": f"💰 +{income_5min} монет (пассивный доход)"
+            }
+
+    return {
+        "coins": user["coins"],
+        "income": 0,
+        "message": "⏳ Следующее начисление через 5 минут"
+    }
 
 
 @app.get("/api/upgrade-prices/{user_id}")
