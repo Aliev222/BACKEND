@@ -219,26 +219,23 @@ async def passive_income(request: UserIdRequest):
     last_income = user.get('last_passive_income')
     now = datetime.utcnow()
 
-    # Если никогда не начисляли или прошло больше 5 минут
+    # Проверяем, прошло ли 5 минут
     if not last_income or (now - last_income) >= timedelta(minutes=5):
-        # Доход в час
-        hour_value = get_hour_value(user["profit_level"])
+        
+        # 👇 ФИКСИРОВАННАЯ СУММА 500 МОНЕТ
+        income_fixed = 500
+        
+        user["coins"] += income_fixed
+        await update_user(request.user_id, {
+            "coins": user["coins"],
+            "last_passive_income": now
+        })
 
-        # Сколько заработано за 5 минут (1/12 часа)
-        income_5min = hour_value // 12
-
-        if income_5min > 0:
-            user["coins"] += income_5min
-            await update_user(request.user_id, {
-                "coins": user["coins"],
-                "last_passive_income": now
-            })
-
-            return {
-                "coins": user["coins"],
-                "income": income_5min,
-                "message": f"💰 +{income_5min} монет (пассивный доход)"
-            }
+        return {
+            "coins": user["coins"],
+            "income": income_fixed,
+            "message": f"💰 +{income_fixed} монет (пассивный доход)"
+        }
 
     return {
         "coins": user["coins"],
