@@ -1,16 +1,15 @@
 import asyncio
 import os
+import logging
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
 from CONFIG.settings import BOT_TOKEN
 from DATABASE.base import init_db, get_user, add_user
 
 # Настройка логирования
-import logging
 logging.basicConfig(level=logging.INFO)
 
 # Инициализация бота
@@ -35,7 +34,6 @@ async def cmd_start(message: types.Message):
         user_energy = 1000
         user_max_energy = 1000
     
-    # URL твоего API (который уже работает)
     GAME_URL = "https://ryoho-eta.vercel.app"
     
     keyboard = InlineKeyboardMarkup(
@@ -57,21 +55,35 @@ async def cmd_start(message: types.Message):
 
 # Настройка вебхука
 async def on_startup(bot: Bot):
-    await bot.set_webhook(f"https://ryoho-bot.onrender.com/webhook")
+    WEBHOOK_URL = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook"
+    await bot.set_webhook(WEBHOOK_URL)
+    logging.info(f"Webhook set to {WEBHOOK_URL}")
+
+async def on_shutdown(bot: Bot):
+    await bot.delete_webhook()
+
+async def handle_webhook(request):
+    update = types.Update(**await request.json())
+    await dp.feed_update(bot, update)
+    return web.Response()
 
 def main():
     # Создаем aiohttp приложение
     app = web.Application()
     
-    # Настраиваем вебхук
-    webhook_requests_handler = SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-    )
-    webhook_requests_handler.register(app, path="/webhook")
+    # Регистрируем вебхук
+    app.router.add_post('/webhook', handle_webhook)
     
     # Запускаем
-    web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8001)))
+    port = int(os.environ.get("PORT", 8001))
+    logging.info(f"Starting bot on port {port}")
+    
+    # Устанавливаем вебхук при старте
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(on_startup(bot))
+    
+    web.run_app(app, host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()
