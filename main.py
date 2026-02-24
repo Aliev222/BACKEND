@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from CONFIG.settings import BOT_TOKEN
-from DATABASE.base import init_db, add_user, get_user
+from DATABASE.base import init_db, create_user, get_user
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +26,7 @@ async def cmd_start(message: types.Message):
         print(f"👋 Пользователь {username} уже существует в базе")
     else:
         # Добавляем только если нет
-        await add_user(user_id, username)
+        await create_user(user_id, username)
         print(f"✅ Новый пользователь {username} добавлен в базу")
     
     # Создаём кнопку для Mini App
