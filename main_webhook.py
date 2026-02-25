@@ -5,12 +5,38 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-
+import os
+from sqlalchemy import create_engine, inspect, text
 from CONFIG.settings import BOT_TOKEN
 from DATABASE.base import get_user, add_user
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
+
+def ensure_luck_column():
+    """Автоматически добавляет колонку luck_level при запуске бота"""
+    try:
+        db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///database_new.db")
+        # Создаём синхронный движок для простой операции
+        sync_engine = create_engine(db_url.replace("+aiosqlite", ""))
+        
+        with sync_engine.connect() as conn:
+            inspector = inspect(sync_engine)
+            columns = [col['name'] for col in inspector.get_columns('users')]
+            
+            if 'luck_level' not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN luck_level INTEGER DEFAULT 0"))
+                conn.commit()
+                print("✅ [Бот] Колонка luck_level автоматически добавлена!")
+            else:
+                print("✅ [Бот] Колонка luck_level уже существует")
+    except Exception as e:
+        print(f"⚠️ [Бот] Ошибка при проверке/добавлении колонки: {e}")
+
+# Вызываем функцию при старте
+ensure_luck_column()
+# ===== КОНЕЦ АВТООБНОВЛЕНИЯ =====
+
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
