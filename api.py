@@ -5,6 +5,9 @@ import asyncio
 import uvicorn
 import random
 from datetime import datetime, timedelta
+import os
+from sqlalchemy import create_engine, inspect, text
+
 
 from DATABASE.base import get_user, add_user as create_user, update_user, init_db
 
@@ -24,6 +27,30 @@ HOUR_VALUES = [100, 150, 250, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000] 
 ENERGY_VALUES = [1000, 1100, 1250, 1500, 2000, 3000, 5000, 8000, 13000, 21000, 34000]  # Макс энергия
 
 # ==================== ИНИЦИАЛИЗАЦИЯ ====================
+def ensure_luck_column():
+    """Автоматически добавляет колонку luck_level при запуске"""
+    try:
+        db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///database_new.db")
+        # Создаём синхронный движок
+        sync_engine = create_engine(db_url.replace("+aiosqlite", ""))
+        
+        with sync_engine.connect() as conn:
+            inspector = inspect(sync_engine)
+            columns = [col['name'] for col in inspector.get_columns('users')]
+            
+            if 'luck_level' not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN luck_level INTEGER DEFAULT 0"))
+                conn.commit()
+                print("✅ Колонка luck_level автоматически добавлена!")
+            else:
+                print("✅ Колонка luck_level уже существует")
+    except Exception as e:
+        print(f"⚠️ Ошибка при проверке/добавлении колонки: {e}")
+
+# Вызываем функцию при старте
+ensure_luck_column()
+# ===== КОНЕЦ АВТООБНОВЛЕНИЯ =====
+
 
 app = FastAPI(title="Ryoho Clicker API")
 
@@ -270,46 +297,6 @@ async def get_upgrade_prices(user_id: int):
             prices[boost] = 0
     return prices
 
-@app.get("/api/add-luck-column")
-async def add_luck_column():
-    """Добавить колонку luck_level в таблицу users"""
-    try:
-        from sqlalchemy import create_engine, inspect, text
-        import os
-
-        # Используем ту же БД, что и основное приложение
-        db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///database_new.db")
-
-        # Создаем синхронный движок для простых операций
-        sync_engine = create_engine(db_url.replace("+aiosqlite", ""))
-        
-        with sync_engine.connect() as conn:
-            # Проверяем, есть ли уже колонка
-            inspector = inspect(sync_engine)
-            columns = [col['name'] for col in inspector.get_columns('users')]
-
-            if 'luck_level' not in columns:
-                conn.execute(text("ALTER TABLE users ADD COLUMN luck_level INTEGER DEFAULT 0"))
-                conn.commit()
-                return {
-                    "status": "success",
-                    "message": "✅ Колонка luck_level успешно добавлена!",
-                    "columns": columns + ['luck_level']
-                }
-            else:
-                return {
-                    "status": "ok",
-                    "message": "✅ Колонка luck_level уже существует",
-                    "columns": columns
-                }
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }
-@app.get("/api/ping")
-async def ping():
-    return {"message": "pong", "status": "API is alive"}
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
