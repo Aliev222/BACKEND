@@ -1,11 +1,12 @@
+import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy import Column, Integer, String, BigInteger, select, update, DateTime
 import json
 from datetime import datetime
 
-# Используем SQLite для простоты
-DATABASE_URL = "sqlite+aiosqlite:///database.db"
+# Используем переменную окружения или значение по умолчанию
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///database_new.db")
 
 engine = create_async_engine(DATABASE_URL, echo=True)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -70,7 +71,9 @@ async def get_user(user_id: int):
                 "profit_level": user.profit_level,
                 "energy_level": user.energy_level,
                 "last_passive_income": user.last_passive_income,
+                "luck_level": user.luck_level,
                 "extra_data": json.loads(user.extra_data)
+                
             }
         return None
 
@@ -100,6 +103,7 @@ async def add_user(user_id: int, username: str = None):
             multitap_level=0,
             profit_level=0,
             energy_level=0,
+            luck_level=0,
             last_passive_income=datetime.utcnow()
         )
         session.add(new_user)
