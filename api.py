@@ -370,6 +370,46 @@ async def play_wheel(request: GameRequest):
     await update_user(request.user_id, {"coins": user["coins"]})
     return {"coins": user["coins"], "sector": result, "message": message}
 
+@app.get("/api/migrate-referrals")
+async def migrate_referrals():
+    """Добавляет реферальные колонки в таблицу users"""
+    try:
+        from sqlalchemy import create_engine, inspect, text
+        import os
+
+        db_url = os.getenv("DATABASE_URL", "postgresql+asyncpg://...")
+        # Создаём синхронный движок для миграции
+        sync_engine = create_engine(db_url.replace("+asyncpg", ""))
+
+        with sync_engine.connect() as conn:
+            # Проверяем, какие колонки уже есть
+            inspector = inspect(sync_engine)
+            columns = [col['name'] for col in inspector.get_columns('users')]
+
+            added = []
+            if 'referrer_id' not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN referrer_id BIGINT"))
+                added.append('referrer_id')
+            if 'referral_count' not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN referral_count INTEGER DEFAULT 0"))
+                added.append('referral_count')
+            if 'referral_earnings' not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN referral_earnings BIGINT DEFAULT 0"))
+                added.append('referral_earnings')
+            if 'created_at' not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
+                added.append('created_at')
+
+            conn.commit()
+
+            return {
+                "status": "success",
+                "message": f"Колонки добавлены: {added}",
+                "columns": columns + added
+            }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
