@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 
 # Используем переменную окружения или значение по умолчанию
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///database_new.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://...")
 
 engine = create_async_engine(DATABASE_URL, echo=True)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

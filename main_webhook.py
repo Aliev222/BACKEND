@@ -14,41 +14,6 @@ from DATABASE.base import get_user, add_user
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-def ensure_database():
-    """Создаёт таблицы (если их нет) и добавляет колонку luck_level"""
-    try:
-        db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///database_new.db")
-        # Создаём синхронный движок для простых операций
-        sync_engine = create_engine(db_url.replace("+aiosqlite", ""))
-        
-        # ШАГ 1: Создаём таблицы, если их нет (вызываем init_db синхронно)
-        # Это гарантирует, что таблица 'users' существует
-        from sqlalchemy import MetaData
-        metadata = MetaData()
-        metadata.reflect(bind=sync_engine)
-        if 'users' not in metadata.tables:
-            print("⚠️ [Бот] Таблица users не найдена. Создаём таблицы...")
-            # Временно используем синхронный движок для создания
-            Base.metadata.create_all(bind=sync_engine)
-            print("✅ [Бот] Таблицы созданы.")
-        
-        # ШАГ 2: Теперь можно безопасно добавлять колонку
-        with sync_engine.connect() as conn:
-            inspector = inspect(sync_engine)
-            columns = [col['name'] for col in inspector.get_columns('users')]
-            
-            if 'luck_level' not in columns:
-                conn.execute(text("ALTER TABLE users ADD COLUMN luck_level INTEGER DEFAULT 0"))
-                conn.commit()
-                print("✅ [Бот] Колонка luck_level автоматически добавлена!")
-            else:
-                print("✅ [Бот] Колонка luck_level уже существует")
-    except Exception as e:
-        print(f"⚠️ [Бот] Ошибка при проверке/добавлении колонки: {e}")
-
-# Вызываем функцию при старте
-ensure_database()
-# ===== КОНЕЦ АВТООБНОВЛЕНИЯ =====
 
 
 # Инициализация бота и диспетчера
