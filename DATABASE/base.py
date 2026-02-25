@@ -4,6 +4,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy import Column, Integer, String, BigInteger, select, update, DateTime
 import json
 from datetime import datetime
+import logging
 
 # Используем переменную окружения или значение по умолчанию
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://...")
@@ -37,6 +38,14 @@ class User(Base):
 
     # Для пассивного дохода
     last_passive_income = Column(DateTime, default=datetime.utcnow)
+
+     # Реферальная система
+    referrer_id = Column(BigInteger, nullable=True)  # кто пригласил
+    referral_count = Column(Integer, default=0)      # сколько пригласил
+    referral_earnings = Column(BigInteger, default=0) # сколько заработал с рефералов
+    
+    # Дата регистрации (пригодится для статистики)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
     # Дополнительные данные в JSON
     extra_data = Column(String, default="{}")
@@ -77,20 +86,42 @@ async def get_user(user_id: int):
             }
         return None
 
+async def add_referral_bonus(referrer_id: int, new_user_id: int):
+    """Начисляет бонус за приглашённого друга"""
+    async with AsyncSessionLocal() as session:
+        # Получаем пригласившего
+        result = await session.execute(
+            select(User).where(User.user_id == referrer_id)
+        )
+        referrer = result.scalar_one_or_none()
+        
+        if not referrer:
+            print(f"⚠️ Реферер {referrer_id} не найден при начислении бонуса")
+            return
+        
+        # Начисляем бонус (1000 монет)
+        BONUS_AMOUNT = 1000
+        referrer.coins += BONUS_AMOUNT
+        referrer.referral_count += 1
+        referrer.referral_earnings += BONUS_AMOUNT
+        
+        await session.commit()
+        print(f"✅ Реферальный бонус: {referrer_id} получил +{BONUS_AMOUNT} за {new_user_id}")
+
 
 # Добавить нового пользователя
-async def add_user(user_id: int, username: str = None):
+# Добавить нового пользователя
+async def add_user(user_id: int, username: str = None, referrer_id: int = None):
     async with AsyncSessionLocal() as session:
         # Проверяем, есть ли уже
         result = await session.execute(
             select(User).where(User.user_id == user_id)
         )
         existing = result.scalar_one_or_none()
-
         if existing:
             return existing
-
-        # Создаем нового
+        
+        # Создаём нового
         new_user = User(
             user_id=user_id,
             username=username or f"user_{user_id}",
@@ -104,11 +135,19 @@ async def add_user(user_id: int, username: str = None):
             profit_level=0,
             energy_level=0,
             luck_level=0,
-            last_passive_income=datetime.utcnow()
+            last_passive_income=datetime.utcnow(),  # обрати внимание: datetime.utcnow()
+            referrer_id=referrer_id
         )
+        
         session.add(new_user)
         await session.commit()
+        
+        # Если есть пригласивший, начисляем бонус
+        if referrer_id:
+            await add_referral_bonus(referrer_id, user_id)
+        
         return new_user
+
 
 
 # Обновление пользователя
@@ -150,3 +189,24 @@ async def update_user(user_id: int, data: dict):
 
         # Возвращаем обновленные данные
         return await get_user(user_id)
+    
+    async def add_referral_bonus(referrer_id: int, new_user_id: int):
+     """Начисляет бонус за приглашённого друга"""
+    async with AsyncSessionLocal() as session:
+        # Получаем пригласившего
+        result = await session.execute(
+            select(User).where(User.user_id == referrer_id)
+        )
+        referrer = result.scalar_one_or_none()
+        
+        if not referrer:
+            return
+        
+        # Начисляем бонус (например, 1000 монет)
+        BONUS_AMOUNT = 1000
+        referrer.coins += BONUS_AMOUNT
+        referrer.referral_count += 1
+        referrer.referral_earnings += BONUS_AMOUNT
+        
+        await session.commit()
+        logging.info(f"✅ Реферальный бонус: {referrer_id} получил +{BONUS_AMOUNT} за {new_user_id}")

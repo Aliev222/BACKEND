@@ -36,23 +36,41 @@ async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     username = message.from_user.username
     
+    # Получаем реферальный параметр
+    args = message.text.split()
+    referrer_id = None
+    
+    if len(args) > 1:
+        ref_param = args[1]
+        if ref_param.startswith('ref_'):
+            try:
+                referrer_id = int(ref_param.replace('ref_', ''))
+                logging.info(f"🔄 Пользователь {user_id} пришёл по ссылке от {referrer_id}")
+            except ValueError:
+                logging.warning(f"⚠️ Некорректный реферальный параметр: {ref_param}")
+
     try:
-        logging.info(f"▶️ Начало обработки /start для user_id={user_id}, username={username}")
+        logging.info(f"▶️ Обработка /start для user_id={user_id}, username={username}")
         
+        # Проверяем, есть ли пользователь
         user_data = await get_user(user_id)
         
         if user_data:
+            # Пользователь существует
             user_coins = user_data.get('coins', 0)
             user_energy = user_data.get('energy', 1000)
             user_max_energy = user_data.get('max_energy', 1000)
+            logging.info(f"👋 Пользователь найден: монет={user_coins}, энергия={user_energy}")
         else:
-            await add_user(user_id, username)
+            # Создаём нового пользователя (с рефералом, если есть)
+            await add_user(user_id, username, referrer_id)
             user_coins = 0
             user_energy = 1000
             user_max_energy = 1000
+            logging.info(f"🆕 Новый пользователь создан. Реферал: {referrer_id}")
         
+        # Создаём кнопку для игры
         GAME_URL = "https://ryoho-eta.vercel.app"
-        
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(
@@ -62,6 +80,7 @@ async def cmd_start(message: types.Message):
             ]
         )
         
+        # Отправляем приветствие
         await message.answer(
             f"👋 Привет, {username}!\n\n"
             f"💰 Монет: {user_coins}\n"
