@@ -7,19 +7,32 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 import os
 from sqlalchemy import create_engine, inspect, text
+from DATABASE.base import init_db, Base  # Импортируем функцию создания таблиц и Base
 from CONFIG.settings import BOT_TOKEN
 from DATABASE.base import get_user, add_user
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-def ensure_luck_column():
-    """Автоматически добавляет колонку luck_level при запуске бота"""
+def ensure_database():
+    """Создаёт таблицы (если их нет) и добавляет колонку luck_level"""
     try:
         db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///database_new.db")
-        # Создаём синхронный движок для простой операции
+        # Создаём синхронный движок для простых операций
         sync_engine = create_engine(db_url.replace("+aiosqlite", ""))
         
+        # ШАГ 1: Создаём таблицы, если их нет (вызываем init_db синхронно)
+        # Это гарантирует, что таблица 'users' существует
+        from sqlalchemy import MetaData
+        metadata = MetaData()
+        metadata.reflect(bind=sync_engine)
+        if 'users' not in metadata.tables:
+            print("⚠️ [Бот] Таблица users не найдена. Создаём таблицы...")
+            # Временно используем синхронный движок для создания
+            Base.metadata.create_all(bind=sync_engine)
+            print("✅ [Бот] Таблицы созданы.")
+        
+        # ШАГ 2: Теперь можно безопасно добавлять колонку
         with sync_engine.connect() as conn:
             inspector = inspect(sync_engine)
             columns = [col['name'] for col in inspector.get_columns('users')]
@@ -34,7 +47,7 @@ def ensure_luck_column():
         print(f"⚠️ [Бот] Ошибка при проверке/добавлении колонки: {e}")
 
 # Вызываем функцию при старте
-ensure_luck_column()
+ensure_database()
 # ===== КОНЕЦ АВТООБНОВЛЕНИЯ =====
 
 
