@@ -270,7 +270,21 @@ async def get_upgrade_prices(user_id: int):
             prices[boost] = 0
     return prices
 
-
+@app.get("/api/init-db")
+async def initialize_database():
+    """Принудительно создать таблицы в новой базе"""
+    from DATABASE.base import init_db
+    import os
+    
+    # Проверяем, какой файл используется
+    db_path = os.environ.get("DATABASE_URL", "").replace("sqlite+aiosqlite:///", "")
+    
+    await init_db()
+    return {
+        "status": "ok", 
+        "message": f"Таблицы созданы в {db_path}",
+        "db_file": db_path
+    }
 
 # ==================== ЗАПУСК ====================
 
