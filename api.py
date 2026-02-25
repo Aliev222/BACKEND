@@ -270,26 +270,7 @@ async def get_upgrade_prices(user_id: int):
             prices[boost] = 0
     return prices
 
-@app.get("/api/reset-db")
-async def reset_database():
-    """ВРЕМЕННО: Удалить и пересоздать базу данных"""
-    import os
-    import asyncio
-    from DATABASE.base import init_db
-    
-    try:
-        # Удаляем старый файл базы
-        if os.path.exists("database.db"):
-            os.remove("database.db")
-            print("🗑️ Старая база удалена")
-        
-        # Создаём новую
-        await init_db()
-        print("✅ Новая база создана")
-        
-        return {"status": "ok", "message": "База данных пересоздана"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+
 
 # ==================== ЗАПУСК ====================
 
