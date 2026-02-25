@@ -28,8 +28,6 @@ async def create_tables():
         logging.error(f"❌ [Бот] Ошибка при создании таблиц: {e}")
         raise
 
-# ===== КОНЕЦ ИНИЦИАЛИЗАЦИИ =====
-
 # Команда /start
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -39,38 +37,27 @@ async def cmd_start(message: types.Message):
     # Получаем реферальный параметр
     args = message.text.split()
     referrer_id = None
+    if len(args) > 1 and args[1].startswith('ref_'):
+        try:
+            referrer_id = int(args[1].replace('ref_', ''))
+        except:
+            pass
     
-    if len(args) > 1:
-        ref_param = args[1]
-        if ref_param.startswith('ref_'):
-            try:
-                referrer_id = int(ref_param.replace('ref_', ''))
-                logging.info(f"🔄 Пользователь {user_id} пришёл по ссылке от {referrer_id}")
-            except ValueError:
-                logging.warning(f"⚠️ Некорректный реферальный параметр: {ref_param}")
-
     try:
-        logging.info(f"▶️ Обработка /start для user_id={user_id}, username={username}")
-        
-        # Проверяем, есть ли пользователь
         user_data = await get_user(user_id)
         
         if user_data:
-            # Пользователь существует
             user_coins = user_data.get('coins', 0)
             user_energy = user_data.get('energy', 1000)
             user_max_energy = user_data.get('max_energy', 1000)
-            logging.info(f"👋 Пользователь найден: монет={user_coins}, энергия={user_energy}")
         else:
-            # Создаём нового пользователя (с рефералом, если есть)
             await add_user(user_id, username, referrer_id)
             user_coins = 0
             user_energy = 1000
             user_max_energy = 1000
-            logging.info(f"🆕 Новый пользователь создан. Реферал: {referrer_id}")
         
-        # Создаём кнопку для игры
         GAME_URL = "https://ryoho-eta.vercel.app"
+        
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(
@@ -80,7 +67,6 @@ async def cmd_start(message: types.Message):
             ]
         )
         
-        # Отправляем приветствие
         await message.answer(
             f"👋 Привет, {username}!\n\n"
             f"💰 Монет: {user_coins}\n"
@@ -91,26 +77,37 @@ async def cmd_start(message: types.Message):
         
     except Exception as e:
         logging.error(f"❌ Ошибка в /start: {e}")
-        import traceback
-        logging.error(traceback.format_exc())
         await message.answer("Произошла ошибка. Попробуй позже.")
 
-# Функция при старте вебхука
+# ===== ФУНКЦИИ ВЕБХУКА =====
 async def on_startup(bot: Bot):
-    # Сначала создаём таблицы
-    await create_tables()
-    
-    # Потом устанавливаем вебхук
-    webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook"
-    await bot.set_webhook(webhook_url)
-    logging.info(f"✅ Webhook установлен на {webhook_url}")
+    """Выполняется при запуске приложения"""
+    try:
+        # Сначала создаём таблицы
+        await create_tables()
+        
+        # Удаляем старый вебхук (на всякий случай)
+        await bot.delete_webhook(drop_pending_updates=True)
+        
+        # Получаем URL сервиса
+        render_url = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+        if not render_url:
+            logging.error("❌ RENDER_EXTERNAL_HOSTNAME не задан!")
+            return
+        
+        webhook_url = f"https://{render_url}/webhook"
+        await bot.set_webhook(webhook_url)
+        logging.info(f"✅ Webhook установлен на {webhook_url}")
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка при установке вебхука: {e}")
 
-# Функция при остановке
 async def on_shutdown(bot: Bot):
+    """Выполняется при остановке"""
     await bot.delete_webhook()
     logging.info("🔴 Webhook удален")
 
-# Главная функция
+# ===== ГЛАВНАЯ ФУНКЦИЯ =====
 def main():
     app = web.Application()
     
