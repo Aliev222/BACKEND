@@ -13,7 +13,11 @@ from CONFIG.settings import BOT_TOKEN
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# ===== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ (перед всем остальным) =====
+# Инициализация бота и диспетчера
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# ===== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ =====
 async def create_tables():
     """Создаёт таблицы в PostgreSQL, если их нет"""
     try:
@@ -22,17 +26,9 @@ async def create_tables():
         logging.info("✅ [Бот] Таблицы успешно созданы или уже существуют.")
     except Exception as e:
         logging.error(f"❌ [Бот] Ошибка при создании таблиц: {e}")
-        logging.error("Бот не сможет работать без таблиц. Проверьте подключение к БД.")
+        raise  # Пробрасываем ошибку дальше
 
-# Запускаем создание таблиц синхронно перед запуском бота
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-loop.run_until_complete(create_tables())
 # ===== КОНЕЦ ИНИЦИАЛИЗАЦИИ =====
-
-# Инициализация бота и диспетчера
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
 
 # Команда /start
 @dp.message(Command("start"))
@@ -43,7 +39,6 @@ async def cmd_start(message: types.Message):
     try:
         logging.info(f"▶️ Начало обработки /start для user_id={user_id}, username={username}")
         
-        # Получаем пользователя из базы
         user_data = await get_user(user_id)
         
         if user_data:
@@ -51,7 +46,6 @@ async def cmd_start(message: types.Message):
             user_energy = user_data.get('energy', 1000)
             user_max_energy = user_data.get('max_energy', 1000)
         else:
-            # Создаём нового пользователя
             await add_user(user_id, username)
             user_coins = 0
             user_energy = 1000
@@ -84,6 +78,10 @@ async def cmd_start(message: types.Message):
 
 # Функция при старте вебхука
 async def on_startup(bot: Bot):
+    # Сначала создаём таблицы (в том же цикле, где работает бот)
+    await create_tables()
+    
+    # Потом устанавливаем вебхук
     webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook"
     await bot.set_webhook(webhook_url)
     logging.info(f"✅ Webhook установлен на {webhook_url}")
