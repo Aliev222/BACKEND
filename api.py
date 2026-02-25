@@ -270,21 +270,43 @@ async def get_upgrade_prices(user_id: int):
             prices[boost] = 0
     return prices
 
-@app.get("/api/init-db")
-async def initialize_database():
-    """Принудительно создать таблицы в новой базе"""
-    from DATABASE.base import init_db
-    import os
-    
-    # Проверяем, какой файл используется
-    db_path = os.environ.get("DATABASE_URL", "").replace("sqlite+aiosqlite:///", "")
-    
-    await init_db()
-    return {
-        "status": "ok", 
-        "message": f"Таблицы созданы в {db_path}",
-        "db_file": db_path
-    }
+@app.get("/api/add-luck-column")
+async def add_luck_column():
+    """Добавить колонку luck_level в таблицу users"""
+    try:
+        from sqlalchemy import create_engine, inspect, text
+        import os
+        
+        # Используем ту же БД, что и основное приложение
+        db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///database_new.db")
+        
+        # Создаем синхронный движок для простых операций
+        sync_engine = create_engine(db_url.replace("+aiosqlite", ""))
+        
+        with sync_engine.connect() as conn:
+            # Проверяем, есть ли уже колонка
+            inspector = inspect(sync_engine)
+            columns = [col['name'] for col in inspector.get_columns('users')]
+            
+            if 'luck_level' not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN luck_level INTEGER DEFAULT 0"))
+                conn.commit()
+                return {
+                    "status": "success",
+                    "message": "✅ Колонка luck_level успешно добавлена!",
+                    "columns": columns + ['luck_level']
+                }
+            else:
+                return {
+                    "status": "ok", 
+                    "message": "✅ Колонка luck_level уже существует",
+                    "columns": columns
+                }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
 
 # ==================== ЗАПУСК ====================
 
