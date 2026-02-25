@@ -391,25 +391,100 @@ async def play_wheel(request: GameRequest):
         raise HTTPException(status_code=400, detail="Not enough coins")
     if request.bet < 10:
         raise HTTPException(status_code=400, detail="Minimum bet 10")
-    sectors = ["lose", "lose", "lose", "lose", "small", "small", "medium", "big"]
-    result = random.choice(sectors)
-    if result == "big":
-        multiplier = 5
-    elif result == "medium":
-        multiplier = 3
-    elif result == "small":
-        multiplier = 2
-    else:
-        multiplier = 0
-    if multiplier > 0:
-        win_amount = request.bet * multiplier
+    
+    # Секторы колеса (8 красных, 8 черных)
+    red_sectors = [1, 3, 5, 7, 9, 11, 13, 15]
+    black_sectors = [2, 4, 6, 8, 10, 12, 14, 16]
+    
+    # Выбираем случайный сектор
+    all_sectors = red_sectors + black_sectors
+    result = random.choice(all_sectors)
+    
+    # Определяем цвет результата
+    result_color = 'red' if result in red_sectors else 'black'
+    result_symbol = '🔴' if result_color == 'red' else '⚫'
+    
+    # Проверяем выигрыш
+    win = (request.color == result_color)
+    
+    if win:
+        win_amount = request.bet * 2
         user["coins"] += win_amount
-        message = f"🎡 Вы выиграли +{win_amount} монет (x{multiplier})"
+        message = f"🎡 {result_symbol} Вы выиграли +{win_amount} монет!"
     else:
         user["coins"] -= request.bet
-        message = f"😞 Вы проиграли {request.bet} монет"
+        message = f"😞 {result_symbol} Вы проиграли {request.bet} монет"
+    
     await update_user(request.user_id, {"coins": user["coins"]})
-    return {"coins": user["coins"], "sector": result, "message": message}
+    
+    return {
+        "coins": user["coins"],
+        "result": result,
+        "result_color": result_color,
+        "result_symbol": result_symbol,
+        "win": win,
+        "message": message
+    }
+@app.post("/api/game/roulette")
+async def play_roulette(request: GameRequest):
+    user = await get_user(request.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user["coins"] < request.bet:
+        raise HTTPException(status_code=400, detail="Not enough coins")
+    if request.bet < 10:
+        raise HTTPException(status_code=400, detail="Minimum bet 10")
+    
+    # Секторы рулетки (0-36)
+    red_numbers = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]
+    black_numbers = [2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35]
+    green_numbers = [0]
+    
+    # Результат
+    result = random.randint(0, 36)
+    
+    # Определяем цвет
+    if result in red_numbers:
+        result_color = 'red'
+        result_symbol = '🔴'
+    elif result in black_numbers:
+        result_color = 'black'
+        result_symbol = '⚫'
+    else:
+        result_color = 'green'
+        result_symbol = '🟢'
+    
+    # Проверяем выигрыш
+    win = False
+    multiplier = 0
+    
+    if request.bet_type == 'number' and request.bet_value == result:
+        win = True
+        multiplier = 35
+    elif request.bet_type == result_color:
+        win = True
+        multiplier = 2
+    elif request.bet_type == 'green' and result_color == 'green':
+        win = True
+        multiplier = 35
+    
+    if win:
+        win_amount = request.bet * multiplier
+        user["coins"] += win_amount
+        message = f"{result_symbol} {result} - Вы выиграли +{win_amount} монет! (x{multiplier})"
+    else:
+        user["coins"] -= request.bet
+        message = f"{result_symbol} {result} - Вы проиграли {request.bet} монет"
+    
+    await update_user(request.user_id, {"coins": user["coins"]})
+    
+    return {
+        "coins": user["coins"],
+        "result_number": result,
+        "result_color": result_color,
+        "win": win,
+        "message": message
+    }
 
 @app.get("/api/migrate-referrals")
 async def migrate_referrals():
