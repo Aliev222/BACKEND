@@ -190,17 +190,6 @@ async def update_user(user_id: int, data: dict):
         # Возвращаем обновленные данные
         return await get_user(user_id)
     
-    async def add_referral_bonus(referrer_id: int, new_user_id: int):
-     """Начисляет бонус за приглашённого друга"""
-    async with AsyncSessionLocal() as session:
-        # Получаем пригласившего
-        result = await session.execute(
-            select(User).where(User.user_id == referrer_id)
-        )
-        referrer = result.scalar_one_or_none()
-        
-        if not referrer:
-            return
         
         # Начисляем бонус (например, 1000 монет)
         BONUS_AMOUNT = 1000
