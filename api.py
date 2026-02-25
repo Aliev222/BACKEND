@@ -12,15 +12,15 @@ from DATABASE.base import get_user, add_user as create_user, update_user, init_d
 # ==================== КОНФИГУРАЦИЯ ====================
 
 UPGRADE_PRICES = {
-    "multitap": [50, 200, 500, 2000, 8000, 32000, 128000, 512000, 2048000, 8192000],
+    "multitap": [50, 200, 500, 2000, 8000, 15000, 25000, 50000, 100000, 400000],
     "profit":   [100, 400, 1000, 4000, 16000, 64000, 256000, 1024000, 4096000, 16384000],
-    "energy":   [80, 300, 800, 3000, 12000, 48000, 192000, 768000, 3072000, 12288000],
-    "luck":     [500, 2000, 5000, 20000, 50000, 200000, 500000, 2000000, 5000000, 20000000],
+    "energy":   [80, 300, 800, 3000, 6000, 12000, 20000, 30000, 40000, 100000],
+    "luck":     [500, 2000, 5000, 10000, 20000, 40000, 60000, 1000000, 5000000, 20000000],
 }
 
 TAP_VALUES = [1, 2, 5, 10, 20, 40, 80, 160, 320, 640, 1280]
 HOUR_VALUES = [100, 150, 250, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000]
-ENERGY_VALUES = [1000, 1100, 1250, 1500, 2000, 3000, 5000, 8000, 13000, 21000, 34000]
+ENERGY_VALUES = [1000, 1500, 2000, 3000, 6000, 10000, 14000, 17000, 20000, 24000, 34000]
 
 # ==================== ИНИЦИАЛИЗАЦИЯ ====================
 
@@ -115,6 +115,7 @@ async def get_user_data(user_id: int):
         "luck_chances": luck_chances
     }
 
+
 @app.post("/api/click")
 async def process_click(request: ClickRequest):
     user = await get_user(request.user_id)
@@ -126,8 +127,13 @@ async def process_click(request: ClickRequest):
     if user["energy"] < base_tap:
         raise HTTPException(status_code=400, detail="Not enough energy")
 
-    multiplier, crit_type = get_luck_multiplier(user.get("luck_level", 0))
+    # Получаем множитель удачи
+    luck_level = user.get("luck_level", 0)
+    multiplier, crit_type = get_luck_multiplier(luck_level)
     actual_gain = base_tap * multiplier
+
+    # Логируем для проверки
+    print(f"🎲 Удача: level={luck_level}, multiplier={multiplier}, gain={actual_gain} (base={base_tap})")
 
     user["coins"] += actual_gain
     user["energy"] -= base_tap
