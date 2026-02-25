@@ -307,7 +307,9 @@ async def add_luck_column():
             "status": "error",
             "error": str(e)
         }
-
+@app.get("/api/ping")
+async def ping():
+    return {"message": "pong", "status": "API is alive"}
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
