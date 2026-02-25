@@ -39,6 +39,8 @@ class User(Base):
 
     # Дополнительные данные в JSON
     extra_data = Column(String, default="{}")
+    
+    luck_level = Column(Integer, default=0)  # уровень удачи
 
 
 # Создание таблиц
