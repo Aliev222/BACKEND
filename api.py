@@ -276,10 +276,10 @@ async def add_luck_column():
     try:
         from sqlalchemy import create_engine, inspect, text
         import os
-        
+
         # Используем ту же БД, что и основное приложение
         db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///database_new.db")
-        
+
         # Создаем синхронный движок для простых операций
         sync_engine = create_engine(db_url.replace("+aiosqlite", ""))
         
@@ -287,7 +287,7 @@ async def add_luck_column():
             # Проверяем, есть ли уже колонка
             inspector = inspect(sync_engine)
             columns = [col['name'] for col in inspector.get_columns('users')]
-            
+
             if 'luck_level' not in columns:
                 conn.execute(text("ALTER TABLE users ADD COLUMN luck_level INTEGER DEFAULT 0"))
                 conn.commit()
@@ -298,7 +298,7 @@ async def add_luck_column():
                 }
             else:
                 return {
-                    "status": "ok", 
+                    "status": "ok",
                     "message": "✅ Колонка luck_level уже существует",
                     "columns": columns
                 }
