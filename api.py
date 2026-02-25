@@ -238,6 +238,47 @@ async def get_upgrade_prices(user_id: int):
         prices[boost] = UPGRADE_PRICES[boost][level] if level < len(UPGRADE_PRICES[boost]) else 0
     return prices
 
+@app.get("/api/migrate-referrals")
+async def migrate_referrals():
+    """Добавляет реферальные колонки в таблицу users"""
+    try:
+        from sqlalchemy import create_engine, inspect, text
+        import os
+
+        db_url = os.getenv("DATABASE_URL", "postgresql+asyncpg://...")
+        # Создаём синхронный движок для миграции
+        sync_engine = create_engine(db_url.replace("+asyncpg", ""))
+
+        with sync_engine.connect() as conn:
+            # Проверяем, какие колонки уже есть
+            inspector = inspect(sync_engine)
+            columns = [col['name'] for col in inspector.get_columns('users')]
+
+            added = []
+            if 'referrer_id' not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN referrer_id BIGINT"))
+                added.append('referrer_id')
+            if 'referral_count' not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN referral_count INTEGER DEFAULT 0"))
+                added.append('referral_count')
+            if 'referral_earnings' not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN referral_earnings BIGINT DEFAULT 0"))
+                added.append('referral_earnings')
+            if 'created_at' not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
+                added.append('created_at')
+
+            conn.commit()
+
+            return {
+                "status": "success",
+                "message": f"Колонки добавлены: {added}",
+                "columns": columns + added
+            }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 # ==================== РЕФЕРАЛЫ ====================
 @app.get("/api/referral-data/{user_id}")
 async def get_referral_data(user_id: int):
