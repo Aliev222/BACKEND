@@ -28,7 +28,7 @@ async def create_tables():
         logging.error(f"❌ [Бот] Ошибка при создании таблиц: {e}")
         raise
 
-# Команда /start
+# ===== КОМАНДА /start =====
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
@@ -40,24 +40,29 @@ async def cmd_start(message: types.Message):
     if len(args) > 1 and args[1].startswith('ref_'):
         try:
             referrer_id = int(args[1].replace('ref_', ''))
-        except:
+            logging.info(f"👥 Реферальный переход: {user_id} от {referrer_id}")
+        except ValueError:
             pass
     
     try:
+        # Получаем или создаём пользователя
         user_data = await get_user(user_id)
         
         if user_data:
             user_coins = user_data.get('coins', 0)
             user_energy = user_data.get('energy', 1000)
             user_max_energy = user_data.get('max_energy', 1000)
+            logging.info(f"👋 Пользователь {user_id} найден: монет={user_coins}")
         else:
+            # Создаём нового пользователя с рефералом
             await add_user(user_id, username, referrer_id)
             user_coins = 0
             user_energy = 1000
             user_max_energy = 1000
+            logging.info(f"🆕 Создан новый пользователь {user_id}, реферал: {referrer_id}")
         
+        # Кнопка для игры
         GAME_URL = "https://ryoho-eta.vercel.app"
-        
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(
@@ -67,6 +72,7 @@ async def cmd_start(message: types.Message):
             ]
         )
         
+        # Отправляем ответ
         await message.answer(
             f"👋 Привет, {username}!\n\n"
             f"💰 Монет: {user_coins}\n"
@@ -74,9 +80,10 @@ async def cmd_start(message: types.Message):
             f"Нажми кнопку ниже, чтобы играть:",
             reply_markup=keyboard
         )
+        logging.info(f"✅ Ответ отправлен пользователю {user_id}")
         
     except Exception as e:
-        logging.error(f"❌ Ошибка в /start: {e}")
+        logging.error(f"❌ Ошибка в /start: {e}", exc_info=True)
         await message.answer("Произошла ошибка. Попробуй позже.")
 
 # ===== ФУНКЦИИ ВЕБХУКА =====
@@ -86,8 +93,9 @@ async def on_startup(bot: Bot):
         # Сначала создаём таблицы
         await create_tables()
         
-        # Удаляем старый вебхук (на всякий случай)
+        # Удаляем старый вебхук и все ожидающие обновления
         await bot.delete_webhook(drop_pending_updates=True)
+        logging.info("✅ Старый вебхук удалён")
         
         # Получаем URL сервиса
         render_url = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
@@ -97,15 +105,18 @@ async def on_startup(bot: Bot):
         
         webhook_url = f"https://{render_url}/webhook"
         await bot.set_webhook(webhook_url)
-        logging.info(f"✅ Webhook установлен на {webhook_url}")
+        logging.info(f"✅ Вебхук установлен на {webhook_url}")
         
     except Exception as e:
-        logging.error(f"❌ Ошибка при установке вебхука: {e}")
+        logging.error(f"❌ Ошибка при установке вебхука: {e}", exc_info=True)
 
 async def on_shutdown(bot: Bot):
     """Выполняется при остановке"""
-    await bot.delete_webhook()
-    logging.info("🔴 Webhook удален")
+    try:
+        await bot.delete_webhook()
+        logging.info("🔴 Вебхук удалён")
+    except Exception as e:
+        logging.error(f"❌ Ошибка при удалении вебхука: {e}")
 
 # ===== ГЛАВНАЯ ФУНКЦИЯ =====
 def main():
