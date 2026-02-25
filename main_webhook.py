@@ -27,14 +27,23 @@ async def cmd_start(message: types.Message):
     username = message.from_user.username
     
     try:
+        logging.info(f"▶️ Начало обработки /start для user_id={user_id}, username={username}")
+        
+        # Шаг 1: Пытаемся получить пользователя
+        logging.info("🔄 Вызов get_user...")
         user_data = await get_user(user_id)
+        logging.info(f"✅ get_user завершён, результат: {user_data}")
         
         if user_data:
+            logging.info("👤 Пользователь найден в БД")
             user_coins = user_data.get('coins', 0)
             user_energy = user_data.get('energy', 1000)
             user_max_energy = user_data.get('max_energy', 1000)
+            logging.info(f"📊 Данные: coins={user_coins}, energy={user_energy}/{user_max_energy}")
         else:
+            logging.info("🆕 Пользователь не найден, создаём нового...")
             await add_user(user_id, username)
+            logging.info("✅ Пользователь создан")
             user_coins = 0
             user_energy = 1000
             user_max_energy = 1000
@@ -57,8 +66,12 @@ async def cmd_start(message: types.Message):
             f"Нажми кнопку ниже, чтобы играть:",
             reply_markup=keyboard
         )
+        logging.info("✅ Ответ отправлен пользователю")
+        
     except Exception as e:
-        logging.error(f"Ошибка в /start: {e}")
+        logging.error(f"❌ Ошибка в /start: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
         await message.answer("Произошла ошибка. Попробуй позже.")
 
 # Функция, которая выполняется при старте
