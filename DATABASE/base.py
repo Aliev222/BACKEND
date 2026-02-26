@@ -23,55 +23,48 @@ class User(Base):
     username = Column(String, nullable=True)
     coins = Column(BigInteger, default=0)
 
-    # Новые поля для кликера
     profit_per_hour = Column(BigInteger, default=100)
     profit_per_tap = Column(Integer, default=1)
     energy = Column(Integer, default=1000)
     max_energy = Column(Integer, default=1000)
     level = Column(Integer, default=0)
 
-    # Уровни улучшений
     multitap_level = Column(Integer, default=0)
     profit_level = Column(Integer, default=0)
     energy_level = Column(Integer, default=0)
     boost_level = Column(Integer, default=0)
 
-    # Для пассивного дохода
     last_passive_income = Column(DateTime, default=datetime.utcnow)
 
-     # Реферальная система
-    referrer_id = Column(BigInteger, nullable=True)  # кто пригласил
-    referral_count = Column(Integer, default=0)      # сколько пригласил
-    referral_earnings = Column(BigInteger, default=0) # сколько заработал с рефералов
+    referrer_id = Column(BigInteger, nullable=True)
+    referral_count = Column(Integer, default=0)
+    referral_earnings = Column(BigInteger, default=0)
     
-    # Дата регистрации (пригодится для статистики)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # Дополнительные данные в JSON
     extra_data = Column(String, default="{}")
     
-    luck_level = Column(Integer, default=0)  # уровень удачи
-
-    class UserTask(Base):
-        __tablename__ = 'user_tasks'
-        
-        id = Column(Integer, primary_key=True)
-        user_id = Column(BigInteger, index=True)  # ID пользователя
-        task_id = Column(String)  # 'daily_bonus', 'energy_refill', 'link_click', 'invite_5_friends'
-        completed_at = Column(DateTime, default=datetime.utcnow)  # когда выполнил
+    luck_level = Column(Integer, default=0)
 
 
+# ==================== МОДЕЛЬ ЗАДАНИЙ ====================
+class UserTask(Base):
+    __tablename__ = 'user_tasks'
+    __table_args__ = {'extend_existing': True}
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, index=True)
+    task_id = Column(String)
+    completed_at = Column(DateTime, default=datetime.utcnow)
 
 
+# ==================== ФУНКЦИИ ====================
 
-
-# Создание таблиц
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
 
-# Получить пользователя
 async def get_user(user_id: int):
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -93,15 +86,14 @@ async def get_user(user_id: int):
                 "energy_level": user.energy_level,
                 "last_passive_income": user.last_passive_income,
                 "luck_level": user.luck_level,
-                "referral_count": user.referral_count,      # ← ДОБАВЛЕНО
-                "referral_earnings": user.referral_earnings, # ← ДОБАВЛЕНО
+                "referral_count": user.referral_count,
+                "referral_earnings": user.referral_earnings,
                 "extra_data": json.loads(user.extra_data)
-                
             }
         return None
 
+
 async def add_referral_bonus(referrer_id: int, new_user_id: int):
-    """Начисляет бонус за приглашённого друга"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(User).where(User.user_id == referrer_id)
@@ -121,8 +113,8 @@ async def add_referral_bonus(referrer_id: int, new_user_id: int):
         logging.info(f"✅ Реферальный бонус: {referrer_id} получил +{BONUS_AMOUNT} за {new_user_id}")
         logging.info(f"📊 Теперь у {referrer_id}: приглашено={referrer.referral_count}, заработано={referrer.referral_earnings}")
 
+
 async def get_completed_tasks(user_id: int):
-    """Получить список выполненных заданий пользователя"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(UserTask).where(UserTask.user_id == user_id)
@@ -130,52 +122,9 @@ async def get_completed_tasks(user_id: int):
         tasks = result.scalars().all()
         return [task.task_id for task in tasks]
 
-async def add_completed_task(user_id: int, task_id: str):
-    """Отметить задание как выполненное"""
-    async with AsyncSessionLocal() as session:
-        # Проверяем, не выполнял ли уже
-        result = await session.execute(
-            select(UserTask).where(
-                UserTask.user_id == user_id,
-                UserTask.task_id == task_id
-            )
-        )
-        existing = result.scalar_one_or_none()
-        if existing:
-            return False
-        
-        new_task = UserTask(
-            user_id=user_id,
-            task_id=task_id
-        )
-        session.add(new_task)
-        await session.commit()
-        return True
-
-# ==================== ЗАДАНИЯ ====================
-
-class UserTask(Base):
-    __tablename__ = 'user_tasks'
-    
-    id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger, index=True)
-    task_id = Column(String)
-    completed_at = Column(DateTime, default=datetime.utcnow)
-    __table_args__ = {'extend_existing': True}
-
-async def get_completed_tasks(user_id: int):
-    """Получить список выполненных заданий пользователя"""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(UserTask).where(UserTask.user_id == user_id)
-        )
-        tasks = result.scalars().all()
-        return [task.task_id for task in tasks]
 
 async def add_completed_task(user_id: int, task_id: str):
-    """Отметить задание как выполненное"""
     async with AsyncSessionLocal() as session:
-        # Проверяем, не выполнял ли уже
         result = await session.execute(
             select(UserTask).where(
                 UserTask.user_id == user_id,
@@ -195,11 +144,8 @@ async def add_completed_task(user_id: int, task_id: str):
         return True
 
 
-# Добавить нового пользователя
-# Добавить нового пользователя
 async def add_user(user_id: int, username: str = None, referrer_id: int = None):
     async with AsyncSessionLocal() as session:
-        # Проверяем, есть ли уже
         result = await session.execute(
             select(User).where(User.user_id == user_id)
         )
@@ -207,7 +153,6 @@ async def add_user(user_id: int, username: str = None, referrer_id: int = None):
         if existing:
             return existing
         
-        # Создаём нового
         new_user = User(
             user_id=user_id,
             username=username or f"user_{user_id}",
@@ -221,26 +166,21 @@ async def add_user(user_id: int, username: str = None, referrer_id: int = None):
             profit_level=0,
             energy_level=0,
             luck_level=0,
-            last_passive_income=datetime.utcnow(),  # обрати внимание: datetime.utcnow()
+            last_passive_income=datetime.utcnow(),
             referrer_id=referrer_id
         )
         
         session.add(new_user)
         await session.commit()
         
-        # Если есть пригласивший, начисляем бонус
         if referrer_id:
             await add_referral_bonus(referrer_id, user_id)
         
         return new_user
 
 
-
-# Обновление пользователя
 async def update_user(user_id: int, data: dict):
-    """Обновляет данные пользователя"""
     async with AsyncSessionLocal() as session:
-        # Получаем пользователя
         result = await session.execute(
             select(User).where(User.user_id == user_id)
         )
@@ -249,7 +189,6 @@ async def update_user(user_id: int, data: dict):
         if not user:
             return None
 
-        # Обновляем поля из словаря
         if 'coins' in data:
             user.coins = data['coins']
         if 'energy' in data:
@@ -273,15 +212,4 @@ async def update_user(user_id: int, data: dict):
 
         await session.commit()
 
-        # Возвращаем обновленные данные
         return await get_user(user_id)
-    
-        
-        # Начисляем бонус (например, 1000 монет)
-        BONUS_AMOUNT = 1000
-        referrer.coins += BONUS_AMOUNT
-        referrer.referral_count += 1
-        referrer.referral_earnings += BONUS_AMOUNT
-        
-        await session.commit()
-        logging.info(f"✅ Реферальный бонус: {referrer_id} получил +{BONUS_AMOUNT} за {new_user_id}")
