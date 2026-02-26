@@ -81,6 +81,8 @@ async def get_user(user_id: int):
                 "energy_level": user.energy_level,
                 "last_passive_income": user.last_passive_income,
                 "luck_level": user.luck_level,
+                "referral_count": user.referral_count,      # ← ДОБАВЛЕНО
+                "referral_earnings": user.referral_earnings, # ← ДОБАВЛЕНО
                 "extra_data": json.loads(user.extra_data)
                 
             }
@@ -89,24 +91,23 @@ async def get_user(user_id: int):
 async def add_referral_bonus(referrer_id: int, new_user_id: int):
     """Начисляет бонус за приглашённого друга"""
     async with AsyncSessionLocal() as session:
-        # Получаем пригласившего
         result = await session.execute(
             select(User).where(User.user_id == referrer_id)
         )
         referrer = result.scalar_one_or_none()
         
         if not referrer:
-            print(f"⚠️ Реферер {referrer_id} не найден при начислении бонуса")
+            logging.warning(f"⚠️ Реферер {referrer_id} не найден")
             return
         
-        # Начисляем бонус (1000 монет)
         BONUS_AMOUNT = 1000
         referrer.coins += BONUS_AMOUNT
         referrer.referral_count += 1
         referrer.referral_earnings += BONUS_AMOUNT
         
         await session.commit()
-        print(f"✅ Реферальный бонус: {referrer_id} получил +{BONUS_AMOUNT} за {new_user_id}")
+        logging.info(f"✅ Реферальный бонус: {referrer_id} получил +{BONUS_AMOUNT} за {new_user_id}")
+        logging.info(f"📊 Теперь у {referrer_id}: приглашено={referrer.referral_count}, заработано={referrer.referral_earnings}")
 
 
 # Добавить нового пользователя

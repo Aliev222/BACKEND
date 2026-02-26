@@ -287,9 +287,6 @@ async def get_referral_data(user_id: int):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Здесь должна быть логика подсчёта из базы
-    # Вместо заглушки возвращаем реальные данные
-    
     return {
         "count": user.get("referral_count", 0),
         "earnings": user.get("referral_earnings", 0)
