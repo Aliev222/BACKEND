@@ -285,6 +285,21 @@ async def migrate_referrals():
             }
     except Exception as e:
         return {"status": "error", "error": str(e)}
+    
+
+@app.post("/api/reward-video")
+async def reward_video(data: dict):
+    user_id = data.get('user_id')
+    reward = data.get('reward', 5000)
+    
+    user = await get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user['coins'] += reward
+    await update_user(user_id, {"coins": user['coins']})
+    
+    return {"success": True, "coins": user['coins']}
 
 # ==================== РЕФЕРАЛЫ ====================
 @app.get("/api/referral-data/{user_id}")
