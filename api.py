@@ -6,6 +6,7 @@ import uvicorn
 import random
 from datetime import datetime, timedelta
 import os
+from typing import Optional
 
 from DATABASE.base import get_user, add_user as create_user, update_user, init_db
 
@@ -50,7 +51,14 @@ class UserIdRequest(BaseModel):
 class GameRequest(BaseModel):
     user_id: int
     bet: int
-    prediction: str = None
+    color: Optional[str] = None
+    bet_type: Optional[str] = None
+    bet_value: Optional[int] = None
+    prediction: Optional[str] = None
+
+class TaskCompleteRequest(BaseModel):
+    user_id: int
+    task_id: str
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
@@ -246,11 +254,9 @@ async def migrate_referrals():
         import os
 
         db_url = os.getenv("DATABASE_URL", "postgresql+asyncpg://...")
-        # Создаём синхронный движок для миграции
         sync_engine = create_engine(db_url.replace("+asyncpg", ""))
 
         with sync_engine.connect() as conn:
-            # Проверяем, какие колонки уже есть
             inspector = inspect(sync_engine)
             columns = [col['name'] for col in inspector.get_columns('users')]
 
@@ -278,11 +284,9 @@ async def migrate_referrals():
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-
 # ==================== РЕФЕРАЛЫ ====================
 @app.get("/api/referral-data/{user_id}")
 async def get_referral_data(user_id: int):
-    """Получить реферальную статистику пользователя"""
     user = await get_user(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -294,14 +298,102 @@ async def get_referral_data(user_id: int):
 
 # ==================== ЗАДАНИЯ ====================
 @app.get("/api/tasks/{user_id}")
-async def get_tasks(user_id: int, category: str = "all"):
-    # Здесь должна быть логика получения заданий
-    return []
+async def get_tasks(user_id: int):
+    """Получить список доступных заданий"""
+    user = await get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Здесь должна быть логика получения статуса заданий из БД
+    # Для простоты пока возвращаем статичный список
+    
+    tasks = [
+        {
+            "id": "daily_bonus",
+            "title": "📅 Ежедневный бонус",
+            "description": "Заходи каждый день и получай награду",
+            "reward": "25000 монет",
+            "icon": "📅",
+            "completed": False,
+            "progress": 0,
+            "total": 1
+        },
+        {
+            "id": "energy_refill",
+            "title": "⚡ Бесконечная энергия",
+            "description": "5 минут без лимита энергии",
+            "reward": "⚡ 5 минут",
+            "icon": "⚡",
+            "completed": False,
+            "progress": 0,
+            "total": 1
+        },
+        {
+            "id": "link_click",
+            "title": "🔗 Переход по ссылке",
+            "description": "Кликни по ссылке и получи награду",
+            "reward": "25000 монет",
+            "icon": "🔗",
+            "completed": False,
+            "progress": 0,
+            "total": 1
+        },
+        {
+            "id": "invite_5_friends",
+            "title": "👥 Пригласи 5 друзей",
+            "description": "Приведи 5 друзей в игру",
+            "reward": "20000 монет",
+            "icon": "👥",
+            "completed": user.get("referral_count", 0) >= 5,
+            "progress": min(user.get("referral_count", 0), 5),
+            "total": 5
+        }
+    ]
+    
+    return tasks
 
-@app.post("/api/task/start/{task_id}")
-async def start_task(task_id: str, data: dict):
-    # Здесь должна быть логика старта задания
-    return {"redirect": "https://example.com"}
+@app.post("/api/complete-task")
+async def complete_task(request: TaskCompleteRequest):
+    """Выполнить задание"""
+    user = await get_user(request.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    task_id = request.task_id
+    message = ""
+    updates = {}
+    
+    if task_id == "daily_bonus":
+        # Проверяем, можно ли получить бонус (раз в 24 часа)
+        # Здесь должна быть логика с last_daily_bonus
+        user["coins"] += 25000
+        message = "🎁 +25000 монет (ежедневный бонус)"
+        updates = {"coins": user["coins"]}
+        
+    elif task_id == "energy_refill":
+        # Бесконечная энергия на 5 минут
+        # Здесь нужно добавить поле unlimited_energy_until
+        message = "⚡ Бесконечная энергия активирована на 5 минут!"
+        
+    elif task_id == "link_click":
+        # Просто начисляем монеты
+        user["coins"] += 25000
+        message = "🔗 +25000 монет за переход по ссылке!"
+        updates = {"coins": user["coins"]}
+        
+    elif task_id == "invite_5_friends":
+        # Проверяем, пригласил ли 5 друзей
+        if user.get("referral_count", 0) >= 5:
+            user["coins"] += 20000
+            message = "👥 +20000 монет за 5 друзей!"
+            updates = {"coins": user["coins"]}
+        else:
+            raise HTTPException(status_code=400, detail="Недостаточно друзей")
+    
+    if updates:
+        await update_user(request.user_id, updates)
+    
+    return {"success": True, "message": message, "coins": user["coins"]}
 
 # ==================== МИНИ-ИГРЫ ====================
 @app.post("/api/game/coinflip")
@@ -319,7 +411,7 @@ async def play_coinflip(request: GameRequest):
         user["coins"] += request.bet
         message = f"🎉 Вы выиграли +{request.bet} монет!"
     else:
-        user["coins"] -= request.bot
+        user["coins"] -= request.bet
         message = f"😞 Вы проиграли {request.bet} монет"
     
     await update_user(request.user_id, {"coins": user["coins"]})
@@ -386,49 +478,6 @@ async def play_dice(request: GameRequest):
     await update_user(request.user_id, {"coins": user["coins"]})
     return {"coins": user["coins"], "dice1": dice1, "dice2": dice2, "message": message}
 
-@app.post("/api/game/wheel")
-async def play_wheel(request: GameRequest):
-    user = await get_user(request.user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    if user["coins"] < request.bet:
-        raise HTTPException(status_code=400, detail="Not enough coins")
-    if request.bet < 10:
-        raise HTTPException(status_code=400, detail="Minimum bet 10")
-    
-    # Секторы колеса (8 красных, 8 черных)
-    red_sectors = [1, 3, 5, 7, 9, 11, 13, 15]
-    black_sectors = [2, 4, 6, 8, 10, 12, 14, 16]
-    
-    # Выбираем случайный сектор
-    all_sectors = red_sectors + black_sectors
-    result = random.choice(all_sectors)
-    
-    # Определяем цвет результата
-    result_color = 'red' if result in red_sectors else 'black'
-    result_symbol = '🔴' if result_color == 'red' else '⚫'
-    
-    # Проверяем выигрыш
-    win = (request.color == result_color)
-    
-    if win:
-        win_amount = request.bet * 2
-        user["coins"] += win_amount
-        message = f"🎡 {result_symbol} Вы выиграли +{win_amount} монет!"
-    else:
-        user["coins"] -= request.bet
-        message = f"😞 {result_symbol} Вы проиграли {request.bet} монет"
-    
-    await update_user(request.user_id, {"coins": user["coins"]})
-    
-    return {
-        "coins": user["coins"],
-        "result": result,
-        "result_color": result_color,
-        "result_symbol": result_symbol,
-        "win": win,
-        "message": message
-    }
 @app.post("/api/game/roulette")
 async def play_roulette(request: GameRequest):
     user = await get_user(request.user_id)
@@ -439,14 +488,11 @@ async def play_roulette(request: GameRequest):
     if request.bet < 10:
         raise HTTPException(status_code=400, detail="Minimum bet 10")
     
-    # Определяем цвета чисел (европейская рулетка)
     red_numbers = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]
     black_numbers = [2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35]
     
-    # Результат
     result = random.randint(0, 36)
     
-    # Определяем цвет
     if result == 0:
         result_color = 'green'
         result_symbol = '🟢'
@@ -457,7 +503,6 @@ async def play_roulette(request: GameRequest):
         result_color = 'black'
         result_symbol = '⚫'
     
-    # Проверяем выигрыш
     win = False
     multiplier = 0
     
@@ -489,46 +534,6 @@ async def play_roulette(request: GameRequest):
         "win": win,
         "message": message
     }
-
-@app.get("/api/migrate-referrals")
-async def migrate_referrals():
-    """Добавляет реферальные колонки в таблицу users"""
-    try:
-        from sqlalchemy import create_engine, inspect, text
-        import os
-
-        db_url = os.getenv("DATABASE_URL", "postgresql+asyncpg://...")
-        # Создаём синхронный движок для миграции
-        sync_engine = create_engine(db_url.replace("+asyncpg", ""))
-
-        with sync_engine.connect() as conn:
-            # Проверяем, какие колонки уже есть
-            inspector = inspect(sync_engine)
-            columns = [col['name'] for col in inspector.get_columns('users')]
-
-            added = []
-            if 'referrer_id' not in columns:
-                conn.execute(text("ALTER TABLE users ADD COLUMN referrer_id BIGINT"))
-                added.append('referrer_id')
-            if 'referral_count' not in columns:
-                conn.execute(text("ALTER TABLE users ADD COLUMN referral_count INTEGER DEFAULT 0"))
-                added.append('referral_count')
-            if 'referral_earnings' not in columns:
-                conn.execute(text("ALTER TABLE users ADD COLUMN referral_earnings BIGINT DEFAULT 0"))
-                added.append('referral_earnings')
-            if 'created_at' not in columns:
-                conn.execute(text("ALTER TABLE users ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
-                added.append('created_at')
-
-            conn.commit()
-
-            return {
-                "status": "success",
-                "message": f"Колонки добавлены: {added}",
-                "columns": columns + added
-            }
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
 
 # ==================== ЗАПУСК ====================
 
