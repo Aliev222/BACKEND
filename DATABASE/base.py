@@ -52,6 +52,18 @@ class User(Base):
     
     luck_level = Column(Integer, default=0)  # уровень удачи
 
+    class UserTask(Base):
+        __tablename__ = 'user_tasks'
+        
+        id = Column(Integer, primary_key=True)
+        user_id = Column(BigInteger, index=True)  # ID пользователя
+        task_id = Column(String)  # 'daily_bonus', 'energy_refill', 'link_click', 'invite_5_friends'
+        completed_at = Column(DateTime, default=datetime.utcnow)  # когда выполнил
+
+
+
+
+
 
 # Создание таблиц
 async def init_db():
@@ -108,6 +120,78 @@ async def add_referral_bonus(referrer_id: int, new_user_id: int):
         await session.commit()
         logging.info(f"✅ Реферальный бонус: {referrer_id} получил +{BONUS_AMOUNT} за {new_user_id}")
         logging.info(f"📊 Теперь у {referrer_id}: приглашено={referrer.referral_count}, заработано={referrer.referral_earnings}")
+
+async def get_completed_tasks(user_id: int):
+    """Получить список выполненных заданий пользователя"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(UserTask).where(UserTask.user_id == user_id)
+        )
+        tasks = result.scalars().all()
+        return [task.task_id for task in tasks]
+
+async def add_completed_task(user_id: int, task_id: str):
+    """Отметить задание как выполненное"""
+    async with AsyncSessionLocal() as session:
+        # Проверяем, не выполнял ли уже
+        result = await session.execute(
+            select(UserTask).where(
+                UserTask.user_id == user_id,
+                UserTask.task_id == task_id
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            return False
+        
+        new_task = UserTask(
+            user_id=user_id,
+            task_id=task_id
+        )
+        session.add(new_task)
+        await session.commit()
+        return True
+
+# ==================== ЗАДАНИЯ ====================
+
+class UserTask(Base):
+    __tablename__ = 'user_tasks'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, index=True)
+    task_id = Column(String)
+    completed_at = Column(DateTime, default=datetime.utcnow)
+
+async def get_completed_tasks(user_id: int):
+    """Получить список выполненных заданий пользователя"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(UserTask).where(UserTask.user_id == user_id)
+        )
+        tasks = result.scalars().all()
+        return [task.task_id for task in tasks]
+
+async def add_completed_task(user_id: int, task_id: str):
+    """Отметить задание как выполненное"""
+    async with AsyncSessionLocal() as session:
+        # Проверяем, не выполнял ли уже
+        result = await session.execute(
+            select(UserTask).where(
+                UserTask.user_id == user_id,
+                UserTask.task_id == task_id
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            return False
+        
+        new_task = UserTask(
+            user_id=user_id,
+            task_id=task_id
+        )
+        session.add(new_task)
+        await session.commit()
+        return True
 
 
 # Добавить нового пользователя

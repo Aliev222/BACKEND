@@ -10,6 +10,8 @@ from typing import Optional
 
 from DATABASE.base import get_user, add_user as create_user, update_user, init_db
 
+from DATABASE.base import get_user, add_user as create_user, update_user, init_db, get_completed_tasks, add_completed_task
+
 # ==================== КОНФИГУРАЦИЯ ====================
 
 UPGRADE_PRICES = {
@@ -354,7 +356,6 @@ async def get_tasks(user_id: int):
 
 @app.post("/api/complete-task")
 async def complete_task(request: TaskCompleteRequest):
-    """Выполнить задание"""
     user = await get_user(request.user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -364,29 +365,39 @@ async def complete_task(request: TaskCompleteRequest):
     updates = {}
     
     if task_id == "daily_bonus":
-        # Проверяем, можно ли получить бонус (раз в 24 часа)
-        # Здесь должна быть логика с last_daily_bonus
+        # Ежедневный бонус (раз в 24 часа)
+        # Здесь проверка по времени
         user["coins"] += 25000
         message = "🎁 +25000 монет (ежедневный бонус)"
         updates = {"coins": user["coins"]}
         
     elif task_id == "energy_refill":
-        # Бесконечная энергия на 5 минут
-        # Здесь нужно добавить поле unlimited_energy_until
+        # Бесконечная энергия (ОДИН РАЗ)
+        completed = await get_completed_tasks(request.user_id)
+        if "energy_refill" in completed:
+            raise HTTPException(status_code=400, detail="Уже активировано")
+        
         message = "⚡ Бесконечная энергия активирована на 5 минут!"
+        await add_completed_task(request.user_id, task_id)
         
     elif task_id == "link_click":
-        # Просто начисляем монеты
+        # 👇 ПЕРЕХОД ПО ССЫЛКЕ - БЕЗ ОГРАНИЧЕНИЙ!
         user["coins"] += 25000
-        message = "🔗 +25000 монет за переход по ссылке!"
+        message = "🔗 +25000 монет за переход!"
         updates = {"coins": user["coins"]}
+        # НЕ добавляем в completed_tasks!
         
     elif task_id == "invite_5_friends":
-        # Проверяем, пригласил ли 5 друзей
+        # Пригласить 5 друзей (ОДИН РАЗ)
+        completed = await get_completed_tasks(request.user_id)
+        if "invite_5_friends" in completed:
+            raise HTTPException(status_code=400, detail="Уже выполнено")
+        
         if user.get("referral_count", 0) >= 5:
             user["coins"] += 20000
             message = "👥 +20000 монет за 5 друзей!"
             updates = {"coins": user["coins"]}
+            await add_completed_task(request.user_id, task_id)
         else:
             raise HTTPException(status_code=400, detail="Недостаточно друзей")
     
