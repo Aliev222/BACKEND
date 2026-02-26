@@ -161,6 +161,7 @@ class UserTask(Base):
     user_id = Column(BigInteger, index=True)
     task_id = Column(String)
     completed_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = {'extend_existing': True}
 
 async def get_completed_tasks(user_id: int):
     """Получить список выполненных заданий пользователя"""
