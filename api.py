@@ -435,24 +435,23 @@ async def play_roulette(request: GameRequest):
     if request.bet < 10:
         raise HTTPException(status_code=400, detail="Minimum bet 10")
     
-    # Секторы рулетки (0-36)
+    # Определяем цвета чисел (европейская рулетка)
     red_numbers = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]
     black_numbers = [2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35]
-    green_numbers = [0]
     
     # Результат
     result = random.randint(0, 36)
     
     # Определяем цвет
-    if result in red_numbers:
-        result_color = 'red'
-        result_symbol = '🔴'
-    elif result in black_numbers:
-        result_color = 'black'
-        result_symbol = '⚫'
-    else:
+    if result == 0:
         result_color = 'green'
         result_symbol = '🟢'
+    elif result in red_numbers:
+        result_color = 'red'
+        result_symbol = '🔴'
+    else:
+        result_color = 'black'
+        result_symbol = '⚫'
     
     # Проверяем выигрыш
     win = False
@@ -461,20 +460,20 @@ async def play_roulette(request: GameRequest):
     if request.bet_type == 'number' and request.bet_value == result:
         win = True
         multiplier = 35
-    elif request.bet_type == result_color:
-        win = True
-        multiplier = 2
     elif request.bet_type == 'green' and result_color == 'green':
         win = True
         multiplier = 35
+    elif request.bet_type == result_color:
+        win = True
+        multiplier = 2
     
     if win:
         win_amount = request.bet * multiplier
         user["coins"] += win_amount
-        message = f"{result_symbol} {result} - Вы выиграли +{win_amount} монет! (x{multiplier})"
+        message = f"🎉 {result_symbol} {result} - Вы выиграли +{win_amount} монет! (x{multiplier})"
     else:
         user["coins"] -= request.bet
-        message = f"{result_symbol} {result} - Вы проиграли {request.bet} монет"
+        message = f"😞 {result_symbol} {result} - Вы проиграли {request.bet} монет"
     
     await update_user(request.user_id, {"coins": user["coins"]})
     
@@ -482,6 +481,7 @@ async def play_roulette(request: GameRequest):
         "coins": user["coins"],
         "result_number": result,
         "result_color": result_color,
+        "result_symbol": result_symbol,
         "win": win,
         "message": message
     }
