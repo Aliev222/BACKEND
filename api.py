@@ -313,15 +313,22 @@ async def play_coinflip(request: GameRequest):
         raise HTTPException(status_code=400, detail="Not enough coins")
     if request.bet < 10:
         raise HTTPException(status_code=400, detail="Minimum bet 10")
+    
     win = random.choice([True, False])
     if win:
         user["coins"] += request.bet
-        message = f"🪙 Вы выиграли +{request.bet} монет!"
+        message = f"🎉 Вы выиграли +{request.bet} монет!"
     else:
-        user["coins"] -= request.bet
+        user["coins"] -= request.bot
         message = f"😞 Вы проиграли {request.bet} монет"
+    
     await update_user(request.user_id, {"coins": user["coins"]})
-    return {"coins": user["coins"], "result": "win" if win else "lose", "message": message}
+    
+    return {
+        "coins": user["coins"],
+        "result": "win" if win else "lose",
+        "message": message
+    }
 
 @app.post("/api/game/slots")
 async def play_slots(request: GameRequest):
