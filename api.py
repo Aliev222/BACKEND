@@ -42,7 +42,8 @@ app.add_middleware(
 class ClickRequest(BaseModel):
     user_id: int
     clicks: int
-
+    energy_cost: int = 1
+    
 class UpgradeRequest(BaseModel):
     user_id: int
     boost_type: str
@@ -134,15 +135,20 @@ async def process_click(request: ClickRequest):
         raise HTTPException(status_code=404, detail="User not found")
 
     base_tap = get_tap_value(user["multitap_level"])
-    if user["energy"] < base_tap:
+    
+    # ✅ ВСЕГДА тратим 1 энергию на клик
+    if user["energy"] < 1:
         raise HTTPException(status_code=400, detail="Not enough energy")
 
+    # Удача (криты)
     multiplier, crit_type = get_luck_multiplier(user.get("luck_level", 0))
     actual_gain = base_tap * multiplier
 
+    # Обновляем баланс
     user["coins"] += actual_gain
-    user["energy"] -= base_tap
-
+    user["energy"] -= 1  # ✅ ТОЛЬКО 1 энергия
+    
+    # Сохраняем в БД
     await update_user(request.user_id, {
         "coins": user["coins"],
         "energy": user["energy"]
@@ -209,7 +215,10 @@ async def recover_energy(data: UserIdRequest):
         raise HTTPException(status_code=404, detail="User not found")
     if user["energy"] >= user["max_energy"]:
         return {"energy": user["energy"]}
-    recovery = max(1, int(user["max_energy"] * 0.02))
+    
+    # ✅ ИСПРАВЛЕНО: всегда +1 в секунду
+    recovery = 1  # вместо 2% от максимума
+    
     new_energy = min(user["max_energy"], user["energy"] + recovery)
     await update_user(data.user_id, {"energy": new_energy})
     return {"energy": new_energy}
