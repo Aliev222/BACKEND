@@ -27,6 +27,23 @@ ENERGY_VALUES = [1000, 1100, 1250, 1500, 2000, 3000, 5000, 8000, 13000, 21000, 3
 
 app = FastAPI(title="Ryoho Clicker API")
 
+@app.get("/health")
+@app.get("/")
+async def root():
+    return {
+        "status": "ok", 
+        "message": "Ryoho Clicker API is running",
+        "database": "connected" if await check_db() else "disconnected"
+    }
+
+async def check_db():
+    try:
+        await get_user(0)  # пробуем подключиться
+        return True
+    except:
+        return False
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://ryoho-eta.vercel.app", "http://localhost:3000"],
