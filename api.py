@@ -66,9 +66,8 @@ class TaskCompleteRequest(BaseModel):
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def get_tap_value(level: int) -> int:
-    if level >= len(TAP_VALUES):
-        return TAP_VALUES[-1] * (2 ** (level - len(TAP_VALUES) + 1))
-    return TAP_VALUES[level]
+    
+    return 1 + level
 
 def get_hour_value(level: int) -> int:
     if level >= len(HOUR_VALUES):
