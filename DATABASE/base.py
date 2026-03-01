@@ -95,6 +95,19 @@ async def get_user(user_id: int):
 
 async def add_referral_bonus(referrer_id: int, new_user_id: int):
     async with AsyncSessionLocal() as session:
+        # 🔍 ПРОВЕРКА: не получал ли уже реферер бонус за этого пользователя
+        # Смотрим на нового пользователя - есть ли у него уже реферер
+        result = await session.execute(
+            select(User).where(User.user_id == new_user_id)
+        )
+        new_user = result.scalar_one_or_none()
+        
+        # Если у нового пользователя уже есть referrer_id, значит бонус уже начислен
+        if new_user and new_user.referrer_id is not None:
+            logging.info(f"⏭️ Бонус уже начислялся за {new_user_id} (реферер: {new_user.referrer_id})")
+            return
+        
+        # 🔍 ПРОВЕРКА: существует ли реферер
         result = await session.execute(
             select(User).where(User.user_id == referrer_id)
         )
@@ -104,6 +117,7 @@ async def add_referral_bonus(referrer_id: int, new_user_id: int):
             logging.warning(f"⚠️ Реферер {referrer_id} не найден")
             return
         
+        # ✅ НАЧИСЛЕНИЕ БОНУСА
         BONUS_AMOUNT = 1000
         referrer.coins += BONUS_AMOUNT
         referrer.referral_count += 1
@@ -172,9 +186,14 @@ async def add_user(user_id: int, username: str = None, referrer_id: int = None):
         
         session.add(new_user)
         await session.commit()
+        logging.info(f"✅ Пользователь {user_id} создан, referrer_id={referrer_id}")
         
+        # ВАЖНО: начисляем бонус ТОЛЬКО если есть реферер
         if referrer_id:
+            logging.info(f"🎯 Попытка начисления бонуса: реферер {referrer_id} за реферала {user_id}")
             await add_referral_bonus(referrer_id, user_id)
+        else:
+            logging.info(f"ℹ️ Пользователь {user_id} создан без реферера")
         
         return new_user
 

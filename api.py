@@ -106,13 +106,26 @@ def get_luck_multiplier(luck_level: int) -> tuple[int, int]:
 
 # ==================== API ЭНДПОИНТЫ ====================
 
+@app.get("/api/check-referral/{user_id}")
+async def check_referral(user_id: int):
+    """Проверить, есть ли у пользователя реферер"""
+    user = await get_user(user_id)
+    if not user:
+        return {"has_referrer": False}
+    
+    return {
+        "has_referrer": user.get("referrer_id") is not None,
+        "referrer_id": user.get("referrer_id")
+    }
+
+
 @app.get("/api/user/{user_id}")
 async def get_user_data(user_id: int):
     user = await get_user(user_id)
     if not user:
-        await create_user(user_id)
-        user = await get_user(user_id)
-
+        # Вместо создания - возвращаем ошибку
+        raise HTTPException(status_code=404, detail="User not found. Please register first.")
+    
     luck_chances = get_luck_chances(user.get("luck_level", 0))
 
     return {
@@ -127,6 +140,8 @@ async def get_user_data(user_id: int):
         "luck_level": user.get("luck_level", 0),
         "luck_chances": luck_chances
     }
+
+
 
 @app.post("/api/click")
 async def process_click(request: ClickRequest):
@@ -569,6 +584,39 @@ async def play_roulette(request: GameRequest):
         "win": win,
         "message": message
     }
+
+class RegisterRequest(BaseModel):
+    user_id: int
+    username: Optional[str] = None
+    referrer_id: Optional[int] = None
+
+@app.post("/api/register")
+async def register_user(request: RegisterRequest):
+    """Регистрация нового пользователя с рефералом"""
+    # Проверяем, есть ли уже такой пользователь
+    existing = await get_user(request.user_id)
+    if existing:
+        # Пользователь уже есть, просто возвращаем данные
+        return {"status": "exists", "user": existing}
+    
+    # Создаем нового пользователя с referrer_id
+    await create_user(
+        user_id=request.user_id, 
+        username=request.username,
+        referrer_id=request.referrer_id
+    )
+    
+    user = await get_user(request.user_id)
+    
+    # Если был реферер, бонус начислится автоматически в add_user
+    if request.referrer_id:
+        return {
+            "status": "created_with_referral",
+            "user": user,
+            "message": f"Добро пожаловать! Вас пригласил {request.referrer_id}"
+        }
+    
+    return {"status": "created", "user": user}
 
 # ==================== ЗАПУСК ====================
 
