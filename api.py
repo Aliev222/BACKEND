@@ -102,7 +102,21 @@ def get_luck_multiplier(luck_level: int) -> tuple[int, int]:
     elif rand < chances["x5"] + chances["x3"] + chances["x2"]:
         return 2, 2
     return 1, 0
+SKIN_BONUSES = {
+    'default_cat': {'type': 'multiplier', 'value': 1.0},
+    'black_cat': {'type': 'multiplier', 'value': 1.1},
+    'white_cat': {'type': 'multiplier', 'value': 1.15},
+    'gold_cat': {'type': 'multiplier', 'value': 1.5},
+    'space_cat': {'type': 'interval', 'value': 8},
+    'ninja_cat': {'type': 'multiplier', 'value': 2.0},
+    'wizard_cat': {'type': 'both', 'multiplier': 1.8, 'interval': 7},
+    'rainbow_cat': {'type': 'multiplier', 'value': 3.0},
+    'alien_cat': {'type': 'interval', 'value': 5}
+}
 
+async def get_skin_bonus(skin_id: str):
+    """Возвращает бонус скина для пассивного дохода"""
+    return SKIN_BONUSES.get(skin_id, {'type': 'multiplier', 'value': 1.0})
 # ==================== API ЭНДПОИНТЫ ====================
 
 @app.get("/api/check-referral/{user_id}")
@@ -798,6 +812,61 @@ async def get_mega_boost_status(user_id: int):
             }
     
     return {"active": False}
+
+class PassiveIncomeRequest(BaseModel):
+    user_id: int
+    skin_bonus: Optional[dict] = None  # бонус приходит с клиента
+
+@app.post("/api/passive-income")
+async def passive_income(request: PassiveIncomeRequest):
+    user = await get_user(request.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    last_income = user.get('last_passive_income')
+    now = datetime.utcnow()
+    
+    # Базовый интервал 10 минут
+    base_interval = timedelta(minutes=10)
+    
+    # Используем бонус с клиента
+    multiplier = 1.0
+    interval = base_interval
+    
+    if request.skin_bonus:
+        bonus_type = request.skin_bonus.get('type')
+        
+        if bonus_type == 'multiplier':
+            multiplier = request.skin_bonus.get('value', 1.0)
+        elif bonus_type == 'interval':
+            interval = timedelta(minutes=request.skin_bonus.get('value', 10))
+        elif bonus_type == 'both':
+            multiplier = request.skin_bonus.get('multiplier', 1.0)
+            interval = timedelta(minutes=request.skin_bonus.get('interval', 10))
+    
+    # Расчет дохода
+    if not last_income or (now - last_income) >= interval:
+        minutes_passed = (now - last_income).total_seconds() / 60 if last_income else 0
+        cycles = max(1, int(minutes_passed // 10)) if last_income else 1
+        
+        hour_value = get_hour_value(user["profit_level"])
+        base_income_per_10min = hour_value // 6
+        total_income = int(base_income_per_10min * cycles * multiplier)
+        
+        if total_income > 0:
+            user["coins"] += total_income
+            await update_user(request.user_id, {
+                "coins": user["coins"],
+                "last_passive_income": now
+            })
+            
+            return {
+                "coins": user["coins"],
+                "income": total_income,
+                "message": f"💰 +{total_income} монет (бонус от скина x{multiplier})"
+            }
+    
+    return {"coins": user["coins"], "income": 0}
 
 # ==================== ЗАПУСК ====================
 
