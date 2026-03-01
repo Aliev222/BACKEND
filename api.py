@@ -148,34 +148,60 @@ async def process_click(request: ClickRequest):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Проверяем активный МЕГА-БУСТ
+    extra = user.get("extra_data", {})
+    if not isinstance(extra, dict):
+        extra = {}
+    
+    active_boosts = extra.get("active_boosts", {})
+    now = datetime.utcnow()
+    
+    mega_boost_active = False
+    if "mega_boost" in active_boosts:
+        expires = datetime.fromisoformat(active_boosts["mega_boost"]["expires_at"])
+        if now <= expires:
+            mega_boost_active = True  # Дает и x2, и бесконечную энергию
+        else:
+            del active_boosts["mega_boost"]
+            extra["active_boosts"] = active_boosts
+            await update_user(request.user_id, {"extra_data": extra})
+    
     base_tap = get_tap_value(user["multitap_level"])
     
-    # ✅ ВСЕГДА тратим 1 энергию на клик
-    if user["energy"] < 1:
-        raise HTTPException(status_code=400, detail="Not enough energy")
-
     # Удача (криты)
     multiplier, crit_type = get_luck_multiplier(user.get("luck_level", 0))
+    
+    # Применяем x2 если буст активен
+    if mega_boost_active:
+        multiplier *= 2
+    
     actual_gain = base_tap * multiplier
-
+    
     # Обновляем баланс
     user["coins"] += actual_gain
-    user["energy"] -= 1  # ✅ ТОЛЬКО 1 энергия
+    
+    # Тратим энергию ТОЛЬКО если буст НЕ активен
+    if not mega_boost_active:
+        if user["energy"] < 1:
+            raise HTTPException(status_code=400, detail="Not enough energy")
+        user["energy"] -= 1
     
     # Сохраняем в БД
     await update_user(request.user_id, {
         "coins": user["coins"],
         "energy": user["energy"]
     })
-
+    
     return {
         "coins": user["coins"],
         "energy": user["energy"],
         "tap_value": base_tap,
         "multiplier": multiplier,
         "actual_gain": actual_gain,
-        "crit": crit_type
+        "crit": crit_type if multiplier > 1 and not mega_boost_active else 0,
+        "mega_boost_active": mega_boost_active
     }
+
 
 @app.post("/api/upgrade")
 async def process_upgrade(request: UpgradeRequest):
@@ -323,6 +349,80 @@ async def reward_video(data: dict):
     await update_user(user_id, {"coins": user['coins']})
     
     return {"success": True, "coins": user['coins']}
+
+# ==================== БУСТЫ ====================
+
+class BoostActivateRequest(BaseModel):
+    user_id: int
+    # Один тип буста, который включает всё
+
+@app.post("/api/activate-boost")
+async def activate_boost(request: BoostActivateRequest):
+    """Активирует МЕГА-БУСТ: x2 монет + бесконечная энергия на 2 минуты"""
+    user = await get_user(request.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Получаем текущие бусты из extra_data
+    extra = user.get("extra_data", {})
+    if not isinstance(extra, dict):
+        extra = {}
+    
+    active_boosts = extra.get("active_boosts", {})
+    now = datetime.utcnow()
+    
+    # Проверяем, не активен ли уже буст
+    if "mega_boost" in active_boosts:
+        expires = datetime.fromisoformat(active_boosts["mega_boost"]["expires_at"])
+        if now < expires:
+            raise HTTPException(status_code=400, detail="Буст уже активен!")
+    
+    # Активируем МЕГА-БУСТ на 2 минуты
+    active_boosts["mega_boost"] = {
+        "active": True,
+        "expires_at": (now + timedelta(minutes=2)).isoformat()
+    }
+    
+    # Сохраняем в extra_data
+    extra["active_boosts"] = active_boosts
+    await update_user(request.user_id, {"extra_data": extra})
+    
+    return {
+        "success": True,
+        "message": "🔥⚡ МЕГА-БУСТ активирован на 2 минуты! x2 монет + бесконечная энергия",
+        "expires_at": active_boosts["mega_boost"]["expires_at"]
+    }
+
+
+@app.get("/api/boosts/{user_id}")
+async def get_boosts(user_id: int):
+    """Получить статус активного буста"""
+    user = await get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    extra = user.get("extra_data", {})
+    if not isinstance(extra, dict):
+        extra = {}
+    
+    active_boosts = extra.get("active_boosts", {})
+    now = datetime.utcnow()
+    
+    # Проверяем и очищаем просроченный буст
+    changed = False
+    if "mega_boost" in active_boosts:
+        expires = datetime.fromisoformat(active_boosts["mega_boost"]["expires_at"])
+        if now > expires:
+            del active_boosts["mega_boost"]
+            changed = True
+    
+    if changed:
+        extra["active_boosts"] = active_boosts
+        await update_user(user_id, {"extra_data": extra})
+    
+    return {
+        "mega_boost": active_boosts.get("mega_boost")
+    }
 
 # ==================== РЕФЕРАЛЫ ====================
 @app.get("/api/referral-data/{user_id}")
@@ -616,6 +716,88 @@ async def register_user(request: RegisterRequest):
         }
     
     return {"status": "created", "user": user}
+
+
+class MegaBoostActivateRequest(BaseModel):
+    user_id: int
+
+@app.post("/api/activate-mega-boost")
+async def activate_mega_boost(request: MegaBoostActivateRequest):
+    """Активирует МЕГА-БУСТ: x2 монет + бесконечная энергия на 2 минуты"""
+    user = await get_user(request.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Получаем текущие бусты из extra_data
+    extra = user.get("extra_data", {})
+    if not isinstance(extra, dict):
+        extra = {}
+    
+    active_boosts = extra.get("active_boosts", {})
+    now = datetime.utcnow()
+    
+    # Проверяем, не активен ли уже буст
+    if "mega_boost" in active_boosts:
+        expires = datetime.fromisoformat(active_boosts["mega_boost"]["expires_at"])
+        if now < expires:
+            # Возвращаем оставшееся время
+            remaining = int((expires - now).total_seconds())
+            return {
+                "success": False,
+                "message": f"Буст уже активен! Осталось {remaining // 60}:{remaining % 60:02d}",
+                "already_active": True,
+                "expires_at": active_boosts["mega_boost"]["expires_at"]
+            }
+    
+    # Активируем МЕГА-БУСТ на 2 минуты
+    expires_at = (now + timedelta(minutes=2)).isoformat()
+    active_boosts["mega_boost"] = {
+        "active": True,
+        "expires_at": expires_at
+    }
+    
+    # Сохраняем в extra_data
+    extra["active_boosts"] = active_boosts
+    await update_user(request.user_id, {"extra_data": extra})
+    
+    return {
+        "success": True,
+        "message": "🔥⚡ МЕГА-БУСТ активирован на 2 минуты! x2 монет + бесконечная энергия",
+        "expires_at": expires_at
+    }
+
+
+@app.get("/api/mega-boost-status/{user_id}")
+async def get_mega_boost_status(user_id: int):
+    """Получить статус МЕГА-БУСТА"""
+    user = await get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    extra = user.get("extra_data", {})
+    if not isinstance(extra, dict):
+        extra = {}
+    
+    active_boosts = extra.get("active_boosts", {})
+    now = datetime.utcnow()
+    
+    # Проверяем и очищаем просроченный буст
+    if "mega_boost" in active_boosts:
+        expires = datetime.fromisoformat(active_boosts["mega_boost"]["expires_at"])
+        if now > expires:
+            del active_boosts["mega_boost"]
+            extra["active_boosts"] = active_boosts
+            await update_user(user_id, {"extra_data": extra})
+            return {"active": False}
+        else:
+            remaining = int((expires - now).total_seconds())
+            return {
+                "active": True,
+                "expires_at": active_boosts["mega_boost"]["expires_at"],
+                "remaining_seconds": remaining
+            }
+    
+    return {"active": False}
 
 # ==================== ЗАПУСК ====================
 
