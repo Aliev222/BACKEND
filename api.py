@@ -8,8 +8,6 @@ from datetime import datetime, timedelta
 import os
 from typing import Optional
 
-from DATABASE.base import get_user, add_user as create_user, update_user, init_db
-
 from DATABASE.base import get_user, add_user as create_user, update_user, init_db, get_completed_tasks, add_completed_task
 
 # ==================== КОНФИГУРАЦИЯ ====================
@@ -277,28 +275,6 @@ async def recover_energy(data: UserIdRequest):
     await update_user(data.user_id, {"energy": new_energy})
     return {"energy": new_energy}
 
-@app.post("/api/passive-income")
-async def passive_income(request: UserIdRequest):
-    user = await get_user(request.user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    last_income = user.get('last_passive_income')
-    now = datetime.utcnow()
-    if not last_income or (now - last_income) >= timedelta(minutes=10):
-        hour_value = get_hour_value(user["profit_level"])
-        income = hour_value // 6
-        if income > 0:
-            user["coins"] += income
-            await update_user(request.user_id, {
-                "coins": user["coins"],
-                "last_passive_income": now
-            })
-            return {
-                "coins": user["coins"],
-                "income": income,
-                "message": f"💰 +{income} монет (10 мин)"
-            }
-    return {"coins": user["coins"], "income": 0}
 
 @app.get("/api/upgrade-prices/{user_id}")
 async def get_upgrade_prices(user_id: int):
