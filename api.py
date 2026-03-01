@@ -30,18 +30,21 @@ app = FastAPI(title="Ryoho Clicker API")
 @app.get("/health")
 @app.get("/")
 async def root():
+    # Простой ответ без проверки БД
     return {
         "status": "ok", 
         "message": "Ryoho Clicker API is running",
-        "database": "connected" if await check_db() else "disconnected"
+        "timestamp": datetime.utcnow().isoformat()
     }
 
-async def check_db():
+@app.get("/api/health/db")
+async def check_db_endpoint():
+    """Отдельный эндпоинт для проверки БД"""
     try:
-        await get_user(0)  # пробуем подключиться
-        return True
-    except:
-        return False
+        await get_user(0)
+        return {"database": "connected"}
+    except Exception as e:
+        return {"database": "disconnected", "error": str(e)}
 
 
 app.add_middleware(
@@ -864,6 +867,5 @@ async def passive_income(request: PassiveIncomeRequest):
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
-    asyncio.run(init_db())
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
