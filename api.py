@@ -840,6 +840,7 @@ async def passive_income(request: PassiveIncomeRequest):
     
     return {"coins": user["coins"], "income": 0}
 
+
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
