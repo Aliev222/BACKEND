@@ -13,15 +13,14 @@ from DATABASE.base import get_user, add_user as create_user, update_user, init_d
 # ==================== КОНФИГУРАЦИЯ ====================
 
 UPGRADE_PRICES = {
-    "multitap": [50, 200, 500, 2000, 8000, 32000, 128000, 512000, 2048000, 8192000],
-    "profit":   [100, 400, 1000, 4000, 16000, 64000, 256000, 1024000, 4096000, 16384000],
-    "energy":   [80, 300, 800, 3000, 12000, 48000, 192000, 768000, 3072000, 12288000],
-    "luck":     [500, 2000, 5000, 20000, 50000, 200000, 500000, 2000000, 5000000, 20000000],
+    "multitap": [100, 200, 600, 900, 1500, 2000, 4000, 7000, 10000, 20000, 30000, 40000, 50000, 100000],
+    "profit":   [100, 200,600, 900, 1500, 2000, 4000, 7000, 10000, 20000, 30000, 40000, 50000, 100000],
+    "energy":   [100, 200, 600, 900, 1500, 2000, 4000, 7000, 10000, 20000, 30000, 40000, 50000, 100000],
 }
 
-TAP_VALUES = [1, 2, 5, 10, 20, 40, 80, 160, 320, 640, 1280]
-HOUR_VALUES = [100, 150, 250, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000]
-ENERGY_VALUES = [1000, 1100, 1250, 1500, 2000, 3000, 5000, 8000, 13000, 21000, 34000]
+
+HOUR_VALUES = [100, 150, 250, 500, 1000, 1250, 1500, 1800, 2000, 2500, 3000]
+ENERGY_VALUES = [100, 200, 300, 500, 650, 700, 850, 1000, 1150, 1200, 1400]
 
 # ==================== ИНИЦИАЛИЗАЦИЯ ====================
 
@@ -97,29 +96,8 @@ def get_max_energy(level: int) -> int:
         return ENERGY_VALUES[-1] * (1.5 ** (level - len(ENERGY_VALUES) + 1))
     return ENERGY_VALUES[level]
 
-def get_luck_chances(luck_level: int) -> dict:
-    if luck_level >= 10:
-        return {"x2": 25, "x3": 8, "x5": 2}
-    elif luck_level >= 7:
-        return {"x2": 18, "x3": 5, "x5": 1}
-    elif luck_level >= 5:
-        return {"x2": 15, "x3": 3, "x5": 0.5}
-    elif luck_level >= 3:
-        return {"x2": 12, "x3": 2, "x5": 0}
-    elif luck_level >= 1:
-        return {"x2": 5 + luck_level * 2, "x3": 0, "x5": 0}
-    return {"x2": 0, "x3": 0, "x5": 0}
 
-def get_luck_multiplier(luck_level: int) -> tuple[int, int]:
-    chances = get_luck_chances(luck_level)
-    rand = random.random() * 100
-    if rand < chances["x5"]:
-        return 5, 5
-    elif rand < chances["x5"] + chances["x3"]:
-        return 3, 3
-    elif rand < chances["x5"] + chances["x3"] + chances["x2"]:
-        return 2, 2
-    return 1, 0
+
 SKIN_BONUSES = {
     'default_cat': {'type': 'multiplier', 'value': 1.0},
     'black_cat': {'type': 'multiplier', 'value': 1.1},
@@ -157,7 +135,7 @@ async def get_user_data(user_id: int):
         # Вместо создания - возвращаем ошибку
         raise HTTPException(status_code=404, detail="User not found. Please register first.")
     
-    luck_chances = get_luck_chances(user.get("luck_level", 0))
+   
 
     return {
         "coins": user["coins"],
@@ -168,8 +146,8 @@ async def get_user_data(user_id: int):
         "multitap_level": user["multitap_level"],
         "profit_level": user["profit_level"],
         "energy_level": user["energy_level"],
-        "luck_level": user.get("luck_level", 0),
-        "luck_chances": luck_chances
+        
+        
     }
 
 
@@ -200,8 +178,8 @@ async def process_click(request: ClickRequest):
     
     base_tap = get_tap_value(user["multitap_level"])
     
-    # Удача (криты)
-    multiplier, crit_type = get_luck_multiplier(user.get("luck_level", 0))
+    
+    
     
     # Применяем x2 если буст активен
     if mega_boost_active:
@@ -230,7 +208,6 @@ async def process_click(request: ClickRequest):
         "tap_value": base_tap,
         "multiplier": multiplier,
         "actual_gain": actual_gain,
-        "crit": crit_type if multiplier > 1 and not mega_boost_active else 0,
         "mega_boost_active": mega_boost_active
     }
 
@@ -268,8 +245,7 @@ async def process_upgrade(request: UpgradeRequest):
     await update_user(request.user_id, updates)
     updated_user = await get_user(request.user_id)
 
-    luck_chances = get_luck_chances(updated_user.get("luck_level", 0))
-
+    
     return {
         "coins": updated_user["coins"],
         "new_level": updated_user[f"{boost_type}_level"],
@@ -277,7 +253,7 @@ async def process_upgrade(request: UpgradeRequest):
         "profit_per_tap": get_tap_value(updated_user["multitap_level"]),
         "profit_per_hour": get_hour_value(updated_user["profit_level"]),
         "max_energy": updated_user["max_energy"],
-        "luck_chances": luck_chances
+        
     }
 
 @app.post("/api/recover-energy")
