@@ -596,42 +596,6 @@ async def reward_video(request: RewardVideoRequest):
         logger.error(f"Error in reward_video: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.post("/api/admin/reset-me")
-async def reset_my_account(request: UserIdRequest):
-    """Полный сброс аккаунта до начальных значений"""
-    try:
-        # Полный сброс ВСЕХ полей
-        await update_user(request.user_id, {
-            "coins": 0,
-            "energy": 300,
-            "max_energy": 300,
-            "multitap_level": 0,
-            "profit_level": 0,
-            "energy_level": 0,
-            "last_passive_income": None,
-            "referral_count": 0,
-            "referral_earnings": 0,
-            "extra_data": {}  # Очищаем бусты и временные данные
-        })
-        
-        # Дополнительно: очистить выполненные задания (если есть таблица)
-        try:
-            from DATABASE.base import clear_completed_tasks
-            await clear_completed_tasks(request.user_id)
-        except:
-            pass  # Если функции нет - игнорируем
-        
-        logger.info(f"✅ Аккаунт {request.user_id} полностью сброшен")
-        
-        return {
-            "success": True, 
-            "message": "Аккаунт полностью сброшен!"
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка сброса аккаунта {request.user_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 # ==================== BOOSTS ====================
 
 @app.post("/api/activate-boost")
