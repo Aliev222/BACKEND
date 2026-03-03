@@ -30,13 +30,86 @@ MAX_BET = 1000000
 MIN_BET = 10
 
 UPGRADE_PRICES = {
-    "multitap": [50, 75, 100, 150, 200, 300, 450, 650, 900, 1200,1600, 2100, 2700, 3400, 4200, 5100, 6100, 7200, 8400, 9700, 11100, 12600, 14200, 15900, 17700, 19600, 21600, 23700, 25900, 28200,  30600, 33100, 35700, 38400, 41200, 44100, 47100, 50200, 53400, 56700,60100, 63600, 67200, 70900, 74700, 78600, 82600, 86700, 90900, 95200,],
-    "profit":   [40, 60, 90, 130, 180, 240, 310, 390, 480, 580,690, 810, 940, 1080, 1230, 1390, 1560, 1740, 1930, 2130,2340, 2560, 2790, 3030, 3280, 3540, 3810, 4090, 4380, 4680,4990, 5310, 5640, 5980, 6330, 6690, 7060, 7440, 7830, 8230,8640, 9060, 9490, 9930, 10380, 10840, 11310, 11790, 12280, 12780,],
-    "energy":   [30, 45, 65, 90, 120, 155, 195, 240, 290, 345,405, 470, 540, 615, 695, 780, 870, 965, 1065, 1170,1280, 1395, 1515, 1640, 1770, 1905, 2045, 2190, 2340, 2495, 2655, 2820, 2990, 3165, 3345, 3530, 3720, 3915, 4115, 4320,4530, 4745, 4965, 5190, 5420, 5655, 5895, 6140, 6390, 6645,],
+    "multitap": [
+        50, 75, 100, 150, 200, 300, 450, 650, 900, 1200,  # 1-10
+        1600, 2100, 2700, 3400, 4200, 5100, 6100, 7200, 8400, 9700,  # 11-20
+        11100, 12600, 14200, 15900, 17700, 19600, 21600, 23700, 25900, 28200,  # 21-30
+        30600, 33100, 35700, 38400, 41200, 44100, 47100, 50200, 53400, 56700,  # 31-40
+        60100, 63600, 67200, 70900, 74700, 78600, 82600, 86700, 90900, 95200,  # 41-50
+        100000, 105000, 110000, 115000, 120000, 125000, 130000, 135000, 140000, 145000,  # 51-60
+        150000, 160000, 170000, 180000, 190000, 200000, 210000, 220000, 230000, 240000,  # 61-70
+        250000, 270000, 290000, 310000, 330000, 350000, 370000, 390000, 410000, 430000,  # 71-80
+        450000, 500000, 550000, 600000, 650000, 700000, 750000, 800000, 850000, 900000,  # 81-90
+        950000, 1000000, 1100000, 1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000],
+    "profit": [
+        40, 60, 90, 130, 180, 240, 310, 390, 480, 580,  # 1-10
+        690, 810, 940, 1080, 1230, 1390, 1560, 1740, 1930, 2130,  # 11-20
+        2340, 2560, 2790, 3030, 3280, 3540, 3810, 4090, 4380, 4680,  # 21-30
+        4990, 5310, 5640, 5980, 6330, 6690, 7060, 7440, 7830, 8230,  # 31-40
+        8640, 9060, 9490, 9930, 10380, 10840, 11310, 11790, 12280, 12780,  # 41-50
+        13300, 13850, 14420, 15010, 15620, 16250, 16900, 17570, 18260, 18970,  # 51-60
+        19700, 20450, 21220, 22010, 22820, 23650, 24500, 25370, 26260, 27170,  # 61-70
+        28100, 29050, 30020, 31010, 32020, 33050, 34100, 35170, 36260, 37370,  # 71-80
+        38500, 39650, 40820, 42010, 43220, 44450, 45700, 46970, 48260, 49570,  # 81-90
+        50900, 52250, 53620, 55010, 56420, 57850, 59300, 60770, 62260, 63770   # 91-100
+    ],
+     "energy": [
+        30, 45, 65, 90, 120, 155, 195, 240, 290, 345,  # 1-10
+        405, 470, 540, 615, 695, 780, 870, 965, 1065, 1170,  # 11-20
+        1280, 1395, 1515, 1640, 1770, 1905, 2045, 2190, 2340, 2495,  # 21-30
+        2655, 2820, 2990, 3165, 3345, 3530, 3720, 3915, 4115, 4320,  # 31-40
+        4530, 4745, 4965, 5190, 5420, 5655, 5895, 6140, 6390, 6645,  # 41-50
+        6905, 7170, 7440, 7715, 7995, 8280, 8570, 8865, 9165, 9470,  # 51-60
+        9780, 10095, 10415, 10740, 11070, 11405, 11745, 12090, 12440, 12795,  # 61-70
+        13155, 13520, 13890, 14265, 14645, 15030, 15420, 15815, 16215, 16620,  # 71-80
+        17030, 17445, 17865, 18290, 18720, 19155, 19595, 20040, 20490, 20945,  # 81-90
+        21405, 21870, 22340, 22815, 23295, 23780, 24270, 24765, 25265, 25770   # 91-100
+    ],
 }
 
-HOUR_VALUES = [100, 150, 250, 500, 1000, 1250, 1500, 1800, 2000, 2500, 3000,4000,5000,6000,7000,10000]
-ENERGY_VALUES = [300, 330, 370, 420, 480, 550, 630, 720, 820, 930,1050, 1180, 1320, 1470, 1630, 1800, 1980, 2170, 2370, 2580,2800,]
+
+HOUR_VALUES = [
+    # 1-10
+    100, 150, 250, 500, 1000, 1250, 1500, 1800, 2000, 2500,
+    # 11-20
+    3000, 4000, 5000, 6000, 7000, 10000, 12000, 14000, 16000, 18000,
+    # 21-30
+    20000, 23000, 26000, 29000, 32000, 36000, 40000, 44000, 48000, 52000,
+    # 31-40
+    56000, 61000, 66000, 71000, 76000, 82000, 88000, 94000, 100000, 107000,
+    # 41-50
+    114000, 121000, 128000, 135000, 142000, 150000, 150000, 150000, 150000, 150000,
+    # 51-60
+    150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000,
+    # 61-70
+    150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000,
+    # 71-80
+    150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000,
+    # 81-90
+    150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000,
+    # 91-100
+    150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000]
+ENERGY_VALUES = [
+    # 1-10
+    300, 330, 370, 420, 480, 550, 630, 720, 820, 930,
+    # 11-20
+    1050, 1180, 1320, 1470, 1630, 1800, 1980, 2170, 2370, 2580,
+    # 21-30
+    2800, 3030, 3270, 3520, 3780, 4050, 4330, 4620, 4920, 5230,
+    # 31-40
+    5550, 5880, 6220, 6570, 6930, 7300, 7680, 8070, 8470, 8880,
+    # 41-50
+    9300, 9730, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+    # 51-60
+    10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+    # 61-70
+    10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+    # 71-80
+    10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+    # 81-90
+    10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+    # 91-100
+    10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000]
 
 SKIN_BONUSES = {
     'default_SP': {'type': 'multiplier', 'value': 1.0},
@@ -81,6 +154,33 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Ryoho Clicker API", lifespan=lifespan)
 
 # ==================== MIDDLEWARE ====================
+
+@app.post("/api/admin/reset-me")
+async def reset_my_account(request: UserIdRequest):
+    """Сброс своего аккаунта"""
+    try:
+        # Полный сброс до начальных значений
+        await update_user(request.user_id, {
+            "coins": 0,
+            "energy": 300,
+            "max_energy": 300,
+            "multitap_level": 0,
+            "profit_level": 0,
+            "energy_level": 0,
+            "last_passive_income": None,
+            "referral_count": 0,
+            "referral_earnings": 0
+        })
+        
+        # Очистить выполненные задания
+        # (если есть такая функция)
+        # await clear_completed_tasks(request.user_id)
+        
+        return {"success": True, "message": "Аккаунт сброшен!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
@@ -253,12 +353,11 @@ def check_click_spam(user_id: int) -> bool:
     _click_spam_store[key].append(now)
     return True
 
-def calculate_passive_income(user: Dict, minutes_passed: int, bonus_multiplier: float = 1.0) -> int:
-    """Calculate passive income based on time passed"""
+def calculate_passive_income(user: Dict, hours_passed: int) -> int:
+    """Calculate passive income based on hours passed"""
     hour_value = get_hour_value(user.get("profit_level", 0))
-    base_income_per_10min = hour_value // 6
-    cycles = max(1, minutes_passed // 10)
-    return int(base_income_per_10min * cycles * bonus_multiplier)
+    # Просто умножаем часовой доход на количество прошедших часов
+    return hour_value * max(1, hours_passed)
 
 # ==================== API ENDPOINTS ====================
 
@@ -1020,7 +1119,7 @@ async def play_roulette(request: GameRequest):
 
 @app.post("/api/passive-income")
 async def passive_income(request: PassiveIncomeRequest):
-    """Collect passive income with skin bonuses"""
+    """Collect passive income (per hour) - NO SKIN BONUS"""
     try:
         user = await get_user(request.user_id)
         if not user:
@@ -1029,30 +1128,16 @@ async def passive_income(request: PassiveIncomeRequest):
         last_income = user.get('last_passive_income')
         now = datetime.utcnow()
         
-        # Base interval 10 minutes
-        base_interval = timedelta(minutes=10)
-        
-        # Apply skin bonus
-        multiplier = 1.0
-        interval = base_interval
-        
-        if request.skin_bonus:
-            bonus_type = request.skin_bonus.get('type')
+        # Проверяем, прошёл ли хотя бы час
+        if not last_income or (now - last_income) >= timedelta(hours=1):
+            # Сколько часов прошло?
+            if last_income:
+                hours_passed = int((now - last_income).total_seconds() / 3600)
+            else:
+                hours_passed = 1  # Первый сбор - за 1 час
             
-            if bonus_type == 'multiplier':
-                multiplier = request.skin_bonus.get('value', 1.0)
-            elif bonus_type == 'interval':
-                interval = timedelta(minutes=request.skin_bonus.get('value', 10))
-            elif bonus_type == 'both':
-                multiplier = request.skin_bonus.get('multiplier', 1.0)
-                interval = timedelta(minutes=request.skin_bonus.get('interval', 10))
-        
-        # Calculate income
-        if not last_income or (now - last_income) >= interval:
-            minutes_passed = int((now - last_income).total_seconds() / 60) if last_income else 0
-            cycles = max(1, minutes_passed // 10) if last_income else 1
-            
-            total_income = calculate_passive_income(user, minutes_passed if last_income else 10, multiplier)
+            # Рассчитываем доход (БЕЗ МНОЖИТЕЛЯ СКИНОВ)
+            total_income = calculate_passive_income(user, hours_passed)
             
             if total_income > 0:
                 user["coins"] = user.get("coins", 0) + total_income
@@ -1064,7 +1149,7 @@ async def passive_income(request: PassiveIncomeRequest):
                 return {
                     "coins": user["coins"],
                     "income": total_income,
-                    "message": f"💰 +{total_income} coins (skin bonus x{multiplier})"
+                    "message": f"💰 +{total_income} coins (passive income)"
                 }
         
         return {"coins": user["coins"], "income": 0}
