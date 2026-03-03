@@ -23,31 +23,31 @@ from DATABASE.base import (
 
 # Anti-cheat constants
 MAX_CLICKS_PER_SECOND = 100
-MAX_ENERGY_RECOVERY_PER_SECOND = 10
+MAX_ENERGY_RECOVERY_PER_SECOND = 1
 MIN_TASK_COMPLETION_INTERVAL = 60  # seconds
 MAX_REWARD_PER_VIDEO = 5000
 MAX_BET = 1000000
 MIN_BET = 10
 
 UPGRADE_PRICES = {
-    "multitap": [100, 200, 600, 900, 1500, 2000, 4000, 7000, 10000, 20000, 30000, 40000, 50000, 100000],
-    "profit":   [100, 200, 600, 900, 1500, 2000, 4000, 7000, 10000, 20000, 30000, 40000, 50000, 100000],
-    "energy":   [100, 200, 600, 900, 1500, 2000, 4000, 7000, 10000, 20000, 30000, 40000, 50000, 100000],
+    "multitap": [50, 75, 100, 150, 200, 300, 450, 650, 900, 1200,1600, 2100, 2700, 3400, 4200, 5100, 6100, 7200, 8400, 9700, 11100, 12600, 14200, 15900, 17700, 19600, 21600, 23700, 25900, 28200,  30600, 33100, 35700, 38400, 41200, 44100, 47100, 50200, 53400, 56700,60100, 63600, 67200, 70900, 74700, 78600, 82600, 86700, 90900, 95200,],
+    "profit":   [40, 60, 90, 130, 180, 240, 310, 390, 480, 580,690, 810, 940, 1080, 1230, 1390, 1560, 1740, 1930, 2130,2340, 2560, 2790, 3030, 3280, 3540, 3810, 4090, 4380, 4680,4990, 5310, 5640, 5980, 6330, 6690, 7060, 7440, 7830, 8230,8640, 9060, 9490, 9930, 10380, 10840, 11310, 11790, 12280, 12780,],
+    "energy":   [30, 45, 65, 90, 120, 155, 195, 240, 290, 345,405, 470, 540, 615, 695, 780, 870, 965, 1065, 1170,1280, 1395, 1515, 1640, 1770, 1905, 2045, 2190, 2340, 2495, 2655, 2820, 2990, 3165, 3345, 3530, 3720, 3915, 4115, 4320,4530, 4745, 4965, 5190, 5420, 5655, 5895, 6140, 6390, 6645,],
 }
 
-HOUR_VALUES = [100, 150, 250, 500, 1000, 1250, 1500, 1800, 2000, 2500, 3000]
-ENERGY_VALUES = [100, 200, 300, 500, 650, 700, 850, 1000, 1150, 1200, 1400]
+HOUR_VALUES = [100, 150, 250, 500, 1000, 1250, 1500, 1800, 2000, 2500, 3000,4000,5000,6000,7000,10000]
+ENERGY_VALUES = [300, 330, 370, 420, 480, 550, 630, 720, 820, 930,1050, 1180, 1320, 1470, 1630, 1800, 1980, 2170, 2370, 2580,2800,]
 
 SKIN_BONUSES = {
-    'default_cat': {'type': 'multiplier', 'value': 1.0},
-    'black_cat': {'type': 'multiplier', 'value': 1.1},
-    'white_cat': {'type': 'multiplier', 'value': 1.15},
-    'gold_cat': {'type': 'multiplier', 'value': 1.5},
-    'space_cat': {'type': 'interval', 'value': 8},
-    'ninja_cat': {'type': 'multiplier', 'value': 2.0},
-    'wizard_cat': {'type': 'both', 'multiplier': 1.8, 'interval': 7},
-    'rainbow_cat': {'type': 'multiplier', 'value': 3.0},
-    'alien_cat': {'type': 'interval', 'value': 5}
+    'default_SP': {'type': 'multiplier', 'value': 1.0},
+    'Galaxy_SP': {'type': 'multiplier', 'value': 1.3},
+    'Water_SP': {'type': 'multiplier', 'value': 1.4},
+    'Ninja_SP': {'type': 'multiplier', 'value': 1.5},
+    'Monster_SP': {'type': 'interval', 'value': 8},
+    'Techno_SP': {'type': 'multiplier', 'value': 2.0},
+    'Coin_SP': {'type': 'both', 'multiplier': 1.8, 'interval': 7},
+    'King_SP': {'type': 'multiplier', 'value': 3.0},
+    'Shadow_SP': {'type': 'interval', 'value': 5}
 }
 
 # In-memory rate limiting storage (use Redis in production)
