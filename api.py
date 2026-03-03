@@ -499,7 +499,6 @@ async def process_upgrade(request: UpgradeRequest):
 
 @app.post("/api/recover-energy")
 async def recover_energy(data: UserIdRequest):
-    """Recover energy at a fixed rate"""
     try:
         user = await get_user(data.user_id)
         if not user:
@@ -508,16 +507,12 @@ async def recover_energy(data: UserIdRequest):
         if user.get("energy", 0) >= user.get("max_energy", 1000):
             return {"energy": user["energy"]}
         
-        # ВАЖНО: добавляем 1, а не MAX_ENERGY_RECOVERY_PER_SECOND
-        recovery_amount = 1  # жестко задаем 1
-        
-        new_energy = min(user.get("max_energy", 1000), user.get("energy", 0) + recovery_amount)
+        # +1 за вызов (вызывается раз в 5 секунд)
+        new_energy = min(user.get("max_energy", 1000), user.get("energy", 0) + 1)
         await update_user(data.user_id, {"energy": new_energy})
         
         return {"energy": new_energy}
         
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error in recover_energy: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
