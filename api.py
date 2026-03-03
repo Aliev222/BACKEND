@@ -154,34 +154,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Ryoho Clicker API", lifespan=lifespan)
 
 # ==================== MIDDLEWARE ====================
-
-@app.post("/api/admin/reset-me")
-async def reset_my_account(request: UserIdRequest):
-    """Сброс своего аккаунта"""
-    try:
-        # Полный сброс до начальных значений
-        await update_user(request.user_id, {
-            "coins": 0,
-            "energy": 300,
-            "max_energy": 300,
-            "multitap_level": 0,
-            "profit_level": 0,
-            "energy_level": 0,
-            "last_passive_income": None,
-            "referral_count": 0,
-            "referral_earnings": 0
-        })
-        
-        # Очистить выполненные задания
-        # (если есть такая функция)
-        # await clear_completed_tasks(request.user_id)
-        
-        return {"success": True, "message": "Аккаунт сброшен!"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     """Basic rate limiting middleware"""
@@ -623,6 +595,31 @@ async def reward_video(request: RewardVideoRequest):
     except Exception as e:
         logger.error(f"Error in reward_video: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/api/admin/reset-me")
+async def reset_my_account(request: UserIdRequest):
+    """Сброс своего аккаунта"""
+    try:
+        # Полный сброс до начальных значений
+        await update_user(request.user_id, {
+            "coins": 0,
+            "energy": 300,
+            "max_energy": 300,
+            "multitap_level": 0,
+            "profit_level": 0,
+            "energy_level": 0,
+            "last_passive_income": None,
+            "referral_count": 0,
+            "referral_earnings": 0
+        })
+        
+        # Очистить выполненные задания
+        # (если есть такая функция)
+        # await clear_completed_tasks(request.user_id)
+        
+        return {"success": True, "message": "Аккаунт сброшен!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== BOOSTS ====================
 
