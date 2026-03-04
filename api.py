@@ -504,11 +504,15 @@ async def recover_energy(data: UserIdRequest):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        if user.get("energy", 0) >= user.get("max_energy", 1000):
-            return {"energy": user["energy"]}
+        # Получаем реальный max_energy из БД
+        max_energy = user.get("max_energy", 1000)
+        current_energy = user.get("energy", 0)
         
-        # +1 за вызов (вызывается раз в 5 секунд)
-        new_energy = min(user.get("max_energy", 1000), user.get("energy", 0) + 1)
+        if current_energy >= max_energy:
+            return {"energy": current_energy}
+        
+        # +1 за вызов
+        new_energy = min(max_energy, current_energy + 1)
         await update_user(data.user_id, {"energy": new_energy})
         
         return {"energy": new_energy}
