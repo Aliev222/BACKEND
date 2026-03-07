@@ -13,15 +13,11 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 from collections import defaultdict
-import aioredis
-from dotenv import load_dotenv
 
 from DATABASE.base import (
     get_user, add_user as create_user, update_user,
     init_db, get_completed_tasks, add_completed_task
 )
-
-load_dotenv()
 
 # ==================== КОНФИГУРАЦИЯ ====================
 
@@ -33,31 +29,66 @@ BASE_MAX_ENERGY = 500
 # ==================== ЦЕНЫ АПГРЕЙДОВ ====================
 
 UPGRADE_PRICES = {
-    "multitap": [50, 75, 100, 150, 200, 300, 450, 650, 900, 1200],
-    "profit": [40, 60, 90, 130, 180, 240, 310, 390, 480, 580],
-    "energy": [30, 45, 65, 90, 120, 155, 195, 240, 290, 345]
+    "multitap": [
+        50, 75, 100, 150, 200, 300, 450, 650, 900, 1200,
+        1600, 2100, 2700, 3400, 4200, 5100, 6100, 7200, 8400, 9700,
+        11100, 12600, 14200, 15900, 17700, 19600, 21600, 23700, 25900, 28200,
+        30600, 33100, 35700, 38400, 41200, 44100, 47100, 50200, 53400, 56700,
+        60100, 63600, 67200, 70900, 74700, 78600, 82600, 86700, 90900, 95200,
+        100000, 105000, 110000, 115000, 120000, 125000, 130000, 135000, 140000, 145000,
+        150000, 160000, 170000, 180000, 190000, 200000, 210000, 220000, 230000, 240000,
+        250000, 270000, 290000, 310000, 330000, 350000, 370000, 390000, 410000, 430000,
+        450000, 500000, 550000, 600000, 650000, 700000, 750000, 800000, 850000, 900000,
+        950000, 1000000, 1100000, 1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000
+    ],
+    "profit": [
+        40, 60, 90, 130, 180, 240, 310, 390, 480, 580,
+        690, 810, 940, 1080, 1230, 1390, 1560, 1740, 1930, 2130,
+        2340, 2560, 2790, 3030, 3280, 3540, 3810, 4090, 4380, 4680,
+        4990, 5310, 5640, 5980, 6330, 6690, 7060, 7440, 7830, 8230,
+        8640, 9060, 9490, 9930, 10380, 10840, 11310, 11790, 12280, 12780,
+        13300, 13850, 14420, 15010, 15620, 16250, 16900, 17570, 18260, 18970,
+        19700, 20450, 21220, 22010, 22820, 23650, 24500, 25370, 26260, 27170,
+        28100, 29050, 30020, 31010, 32020, 33050, 34100, 35170, 36260, 37370,
+        38500, 39650, 40820, 42010, 43220, 44450, 45700, 46970, 48260, 49570,
+        50900, 52250, 53620, 55010, 56420, 57850, 59300, 60770, 62260, 63770
+    ],
+    "energy": [
+        30, 45, 65, 90, 120, 155, 195, 240, 290, 345,
+        405, 470, 540, 615, 695, 780, 870, 965, 1065, 1170,
+        1280, 1395, 1515, 1640, 1770, 1905, 2045, 2190, 2340, 2495,
+        2655, 2820, 2990, 3165, 3345, 3530, 3720, 3915, 4115, 4320,
+        4530, 4745, 4965, 5190, 5420, 5655, 5895, 6140, 6390, 6645,
+        6905, 7170, 7440, 7715, 7995, 8280, 8570, 8865, 9165, 9470,
+        9780, 10095, 10415, 10740, 11070, 11405, 11745, 12090, 12440, 12795,
+        13155, 13520, 13890, 14265, 14645, 15030, 15420, 15815, 16215, 16620,
+        17030, 17445, 17865, 18290, 18720, 19155, 19595, 20040, 20490, 20945,
+        21405, 21870, 22340, 22815, 23295, 23780, 24270, 24765, 25265, 25770
+    ],
 }
 
-HOUR_VALUES = [100, 150, 250, 500, 1000, 1250, 1500, 1800, 2000, 2500]
+HOUR_VALUES = [
+    100, 150, 250, 500, 1000, 1250, 1500, 1800, 2000, 2500,
+    3000, 4000, 5000, 6000, 7000, 10000, 12000, 14000, 16000, 18000,
+    20000, 23000, 26000, 29000, 32000, 36000, 40000, 44000, 48000, 52000,
+    56000, 61000, 66000, 71000, 76000, 82000, 88000, 94000, 100000, 107000,
+    114000, 121000, 128000, 135000, 142000, 150000, 150000, 150000, 150000, 150000,
+    150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000,
+    150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000,
+    150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000,
+    150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000,
+    150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000, 150000
+]
 
-# ==================== КЭШ (REDIS) ====================
+# ==================== IN-MEMORY CACHE ====================
 
-redis_client = None
 click_queue = asyncio.Queue()
 user_cache = {}  # Локальный кэш пользователей
 
-async def init_redis():
-    global redis_client
-    try:
-        redis_client = await aioredis.from_url(
-            os.getenv("REDIS_URL", "redis://localhost:6379"),
-            encoding="utf-8",
-            decode_responses=True
-        )
-        print("✅ Redis connected")
-    except:
-        print("⚠️ Redis not available, using memory cache only")
-        redis_client = None
+# ==================== LOGGING ====================
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # ==================== ФОНОВЫЕ ЗАДАЧИ ====================
 
@@ -93,10 +124,10 @@ async def click_processor():
                     # Асинхронно обновляем БД
                     asyncio.create_task(update_user_db(uid, data))
                 
-                print(f"✅ Processed {len(batch)} clicks for {len(user_data)} users")
+                logger.info(f"✅ Processed {len(batch)} clicks for {len(user_data)} users")
         
         except Exception as e:
-            print(f"❌ Click processor error: {e}")
+            logger.error(f"❌ Click processor error: {e}")
         
         await asyncio.sleep(3)  # Сохраняем раз в 3 секунды
 
@@ -110,12 +141,7 @@ async def update_user_db(user_id: int, data: dict):
                 "energy": max(0, user.get("energy", 0) - data['clicks'])
             })
     except Exception as e:
-        print(f"❌ DB update error for user {user_id}: {e}")
-
-# ==================== LOGGING ====================
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+        logger.error(f"❌ DB update error for user {user_id}: {e}")
 
 # ==================== LIFESPAN ====================
 
@@ -126,7 +152,7 @@ async def lifespan(app: FastAPI):
     
     # Инициализация
     await init_db()
-    await init_redis()
+    logger.info("✅ Database initialized")
     
     # Запуск фоновых задач
     asyncio.create_task(click_processor())
@@ -134,9 +160,6 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Очистка при остановке
-    if redis_client:
-        await redis_client.close()
     logger.info("🛑 Shutting down")
 
 app = FastAPI(title="Ryoho Clicker API", lifespan=lifespan)
@@ -189,8 +212,6 @@ class TaskCompleteRequest(BaseModel):
 class PassiveIncomeRequest(BaseModel):
     user_id: int
 
-class UserIdRequest(BaseModel):
-    user_id: int
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def get_tap_value(level: int) -> int:
@@ -331,6 +352,48 @@ async def process_upgrade(request: UpgradeRequest):
         logger.error(f"Error in process_upgrade: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.post("/api/recover-energy")
+async def recover_energy(request: UserIdRequest):
+    try:
+        user = await get_user(request.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        max_energy = user.get("max_energy", BASE_MAX_ENERGY)
+        current_energy = user.get("energy", 0)
+        
+        if current_energy < max_energy:
+            new_energy = min(max_energy, current_energy + 1)
+            await update_user(request.user_id, {"energy": new_energy})
+            
+            # Обновляем кэш
+            if request.user_id in user_cache:
+                user_cache[request.user_id]['energy'] = new_energy
+            
+            return {"energy": new_energy}
+        
+        return {"energy": current_energy}
+    except Exception as e:
+        logger.error(f"Error in recover_energy: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/upgrade-prices/{user_id}")
+async def get_upgrade_prices(user_id: int):
+    try:
+        user = await get_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        prices = {}
+        for boost in UPGRADE_PRICES:
+            level = user.get(f"{boost}_level", 0)
+            prices[boost] = UPGRADE_PRICES[boost][level] if level < len(UPGRADE_PRICES[boost]) else 0
+        
+        return prices
+    except Exception as e:
+        logger.error(f"Error in get_upgrade_prices: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 @app.post("/api/register")
 async def register_user(request: RegisterRequest):
     try:
@@ -358,10 +421,8 @@ async def register_user(request: RegisterRequest):
         logger.error(f"Error in register_user: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-
 # ==================== CPA ENDPOINTS ====================
 
-# In-memory store для CPA (в реальном проекте использовать Redis)
 _cpa_store = {}
 
 @app.post("/api/cpa-status")
@@ -372,14 +433,11 @@ async def cpa_status(request: dict):
         offer_id = request.get("offer_id")
         check_only = request.get("check_only", False)
         
-        # Ключ для хранения
         cpa_key = f"cpa_{user_id}_{offer_id}"
         
-        # Если просто проверка
         if check_only:
             return {"completed": cpa_key in _cpa_store and _cpa_store[cpa_key].get("completed", False)}
         
-        # Если первый раз
         if cpa_key not in _cpa_store:
             _cpa_store[cpa_key] = {
                 "start_time": time.time(),
@@ -387,17 +445,13 @@ async def cpa_status(request: dict):
             }
             return {"completed": False}
         
-        # Проверяем, прошло ли достаточно времени (для теста 30 сек)
         elapsed = time.time() - _cpa_store[cpa_key]["start_time"]
         
         if elapsed > 30 and not _cpa_store[cpa_key]["completed"]:
-            # Отмечаем как выполненное
             _cpa_store[cpa_key]["completed"] = True
             
-            # Начисляем награду
             user = await get_user(user_id)
             if user:
-                # Определяем награду по offer_id
                 rewards = {
                     "cpa_1": 50000,
                     "cpa_2": 100000,
@@ -408,16 +462,8 @@ async def cpa_status(request: dict):
                 user["coins"] += reward
                 await update_user(user_id, {"coins": user["coins"]})
                 
-                # Сохраняем в extra_data
-                extra = user.get("extra_data", {})
-                if not isinstance(extra, dict):
-                    extra = {}
-                
-                completed_cpa = extra.get("completed_cpa", [])
-                if offer_id not in completed_cpa:
-                    completed_cpa.append(offer_id)
-                    extra["completed_cpa"] = completed_cpa
-                    await update_user(user_id, {"extra_data": extra})
+                if request.user_id in user_cache:
+                    user_cache[request.user_id]['coins'] = user["coins"]
                 
                 logger.info(f"CPA completed: user {user_id}, offer {offer_id}, reward {reward}")
             
@@ -429,38 +475,10 @@ async def cpa_status(request: dict):
         logger.error(f"CPA status error: {e}")
         return {"completed": False}
 
-
-
-@app.post("/api/recover-energy")
-async def recover_energy(request: UserIdRequest):
-    try:
-        user = await get_user(request.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        max_energy = user.get("max_energy", BASE_MAX_ENERGY)
-        current_energy = user.get("energy", 0)
-        
-        if current_energy < max_energy:
-            new_energy = min(max_energy, current_energy + 1)
-            await update_user(request.user_id, {"energy": new_energy})
-            
-            # Обновляем кэш
-            if request.user_id in user_cache:
-                user_cache[request.user_id]['energy'] = new_energy
-            
-            return {"energy": new_energy}
-        
-        return {"energy": current_energy}
-    except Exception as e:
-        logger.error(f"Error in recover_energy: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
 # ==================== МИНИ-ИГРЫ ====================
 
 @app.post("/api/game/coinflip")
 async def play_coinflip(request: GameRequest):
-    """Игра в орлянку"""
     try:
         user = await get_user(request.user_id)
         if not user or user.get("coins", 0) < request.bet:
@@ -476,7 +494,6 @@ async def play_coinflip(request: GameRequest):
         
         await update_user(request.user_id, {"coins": user["coins"]})
         
-        # Обновляем кэш
         if request.user_id in user_cache:
             user_cache[request.user_id]['coins'] = user["coins"]
         
@@ -487,7 +504,6 @@ async def play_coinflip(request: GameRequest):
 
 @app.post("/api/game/slots")
 async def play_slots(request: GameRequest):
-    """Игровой автомат"""
     try:
         user = await get_user(request.user_id)
         if not user or user.get("coins", 0) < request.bet:
@@ -518,7 +534,6 @@ async def play_slots(request: GameRequest):
 
 @app.post("/api/game/dice")
 async def play_dice(request: GameRequest):
-    """Игра в кости"""
     try:
         user = await get_user(request.user_id)
         if not user or user.get("coins", 0) < request.bet:
@@ -557,7 +572,6 @@ async def play_dice(request: GameRequest):
     except Exception as e:
         logger.error(f"Error in dice: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-    
 
 # ==================== ЗАДАЧИ ====================
 
@@ -637,7 +651,6 @@ async def complete_task(request: TaskCompleteRequest):
     except Exception as e:
         logger.error(f"Error in complete_task: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-    
 
 # ==================== ПАССИВНЫЙ ДОХОД ====================
 
@@ -678,7 +691,6 @@ async def passive_income(request: PassiveIncomeRequest):
         logger.error(f"Error in passive_income: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-
 # ==================== СКИНЫ ====================
 
 @app.get("/api/skins/list")
@@ -688,9 +700,26 @@ async def get_skins_list():
          "rarity": "common", "bonus": {"type": "multiplier", "value": 1.0}, "requirement": {"type": "free"}},
         {"id": "Galaxy_SP", "name": "Галактический спирикс", "image": "imgg/skins/Galaxy_SP.png", 
          "rarity": "common", "bonus": {"type": "multiplier", "value": 1.1}, "requirement": {"type": "free"}},
+        {"id": "Water_SP", "name": "Водяной спирикс", "image": "imgg/skins/Water_SP.png", 
+         "rarity": "common", "bonus": {"type": "multiplier", "value": 1.15}, "requirement": {"type": "free"}},
         {"id": "Ninja_SP", "name": "Нинзя спирикс", "image": "imgg/skins/Ninja_SP.png", 
          "rarity": "rare", "bonus": {"type": "multiplier", "value": 1.5}, 
-         "requirement": {"type": "ads", "count": 10}}
+         "requirement": {"type": "ads", "count": 10}},
+        {"id": "Monster_SP", "name": "Монстр спирикс", "image": "imgg/skins/Monster_SP.png", 
+         "rarity": "rare", "bonus": {"type": "interval", "value": 8}, 
+         "requirement": {"type": "ads", "count": 20}},
+        {"id": "Techno_SP", "name": "Техно спирикс", "image": "imgg/skins/Techno_SP.png", 
+         "rarity": "legendary", "bonus": {"type": "multiplier", "value": 2.0}, 
+         "requirement": {"type": "cpa", "url": "https://omg10.com/4/10675986"}},
+        {"id": "Coin_SP", "name": "Кот-маг", "image": "imgg/skins/Coin_SP.png", 
+         "rarity": "legendary", "bonus": {"type": "both", "multiplier": 1.8, "interval": 7}, 
+         "requirement": {"type": "cpa", "url": "https://omg10.com/4/10675991"}},
+        {"id": "King_SP", "name": "Король спирикс", "image": "imgg/skins/King_SP.png", 
+         "rarity": "super", "bonus": {"type": "multiplier", "value": 3.0}, 
+         "requirement": {"type": "special", "description": "Пригласить 50 друзей", "total": 50}},
+        {"id": "Shadow_SP", "name": "Теневой спирикс", "image": "imgg/skins/Shadow_SP.png", 
+         "rarity": "super", "bonus": {"type": "interval", "value": 5}, 
+         "requirement": {"type": "special", "description": "Достичь 100 уровня", "total": 100}}
     ]
     return {"skins": skins}
 
@@ -705,7 +734,6 @@ async def select_skin(request: SkinRequest):
         extra["selected_skin"] = request.skin_id
         await update_user(request.user_id, {"extra_data": extra})
         
-        # Обновляем кэш
         if request.user_id in user_cache:
             user_cache[request.user_id]['selected_skin'] = request.skin_id
         
