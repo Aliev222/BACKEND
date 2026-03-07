@@ -565,6 +565,97 @@ async def get_mega_boost_status(user_id: int):
         logger.error(f"Error in get_mega_boost_status: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+# ==================== SKINS ENDPOINTS ====================
+
+@app.get("/api/skins/list")
+async def get_skins_list():
+    """Return all available skins with their data"""
+    skins = [
+        {
+            "id": "default_SP",
+            "name": "Классический спирикс",
+            "description": "Классический спирикс",
+            "image": "imgg/skins/default_SP.png",
+            "rarity": "common",
+            "bonus": {"type": "multiplier", "value": 1.0},
+            "requirement": {"type": "free"}
+        },
+        {
+            "id": "Galaxy_SP",
+            "name": "Галактический спирикс",
+            "description": "Галактический спирикс",
+            "image": "imgg/skins/Galaxy_SP.png",
+            "rarity": "common",
+            "bonus": {"type": "multiplier", "value": 1.1},
+            "requirement": {"type": "free"}
+        },
+        {
+            "id": "Water_SP",
+            "name": "Водяной спирикс",
+            "description": "Водяной спирикс",
+            "image": "imgg/skins/Water_SP.png",
+            "rarity": "common",
+            "bonus": {"type": "multiplier", "value": 1.15},
+            "requirement": {"type": "free"}
+        },
+        {
+            "id": "Ninja_SP",
+            "name": "Нинзя спирикс",
+            "description": "Ловкий нинзя спирикс",
+            "image": "imgg/skins/Ninja_SP.png",
+            "rarity": "rare",
+            "bonus": {"type": "multiplier", "value": 1.5},
+            "requirement": {"type": "ads", "count": 10, "description": "Просмотреть 10 видео"}
+        },
+        {
+            "id": "Monster_SP",
+            "name": "Монстр спирикс",
+            "description": "Монстр спирикс",
+            "image": "imgg/skins/Monster_SP.png",
+            "rarity": "rare",
+            "bonus": {"type": "interval", "value": 8},
+            "requirement": {"type": "ads", "count": 20, "description": "Просмотреть 20 видео"}
+        },
+        {
+            "id": "Techno_SP",
+            "name": "Техно спирикс",
+            "description": "Техно спирикс",
+            "image": "imgg/skins/Techno_SP.png",
+            "rarity": "legendary",
+            "bonus": {"type": "multiplier", "value": 2.0},
+            "requirement": {"type": "cpa", "url": "https://omg10.com/4/10675986", "description": "Получить скин"}
+        },
+        {
+            "id": "Coin_SP",
+            "name": "Кот-маг",
+            "description": "Волшебный кот",
+            "image": "imgg/skins/Coin_SP.png",
+            "rarity": "legendary",
+            "bonus": {"type": "both", "multiplier": 1.8, "interval": 7},
+            "requirement": {"type": "cpa", "url": "https://omg10.com/4/10675991", "description": "Получить скин"}
+        },
+        {
+            "id": "King_SP",
+            "name": "Король спирикс",
+            "description": "Король всех королей",
+            "image": "imgg/skins/King_SP.png",
+            "rarity": "super",
+            "bonus": {"type": "multiplier", "value": 3.0},
+            "requirement": {"type": "special", "description": "Пригласить 50 друзей", "total": 50}
+        },
+        {
+            "id": "Shadow_SP",
+            "name": "Теневой спирикс",
+            "description": "Сама тьма",
+            "image": "imgg/skins/Shadow_SP.png",
+            "rarity": "super",
+            "bonus": {"type": "interval", "value": 5},
+            "requirement": {"type": "special", "description": "Достичь 100 уровня", "total": 100}
+        }
+    ]
+    return {"skins": skins}
+
+
 # ==================== SKINS ====================
 @app.post("/api/select-skin")
 async def select_skin(request: SelectSkinRequest):
