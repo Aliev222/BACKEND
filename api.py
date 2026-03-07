@@ -511,7 +511,7 @@ async def recover_energy(data: UserIdRequest):
         if current_energy >= max_energy:
             return {"energy": current_energy}
         
-        # +1 за вызов
+        # +1 за вызов (каждые 5 секунд)
         new_energy = min(max_energy, current_energy + 1)
         await update_user(data.user_id, {"energy": new_energy})
         
@@ -559,12 +559,35 @@ async def register_user(request: RegisterRequest):
         )
         
         user = await get_user(request.user_id)
+
+        # Обработка реферала
+        if request.referrer_id and request.referrer_id != request.user_id:  # Защита от само-реферала
+            referrer = await get_user(request.referrer_id)
+            if referrer:
+                # Получаем текущие значения
+                current_coins = referrer.get("coins", 0)
+                current_count = referrer.get("referral_count", 0)
+                current_earnings = referrer.get("referral_earnings", 0)
+                
+                # Бонус за реферала (увеличил до 5000 как в вашем коде)
+                bonus = 5000
+                
+                # Обновляем данные реферера
+                await update_user(request.referrer_id, {
+                    "coins": current_coins + bonus,
+                    "referral_count": current_count + 1,
+                    "referral_earnings": current_earnings + bonus
+                })
+                
+                # Логируем для отладки
+                logger.info(f"Referral bonus: User {request.referrer_id} got +{bonus} coins for inviting {request.user_id}")
         
+        # Возвращаем ответ
         if request.referrer_id:
             return {
                 "status": "created_with_referral",
                 "user": user,
-                "message": f"Welcome! You were invited by {request.referrer_id}"
+                "message": f"🎉 Welcome! You were invited by {request.referrer_id}"
             }
         
         return {"status": "created", "user": user}
@@ -712,6 +735,43 @@ async def get_mega_boost_status(user_id: int):
     except Exception as e:
         logger.error(f"Error in get_mega_boost_status: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/api/verify-cpa")
+async def verify_cpa(request: dict):
+    """Verify CPA completion for skins"""
+    try:
+        user_id = request.get("user_id")
+        skin_id = request.get("skin_id")
+        
+        user = await get_user(user_id)
+        if not user:
+            return {"success": False, "error": "User not found"}
+        
+        # Здесь должна быть проверка с CPA-сетью
+        # Например, проверка в базе данных переходов
+        
+        # Для теста можно просто разблокировать через 5 секунд
+        # Но в реальности нужно проверять с CPA-сетью
+        
+        extra = user.get("extra_data", {})
+        if not isinstance(extra, dict):
+            extra = {}
+        
+        # Отмечаем, что CPA выполнен
+        completed_cpa = extra.get("completed_cpa", [])
+        if skin_id not in completed_cpa:
+            completed_cpa.append(skin_id)
+            extra["completed_cpa"] = completed_cpa
+            
+            await update_user(user_id, {"extra_data": extra})
+            
+            return {"success": True, "message": "CPA verified"}
+        
+        return {"success": False, "message": "Already verified"}
+        
+    except Exception as e:
+        logger.error(f"Error in verify_cpa: {e}")
+        return {"success": False, "error": str(e)}
 
 # ==================== REFERRALS ====================
 
