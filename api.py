@@ -594,6 +594,21 @@ async def reward_video(request: RewardVideoRequest):
     except Exception as e:
         logger.error(f"Error in reward_video: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+    
+    @app.post("/api/verify-cpa")
+    async def verify_cpa(request: dict):
+        user_id = request.get("user_id")
+        skin_id = request.get("skin_id")
+        
+        # Здесь должна быть проверка с CPA-сетью
+        # Например, проверка уникального идентификатора перехода
+        
+        # Если подтверждено - разблокируем скин
+        user = await get_user(user_id)
+        if user:
+            # Логика разблокировки скина
+            return {"success": True}
+        return {"success": False}
 
 # ==================== BOOSTS ====================
 
