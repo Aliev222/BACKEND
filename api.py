@@ -189,6 +189,8 @@ class TaskCompleteRequest(BaseModel):
 class PassiveIncomeRequest(BaseModel):
     user_id: int
 
+class UserIdRequest(BaseModel):
+    user_id: int
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def get_tap_value(level: int) -> int:
@@ -354,6 +356,104 @@ async def register_user(request: RegisterRequest):
         return {"status": "created", "user": await get_user(request.user_id)}
     except Exception as e:
         logger.error(f"Error in register_user: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ==================== CPA ENDPOINTS ====================
+
+# In-memory store для CPA (в реальном проекте использовать Redis)
+_cpa_store = {}
+
+@app.post("/api/cpa-status")
+async def cpa_status(request: dict):
+    """Проверка статуса CPA-задания"""
+    try:
+        user_id = request.get("user_id")
+        offer_id = request.get("offer_id")
+        check_only = request.get("check_only", False)
+        
+        # Ключ для хранения
+        cpa_key = f"cpa_{user_id}_{offer_id}"
+        
+        # Если просто проверка
+        if check_only:
+            return {"completed": cpa_key in _cpa_store and _cpa_store[cpa_key].get("completed", False)}
+        
+        # Если первый раз
+        if cpa_key not in _cpa_store:
+            _cpa_store[cpa_key] = {
+                "start_time": time.time(),
+                "completed": False
+            }
+            return {"completed": False}
+        
+        # Проверяем, прошло ли достаточно времени (для теста 30 сек)
+        elapsed = time.time() - _cpa_store[cpa_key]["start_time"]
+        
+        if elapsed > 30 and not _cpa_store[cpa_key]["completed"]:
+            # Отмечаем как выполненное
+            _cpa_store[cpa_key]["completed"] = True
+            
+            # Начисляем награду
+            user = await get_user(user_id)
+            if user:
+                # Определяем награду по offer_id
+                rewards = {
+                    "cpa_1": 50000,
+                    "cpa_2": 100000,
+                    "cpa_3": 25000
+                }
+                reward = rewards.get(offer_id, 50000)
+                
+                user["coins"] += reward
+                await update_user(user_id, {"coins": user["coins"]})
+                
+                # Сохраняем в extra_data
+                extra = user.get("extra_data", {})
+                if not isinstance(extra, dict):
+                    extra = {}
+                
+                completed_cpa = extra.get("completed_cpa", [])
+                if offer_id not in completed_cpa:
+                    completed_cpa.append(offer_id)
+                    extra["completed_cpa"] = completed_cpa
+                    await update_user(user_id, {"extra_data": extra})
+                
+                logger.info(f"CPA completed: user {user_id}, offer {offer_id}, reward {reward}")
+            
+            return {"completed": True}
+        
+        return {"completed": False}
+        
+    except Exception as e:
+        logger.error(f"CPA status error: {e}")
+        return {"completed": False}
+
+
+
+@app.post("/api/recover-energy")
+async def recover_energy(request: UserIdRequest):
+    try:
+        user = await get_user(request.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        max_energy = user.get("max_energy", BASE_MAX_ENERGY)
+        current_energy = user.get("energy", 0)
+        
+        if current_energy < max_energy:
+            new_energy = min(max_energy, current_energy + 1)
+            await update_user(request.user_id, {"energy": new_energy})
+            
+            # Обновляем кэш
+            if request.user_id in user_cache:
+                user_cache[request.user_id]['energy'] = new_energy
+            
+            return {"energy": new_energy}
+        
+        return {"energy": current_energy}
+    except Exception as e:
+        logger.error(f"Error in recover_energy: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 # ==================== МИНИ-ИГРЫ ====================
