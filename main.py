@@ -43,7 +43,7 @@ async def cmd_start(message: types.Message):
         inline_keyboard=[
             [InlineKeyboardButton(
                 text="🎮 Играть", 
-                web_app=WebAppInfo(url="https://spirix.vercel.app")
+                web_app=WebAppInfo(url="https://spirix.vercel.app/")
             )]
         ]
     )
