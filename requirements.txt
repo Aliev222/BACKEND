@@ -7,3 +7,4 @@ sqlalchemy
 httpx
 python-multipart
 aiohttp
+aiogram
