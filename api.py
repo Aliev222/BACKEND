@@ -308,6 +308,41 @@ async def process_click(request: ClickRequest):
         logger.error(f"Error queueing click: {e}")
         return {"success": False, "error": str(e)}
 
+@app.get("/api/mega-boost-status/{user_id}")
+async def get_mega_boost_status(user_id: int):
+    """Get mega boost status"""
+    try:
+        user = await get_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        extra = user.get("extra_data", {})
+        active_boosts = extra.get("active_boosts", {})
+        now = datetime.utcnow()
+        
+        if "mega_boost" in active_boosts:
+            try:
+                expires = datetime.fromisoformat(active_boosts["mega_boost"]["expires_at"])
+                if now > expires:
+                    del active_boosts["mega_boost"]
+                    extra["active_boosts"] = active_boosts
+                    await update_user(user_id, {"extra_data": extra})
+                    return {"active": False}
+                else:
+                    remaining = int((expires - now).total_seconds())
+                    return {
+                        "active": True, 
+                        "expires_at": active_boosts["mega_boost"]["expires_at"], 
+                        "remaining_seconds": remaining
+                    }
+            except:
+                pass
+        
+        return {"active": False}
+    except Exception as e:
+        logger.error(f"Error in get_mega_boost_status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 
 
 @app.post("/api/upgrade")
