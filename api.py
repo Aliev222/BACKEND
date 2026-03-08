@@ -170,7 +170,7 @@ app = FastAPI(title="Ryoho Clicker API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://spirix.vercel.app/", "http://localhost:3000"],
+    allow_origins=["https://spirix.vercel.app", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -303,31 +303,7 @@ async def process_click(request: ClickRequest):
         logger.error(f"Error queueing click: {e}")
         return {"success": False, "error": str(e)}
 
-@app.post("/api/recover-energy")
-async def recover_energy(request: UserIdRequest):
-    """Восстановление энергии"""
-    try:
-        user = await get_user(request.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        max_energy = user.get("max_energy", BASE_MAX_ENERGY)
-        current_energy = user.get("energy", 0)
-        
-        if current_energy < max_energy:
-            new_energy = min(max_energy, current_energy + 1)
-            await update_user(request.user_id, {"energy": new_energy})
-            
-            # Обновляем кэш
-            if request.user_id in user_cache:
-                user_cache[request.user_id]['energy'] = new_energy
-            
-            return {"energy": new_energy}
-        
-        return {"energy": current_energy}
-    except Exception as e:
-        logger.error(f"Error in recover_energy: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+
 
 @app.post("/api/upgrade")
 async def process_upgrade(request: UpgradeRequest):
@@ -452,26 +428,7 @@ async def register_user(request: RegisterRequest):
         logger.error(f"Error in register_user: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# ==================== REFERRALS ====================
 
-@app.get("/api/referral-data/{user_id}")
-async def get_referral_data(user_id: int):
-    """Get referral statistics"""
-    try:
-        user = await get_user(user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        return {
-            "count": user.get("referral_count", 0),
-            "earnings": user.get("referral_earnings", 0)
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in get_referral_data: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ==================== REFERRALS ====================
