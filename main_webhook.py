@@ -62,7 +62,7 @@ async def cmd_start(message: types.Message):
             logging.info(f"🆕 Создан новый пользователь {user_id}, реферал: {referrer_id}")
         
         # Кнопка для игры
-        GAME_URL = "https://ryoho-eta.vercel.app"
+        GAME_URL = "https://spirix.vercel.app"
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(
@@ -76,7 +76,6 @@ async def cmd_start(message: types.Message):
         await message.answer(
             f"👋 Привет, {username}!\n\n"
             f"💰 Монет: {user_coins}\n"
-            f"⚡ Энергия: {user_energy}/{user_max_energy}\n\n"
             f"Нажми кнопку ниже, чтобы играть:",
             reply_markup=keyboard
         )
