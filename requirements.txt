@@ -6,3 +6,4 @@ asyncpg
 sqlalchemy
 httpx
 python-multipart
+aiohttp
