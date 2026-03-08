@@ -51,7 +51,6 @@ async def cmd_start(message: types.Message):
     await message.answer(
         f"👋 Привет, {username}!\n\n"
         f"💰 Монет: {user_coins}\n"
-        f"⚡ Энергия: {user_energy}/{user_max_energy}\n\n"
         f"Нажми кнопку ниже, чтобы играть:",
         reply_markup=keyboard
     )
