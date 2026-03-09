@@ -138,10 +138,24 @@ async def update_user_db(user_id: int, data: dict):
     try:
         user = await get_user(user_id)
         if user:
+            # Получаем АКТУАЛЬНУЮ энергию из БД
+            current_energy = user.get("energy", 0)
+            
+            # Вычисляем новую энергию
+            new_energy = current_energy
+            if not data.get('mega_boost', False):
+                new_energy = max(0, current_energy - data['clicks'])
+            
             await update_user(user_id, {
                 "coins": user.get("coins", 0) + data['gain'],
-                "energy": max(0, user.get("energy", 0) - data['clicks'])
+                "energy": new_energy
             })
+            
+            # Обновляем кэш
+            if user_id in user_cache:
+                user_cache[user_id]['energy'] = new_energy
+                user_cache[user_id]['coins'] = user.get("coins", 0) + data['gain']
+                
     except Exception as e:
         logger.error(f"❌ DB update error for user {user_id}: {e}")
 
@@ -222,6 +236,9 @@ class PassiveIncomeRequest(BaseModel):
 class UserIdRequest(BaseModel):
     user_id: int
 
+
+class BoostActivateRequest(BaseModel):
+    user_id: int
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def get_tap_value(level: int) -> int:
@@ -343,7 +360,122 @@ async def get_mega_boost_status(user_id: int):
         logger.error(f"Error in get_mega_boost_status: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.post("/api/activate-mega-boost")
+async def activate_mega_boost(request: BoostActivateRequest):
+    """Activate mega boost (x2 coins + infinite energy for 5 minutes)"""
+    try:
+        user = await get_user(request.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        extra = user.get("extra_data", {})
+        if not isinstance(extra, dict):
+            extra = {}
+        
+        active_boosts = extra.get("active_boosts", {})
+        now = datetime.utcnow()
+        
+        # Проверяем, не активен ли уже буст
+        if "mega_boost" in active_boosts:
+            try:
+                expires = datetime.fromisoformat(active_boosts["mega_boost"]["expires_at"])
+                if now < expires:
+                    remaining = int((expires - now).total_seconds())
+                    return {
+                        "success": False,
+                        "message": f"Boost already active! {remaining // 60}:{remaining % 60:02d} remaining",
+                        "already_active": True,
+                        "expires_at": active_boosts["mega_boost"]["expires_at"]
+                    }
+            except:
+                del active_boosts["mega_boost"]
+        
+        # Активируем на 5 минут
+        expires_at = (now + timedelta(minutes=5)).isoformat()
+        active_boosts["mega_boost"] = {"active": True, "expires_at": expires_at}
+        extra["active_boosts"] = active_boosts
+        await update_user(request.user_id, {"extra_data": extra})
+        
+        return {
+            "success": True,
+            "message": "🔥⚡ MEGA BOOST activated for 5 minutes! x2 coins + infinite energy",
+            "expires_at": expires_at
+        }
+    except Exception as e:
+        logger.error(f"Error in activate_mega_boost: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.post("/api/reward-video")
+async def reward_video(request: dict):
+    """Handle rewarded video watch"""
+    try:
+        user_id = request.get("user_id")
+        
+        user = await get_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Начисляем награду
+        reward = 5000
+        user["coins"] += reward
+        
+        # Обновляем счетчик просмотренных видео
+        extra = user.get("extra_data", {})
+        if not isinstance(extra, dict):
+            extra = {}
+        extra["ads_watched"] = extra.get("ads_watched", 0) + 1
+        
+        await update_user(user_id, {
+            "coins": user["coins"],
+            "extra_data": extra
+        })
+        
+        # Обновляем кэш
+        if user_id in user_cache:
+            user_cache[user_id]['coins'] = user["coins"]
+            user_cache[user_id]['ads_watched'] = extra["ads_watched"]
+        
+        return {
+            "success": True,
+            "coins": user["coins"],
+            "ads_watched": extra["ads_watched"]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in reward_video: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/ad-watched")
+async def ad_watched(request: dict):
+    """Track ad watch statistics"""
+    try:
+        user_id = request.get("user_id")
+        reward_type = request.get("reward_type")
+        
+        user = await get_user(user_id)
+        if not user:
+            return {"success": False}
+        
+        extra = user.get("extra_data", {})
+        if not isinstance(extra, dict):
+            extra = {}
+        
+        # Сохраняем статистику
+        ads_history = extra.get("ads_history", [])
+        ads_history.append({
+            "type": reward_type,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        extra["ads_history"] = ads_history
+        
+        await update_user(user_id, {"extra_data": extra})
+        
+        return {"success": True}
+        
+    except Exception as e:
+        logger.error(f"Error in ad_watched: {e}")
+        return {"success": False}
 
 @app.post("/api/upgrade")
 async def process_upgrade(request: UpgradeRequest):
