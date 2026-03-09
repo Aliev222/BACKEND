@@ -545,7 +545,6 @@ async def recover_energy(request: UserIdRequest):
             new_energy = min(max_energy, current_energy + 1)
             await update_user(request.user_id, {"energy": new_energy})
             
-            # Обновляем кэш
             if request.user_id in user_cache:
                 user_cache[request.user_id]['energy'] = new_energy
             
