@@ -837,6 +837,63 @@ async def play_roulette(request: GameRequest):
     except Exception as e:
         logger.error(f"Error in play_roulette: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+# ==================== TOURNAMENT ENDPOINTS ====================
+
+class TournamentData(BaseModel):
+    user_id: int
+    score: int
+
+@app.get("/api/tournament/leaderboard")
+async def get_tournament_leaderboard():
+    """Get current tournament leaderboard"""
+    try:
+        # Здесь должна быть логика получения данных из БД
+        # Пока возвращаем заглушку
+        return {
+            "success": True,
+            "players": [
+                {"rank": 1, "name": "CryptoKing", "score": 157890},
+                {"rank": 2, "name": "SpiritMaster", "score": 143200},
+                {"rank": 3, "name": "ClickerPro", "score": 128450},
+                {"rank": 4, "name": "CoinHunter", "score": 112300},
+                {"rank": 5, "name": "TapLegend", "score": 98700}
+            ],
+            "time_left": 86399,  # 23:59:59 в секундах
+            "prize_pool": 100000
+        }
+    except Exception as e:
+        logger.error(f"Error getting leaderboard: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/api/tournament/update-score")
+async def update_tournament_score(request: TournamentData):
+    """Update player's tournament score"""
+    try:
+        user_id = request.user_id
+        score = request.score
+        
+        # Здесь логика обновления счета в БД
+        
+        return {"success": True, "message": "Score updated"}
+        
+    except Exception as e:
+        logger.error(f"Error updating tournament score: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/tournament/player-rank/{user_id}")
+async def get_player_rank(user_id: int):
+    """Get player's current rank in tournament"""
+    try:
+        # Здесь логика получения ранга игрока из БД
+        return {
+            "success": True,
+            "rank": 42,
+            "score": 87650,
+            "next_rank_score": 90000
+        }
+    except Exception as e:
+        logger.error(f"Error getting player rank: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 # ==================== ЗАДАЧИ ====================
 
