@@ -775,6 +775,69 @@ async def play_dice(request: GameRequest):
         logger.error(f"Error in dice: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@app.post("/api/game/roulette")
+async def play_roulette(request: GameRequest):
+    """Play roulette game"""
+    try:
+        user = await get_user(request.user_id)
+        if not user or user.get("coins", 0) < request.bet:
+            raise HTTPException(status_code=400, detail="Not enough coins")
+        
+        red_numbers = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]
+        
+        result = random.randint(0, 36)
+        
+        if result == 0:
+            result_color = 'green'
+            result_symbol = '🟢'
+        elif result in red_numbers:
+            result_color = 'red'
+            result_symbol = '🔴'
+        else:
+            result_color = 'black'
+            result_symbol = '⚫'
+        
+        win = False
+        multiplier = 0
+        
+        if request.bet_type == 'number' and request.bet_value == result:
+            win = True
+            multiplier = 35
+        elif request.bet_type == 'green' and result_color == 'green':
+            win = True
+            multiplier = 35
+        elif request.bet_type == result_color:
+            win = True
+            multiplier = 2
+        
+        if win:
+            win_amount = request.bet * multiplier
+            user["coins"] += win_amount
+            message = f"🎉 {result_symbol} {result} - You won +{win_amount} coins! (x{multiplier})"
+        else:
+            user["coins"] -= request.bet
+            message = f"😞 {result_symbol} {result} - You lost {request.bet} coins"
+        
+        await update_user(request.user_id, {"coins": user["coins"]})
+        
+        if request.user_id in user_cache:
+            user_cache[request.user_id]['coins'] = user["coins"]
+        
+        return {
+            "success": True,
+            "coins": user["coins"],
+            "result_number": result,
+            "result_color": result_color,
+            "result_symbol": result_symbol,
+            "win": win,
+            "message": message
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in play_roulette: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 # ==================== ЗАДАЧИ ====================
 
 _task_completion_store = {}
@@ -944,6 +1007,56 @@ async def select_skin(request: SkinRequest):
         logger.error(f"Error in select_skin: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.post("/api/unlock-skin")
+async def unlock_skin(request: dict):
+    """Unlock skin for user"""
+    try:
+        user_id = request.get("user_id")
+        skin_id = request.get("skin_id")
+        method = request.get("method", "ads")
+        
+        user = await get_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        extra = user.get("extra_data", {})
+        if not isinstance(extra, dict):
+            extra = {}
+        
+        owned_skins = extra.get("owned_skins", ["default_SP"])
+        
+        if skin_id not in owned_skins:
+            owned_skins.append(skin_id)
+            extra["owned_skins"] = owned_skins
+            
+            # Если это первый скин, делаем его выбранным
+            if len(owned_skins) == 1:
+                extra["selected_skin"] = skin_id
+            
+            await update_user(user_id, {"extra_data": extra})
+            
+            # Обновляем кэш
+            if user_id in user_cache:
+                user_cache[user_id]['owned_skins'] = owned_skins
+                user_cache[user_id]['selected_skin'] = extra.get("selected_skin", skin_id)
+            
+            logger.info(f"✅ Skin {skin_id} unlocked for user {user_id}")
+            
+            return {
+                "success": True,
+                "owned_skins": owned_skins,
+                "selected_skin": extra.get("selected_skin", skin_id)
+            }
+        
+        return {
+            "success": False,
+            "message": "Skin already owned",
+            "owned_skins": owned_skins
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in unlock_skin: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
