@@ -113,6 +113,7 @@ async def click_processor():
                     user_data[uid]['clicks'] += 1
                     user_data[uid]['gain'] += click['gain']
                     user_data[uid]['mega_boost'] = click.get('mega_boost', False)
+                    user_data[uid]['tournament_score'] = click.get('tournament_score', 0)
                 
                 # Сохраняем в кэш и БД
                 for uid, data in user_data.items():
@@ -123,6 +124,8 @@ async def click_processor():
                         if not data['mega_boost']:
                             user_cache[uid]['energy'] = max(0, user_cache[uid]['energy'] - data['clicks'])
                     
+                    if data['tournament_score'] > 0:
+                        asyncio.create_task(update_tournament_score(uid, data['tournament_score']))
                     # Асинхронно обновляем БД
                     asyncio.create_task(update_user_db(uid, data))
                 
@@ -304,7 +307,8 @@ async def process_click(request: ClickRequest):
             'user_id': request.user_id,
             'gain': request.gain,
             'clicks': request.clicks,
-            'mega_boost': request.mega_boost
+            'mega_boost': request.mega_boost,
+            'tournament_score': request.tournament_score
         })
         
         # Если есть кэш - обновляем его сразу для UI
