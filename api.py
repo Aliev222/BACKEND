@@ -199,12 +199,12 @@ app.add_middleware(
 )
 
 # ==================== МОДЕЛИ ====================
-
 class ClickRequest(BaseModel):
     user_id: int
     clicks: int = 1
     gain: int
     mega_boost: bool = False
+    tournament_score: Optional[int] = None
 
 class UpgradeRequest(BaseModel):
     user_id: int
