@@ -545,12 +545,11 @@ async def recover_energy(request: UserIdRequest):
         max_energy = user.get("max_energy", BASE_MAX_ENERGY)
         current_energy = user.get("energy", 0)
         
-        # Логируем для отладки
-        print(f"⚡ Запрос восстановления: user={request.user_id}, current={current_energy}, max={max_energy}")
+        print(f"⚡ Запрос: user={request.user_id}, current={current_energy}, max={max_energy}")
         
         if current_energy < max_energy:
-            # Добавляем ТОЛЬКО 1 энергию
-            new_energy = current_energy + 1
+            # ✅ Восстанавливаем 3 энергии (так как интервал 15 сек)
+            new_energy = current_energy + 3
             new_energy = min(max_energy, new_energy)
             
             await update_user(request.user_id, {"energy": new_energy})
@@ -558,7 +557,7 @@ async def recover_energy(request: UserIdRequest):
             if request.user_id in user_cache:
                 user_cache[request.user_id]['energy'] = new_energy
             
-            print(f"✅ Энергия увеличена: {current_energy} → {new_energy}")
+            print(f"✅ Энергия увеличена: {current_energy} → {new_energy} (+3)")
             return {"energy": new_energy}
         
         print(f"ℹ️ Энергия уже полная: {current_energy}")
