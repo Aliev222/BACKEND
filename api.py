@@ -265,48 +265,18 @@ async def health():
 
 @app.get("/api/user/{user_id}")
 async def get_user_data(user_id: int):
-    """Быстрое получение данных пользователя с офлайн восстановлением"""
+    """Быстрое получение данных пользователя (из кэша или БД)"""
     try:
-        # Всегда грузим из БД для точности
+        # Сначала проверяем кэш
+        if user_id in user_cache:
+            return user_cache[user_id]
+        
+        # Если нет в кэше - грузим из БД
         user = await get_user(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        # ========== ОФЛАЙН ВОССТАНОВЛЕНИЕ ЭНЕРГИИ ==========
-        from datetime import datetime
-        now = datetime.utcnow()
-        
-        # Получаем время последнего визита
-        last_visit = user.get("last_visit")
-        
-        if last_visit:
-            # Считаем сколько секунд прошло
-            seconds_passed = (now - last_visit).total_seconds()
-            
-            # +1 энергия каждые 5 секунд (максимум 24 часа)
-            energy_to_add = min(int(seconds_passed / 5), 17280)  # 24 часа = 86400 сек / 5 = 17280
-            
-            if energy_to_add > 0:
-                current_energy = user.get("energy", 0)
-                max_energy = user.get("max_energy", BASE_MAX_ENERGY)
-                new_energy = min(max_energy, current_energy + energy_to_add)
-                
-                print(f"⚡ Офлайн: прошло {seconds_passed:.0f} сек, +{energy_to_add} энергии")
-                
-                # Обновляем в БД
-                user["energy"] = new_energy
-                await update_user(user_id, {
-                    "energy": new_energy,
-                    "last_visit": now
-                })
-            else:
-                # Просто обновляем время визита
-                await update_user(user_id, {"last_visit": now})
-        else:
-            # Первый визит
-            await update_user(user_id, {"last_visit": now})
-        
-        # ========== ФОРМИРУЕМ ОТВЕТ ==========
+        # Формируем ответ
         user_data = {
             "coins": user.get("coins", 0),
             "energy": user.get("energy", 0),
@@ -321,7 +291,7 @@ async def get_user_data(user_id: int):
             "ads_watched": user.get("extra_data", {}).get("ads_watched", 0)
         }
         
-        # Обновляем кэш
+        # Сохраняем в кэш
         user_cache[user_id] = user_data
         
         return user_data
@@ -1070,107 +1040,30 @@ async def passive_income(request: PassiveIncomeRequest):
 @app.get("/api/skins/list")
 async def get_skins_list():
     skins = [
-        # Базовые (бесплатные)
         {"id": "default_SP", "name": "Классический спирикс", "image": "imgg/skins/default_SP.png", 
-         "rarity": "common", "bonus": {"type": "multiplier", "value": 1.0}, 
-         "description": "Базовый скин для начинающих", "requirement": {"type": "free"}},
-        
+         "rarity": "common", "bonus": {"type": "multiplier", "value": 1.0}, "requirement": {"type": "free"}},
         {"id": "Galaxy_SP", "name": "Галактический спирикс", "image": "imgg/skins/Galaxy_SP.png", 
-         "rarity": "common", "bonus": {"type": "multiplier", "value": 1.0}, 
-         "description": "Таинственный космос внутри", "requirement": {"type": "free"}},
-        
+         "rarity": "common", "bonus": {"type": "multiplier", "value": 1.1}, "requirement": {"type": "free"}},
         {"id": "Water_SP", "name": "Водяной спирикс", "image": "imgg/skins/Water_SP.png", 
-         "rarity": "common", "bonus": {"type": "multiplier", "value": 1.0}, 
-         "description": "Сила океана", "requirement": {"type": "free"}},
-        
-        {"id": "Fire_SP", "name": "Огненный спирикс", "image": "imgg/skins/Fire_SP.png", 
-         "rarity": "common", "bonus": {"type": "multiplier", "value": 1.0}, 
-         "description": "Пылающее сердце", "requirement": {"type": "free"}},
-        
-        # За видео
-        {"id": "Ninja_SP", "name": "Ниндзя спирикс", "image": "imgg/skins/Ninja_SP.png", 
+         "rarity": "common", "bonus": {"type": "multiplier", "value": 1.15}, "requirement": {"type": "free"}},
+        {"id": "Ninja_SP", "name": "Нинзя спирикс", "image": "imgg/skins/Ninja_SP.png", 
          "rarity": "rare", "bonus": {"type": "multiplier", "value": 1.5}, 
-         "description": "Быстрый и незаметный", 
-         "requirement": {"type": "ads", "count": 10, "description": "10 видео"}},
-        
-        {"id": "Samurai_SP", "name": "Самурай спирикс", "image": "imgg/skins/Samurai_SP.png", 
-         "rarity": "rare", "bonus": {"type": "multiplier", "value": 1.5}, 
-         "description": "Честь и меч", 
-         "requirement": {"type": "ads", "count": 20, "description": "20 видео"}},
-        
-        {"id": "Wizard_SP", "name": "Волшебник спирикс", "image": "imgg/skins/Wizard_SP.png", 
-         "rarity": "rare", "bonus": {"type": "multiplier", "value": 1.5}, 
-         "description": "Магия в крови", 
-         "requirement": {"type": "ads", "count": 30, "description": "30 видео"}},
-        
-        # За друзей
-        {"id": "King_SP", "name": "Король спирикс", "image": "imgg/skins/King_SP.png", 
-         "rarity": "legendary", "bonus": {"type": "multiplier", "value": 1.5}, 
-         "description": "Властелин мира", 
-         "requirement": {"type": "friends", "count": 5, "description": "5 друзей"}},
-        
-        {"id": "Queen_SP", "name": "Королева спирикс", "image": "imgg/skins/Queen_SP.png", 
-         "rarity": "legendary", "bonus": {"type": "multiplier", "value": 1.5}, 
-         "description": "Правительница", 
-         "requirement": {"type": "friends", "count": 10, "description": "10 друзей"}},
-        
-        {"id": "Emperor_SP", "name": "Император спирикс", "image": "imgg/skins/Emperor_SP.png", 
-         "rarity": "super", "bonus": {"type": "multiplier", "value": 1.5}, 
-         "description": "Абсолютная власть", 
-         "requirement": {"type": "friends", "count": 20, "description": "20 друзей"}},
-        
-        # За уровень
-        {"id": "Veteran_SP", "name": "Ветеран спирикс", "image": "imgg/skins/Veteran_SP.png", 
-         "rarity": "rare", "bonus": {"type": "multiplier", "value": 1.2}, 
-         "description": "Прошедший огонь и воду", 
-         "requirement": {"type": "level", "level": 10, "description": "10 уровень"}},
-        
-        {"id": "Hero_SP", "name": "Герой спирикс", "image": "imgg/skins/Hero_SP.png", 
-         "rarity": "legendary", "bonus": {"type": "multiplier", "value": 1.4}, 
-         "description": "Легенда среди спириксов", 
-         "requirement": {"type": "level", "level": 25, "description": "25 уровень"}},
-        
-        {"id": "Mythic_SP", "name": "Мифический спирикс", "image": "imgg/skins/Mythic_SP.png", 
-         "rarity": "super", "bonus": {"type": "multiplier", "value": 1.6}, 
-         "description": "Древняя сила", 
-         "requirement": {"type": "level", "level": 50, "description": "50 уровень"}},
-        
-        {"id": "God_SP", "name": "Бог спирикс", "image": "imgg/skins/God_SP.png", 
-         "rarity": "super", "bonus": {"type": "multiplier", "value": 2.0}, 
-         "description": "Всевышний", 
-         "requirement": {"type": "level", "level": 100, "description": "100 уровень"}},
-        
-        # За CPA
+         "requirement": {"type": "ads", "count": 10}},
+        {"id": "Monster_SP", "name": "Монстр спирикс", "image": "imgg/skins/Monster_SP.png", 
+         "rarity": "rare", "bonus": {"type": "interval", "value": 8}, 
+         "requirement": {"type": "ads", "count": 20}},
         {"id": "Techno_SP", "name": "Техно спирикс", "image": "imgg/skins/Techno_SP.png", 
-         "rarity": "legendary", "bonus": {"type": "multiplier", "value": 3.0}, 
-         "description": "Киберпанк", 
-         "requirement": {"type": "cpa", "url": "https://example.com/1", "description": "Регистрация"}},
-        
-        {"id": "Coin_SP", "name": "Крипто спирикс", "image": "imgg/skins/Coin_SP.png", 
-         "rarity": "legendary", "bonus": {"type": "multiplier", "value": 3.0}, 
-         "description": "Магнит для монет", 
-         "requirement": {"type": "cpa", "url": "https://example.com/2", "description": "Верификация"}},
-        
-        {"id": "Rich_SP", "name": "Богатый спирикс", "image": "imgg/skins/Rich_SP.png", 
-         "rarity": "super", "bonus": {"type": "multiplier", "value": 3.0}, 
-         "description": "Купается в золоте", 
-         "requirement": {"type": "cpa", "url": "https://example.com/3", "description": "Депозит"}},
-        
-        # Специальные
-        {"id": "Alien_SP", "name": "Инопланетный спирикс", "image": "imgg/skins/Alien_SP.png", 
          "rarity": "legendary", "bonus": {"type": "multiplier", "value": 2.0}, 
-         "description": "Пришелец из другой галактики", 
-         "requirement": {"type": "special", "description": "Турнир"}},
-        
-        {"id": "Zombie_SP", "name": "Зомби спирикс", "image": "imgg/skins/Zombie_SP.png", 
-         "rarity": "rare", "bonus": {"type": "multiplier", "value": 2.4}, 
-         "description": "Нежить", 
-         "requirement": {"type": "special", "description": "Хэллоуин"}},
-        
-        {"id": "Santa_SP", "name": "Санта спирикс", "image": "imgg/skins/Santa_SP.png", 
-         "rarity": "legendary", "bonus": {"type": "multiplier", "value": 2.8}, 
-         "description": "Подарки для всех", 
-         "requirement": {"type": "special", "description": "Новый год"}},
+         "requirement": {"type": "cpa", "url": "https://omg10.com/4/10675986"}},
+        {"id": "Coin_SP", "name": "Кот-маг", "image": "imgg/skins/Coin_SP.png", 
+         "rarity": "legendary", "bonus": {"type": "both", "multiplier": 1.8, "interval": 7}, 
+         "requirement": {"type": "cpa", "url": "https://omg10.com/4/10675991"}},
+        {"id": "King_SP", "name": "Король спирикс", "image": "imgg/skins/King_SP.png", 
+         "rarity": "super", "bonus": {"type": "multiplier", "value": 3.0}, 
+         "requirement": {"type": "special", "description": "Пригласить 50 друзей", "total": 50}},
+        {"id": "Shadow_SP", "name": "Теневой спирикс", "image": "imgg/skins/Shadow_SP.png", 
+         "rarity": "super", "bonus": {"type": "interval", "value": 5}, 
+         "requirement": {"type": "special", "description": "Достичь 100 уровня", "total": 100}}
     ]
     return {"skins": skins}
 
