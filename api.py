@@ -144,10 +144,10 @@ async def update_user_db(user_id: int, data: dict):
             # Получаем АКТУАЛЬНУЮ энергию из БД
             current_energy = user.get("energy", 0)
             
-            # Вычисляем новую энергию
+            # ВЫЧИТАЕМ ВСЕ КЛИКИ, а не 1
             new_energy = current_energy
             if not data.get('mega_boost', False):
-                new_energy = max(0, current_energy - data['clicks'])
+                new_energy = max(0, current_energy - data['clicks'])  # ← ВОТ ТУТ БЫЛА ОШИБКА!
             
             await update_user(user_id, {
                 "coins": user.get("coins", 0) + data['gain'],
