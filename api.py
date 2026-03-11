@@ -105,25 +105,24 @@ async def click_processor():
                     break
             
             if batch:
-                # Группируем по пользователям - ДОБАВИЛ tournament_score
-                user_data = defaultdict(lambda: {'clicks': 0, 'gain': 0, 'mega_boost': False, 'tournament_score': 0})
+                # Группируем по пользователям
+                user_data = defaultdict(lambda: {'clicks': 0, 'gain': 0, 'mega_boost': False})
                 for click in batch:
                     uid = click['user_id']
-                    user_data[uid]['clicks'] += 1
-                    user_data[uid]['gain'] += click['gain']
+                    # ✅ Добавляем проверки, чтобы не было None
+                    user_data[uid]['clicks'] += click.get('clicks', 1)
+                    user_data[uid]['gain'] += click.get('gain', 0)
                     user_data[uid]['mega_boost'] = click.get('mega_boost', False)
-                    user_data[uid]['tournament_score'] = click.get('tournament_score', 0)  # ← Добавлено
                 
                 for uid, data in user_data.items():
+                    # Обновляем кэш
                     if uid in user_cache:
                         user_cache[uid]['coins'] += data['gain']
                         if not data['mega_boost']:
+                            # ✅ ВАЖНО: вычитаем ВСЕ клики
                             user_cache[uid]['energy'] = max(0, user_cache[uid]['energy'] - data['clicks'])
                     
-                    # ДОБАВИЛ проверку существования
-                    if data.get('tournament_score', 0) > 0:
-                        asyncio.create_task(update_tournament_score(uid, data['tournament_score']))
-                    
+                    # Асинхронно обновляем БД
                     asyncio.create_task(update_user_db(uid, data))
                 
                 logger.info(f"✅ Processed {len(batch)} clicks for {len(user_data)} users")
@@ -141,13 +140,13 @@ async def update_user_db(user_id: int, data: dict):
             # Получаем АКТУАЛЬНУЮ энергию из БД
             current_energy = user.get("energy", 0)
             
-            # ВЫЧИТАЕМ ВСЕ КЛИКИ, а не 1
+            # ВЫЧИТАЕМ ВСЕ КЛИКИ
             new_energy = current_energy
             if not data.get('mega_boost', False):
-                # ✅ ВАЖНО: вычитаем ВСЕ клики!
-                new_energy = max(0, current_energy - data.get('clicks', 0))
-            
-            print(f"⚡ Обновление энергии: user={user_id}, было={current_energy}, кликов={data.get('clicks',0)}, стало={new_energy}")
+                # ✅ ВАЖНО: используем data['clicks'] из батча
+                clicks_to_subtract = data.get('clicks', 0)
+                new_energy = max(0, current_energy - clicks_to_subtract)
+                print(f"⚡ Вычитаем {clicks_to_subtract} энергии: {current_energy} → {new_energy}")
             
             await update_user(user_id, {
                 "coins": user.get("coins", 0) + data.get('gain', 0),
