@@ -96,9 +96,8 @@ async def click_processor():
     """Обработка кликов пачками (раз в 3 секунды)"""
     while True:
         try:
-            # Собираем все клики за последние 3 секунды
             batch = []
-            for _ in range(1000):  # Максимум 1000 кликов за раз
+            for _ in range(1000):
                 try:
                     click = await asyncio.wait_for(click_queue.get(), timeout=0.01)
                     batch.append(click)
@@ -106,27 +105,25 @@ async def click_processor():
                     break
             
             if batch:
-                # Группируем по пользователям
-                user_data = defaultdict(lambda: {'clicks': 0, 'gain': 0, 'mega_boost': False})
+                # Группируем по пользователям - ДОБАВИЛ tournament_score
+                user_data = defaultdict(lambda: {'clicks': 0, 'gain': 0, 'mega_boost': False, 'tournament_score': 0})
                 for click in batch:
                     uid = click['user_id']
                     user_data[uid]['clicks'] += 1
                     user_data[uid]['gain'] += click['gain']
                     user_data[uid]['mega_boost'] = click.get('mega_boost', False)
-                    user_data[uid]['tournament_score'] = click.get('tournament_score', 0)
+                    user_data[uid]['tournament_score'] = click.get('tournament_score', 0)  # ← Добавлено
                 
-                # Сохраняем в кэш и БД
                 for uid, data in user_data.items():
-                    # Обновляем кэш
                     if uid in user_cache:
                         user_cache[uid]['coins'] += data['gain']
-                        # Тратим энергию только если буст не активен
                         if not data['mega_boost']:
                             user_cache[uid]['energy'] = max(0, user_cache[uid]['energy'] - data['clicks'])
                     
-                    if data['tournament_score'] > 0:
+                    # ДОБАВИЛ проверку существования
+                    if data.get('tournament_score', 0) > 0:
                         asyncio.create_task(update_tournament_score(uid, data['tournament_score']))
-                    # Асинхронно обновляем БД
+                    
                     asyncio.create_task(update_user_db(uid, data))
                 
                 logger.info(f"✅ Processed {len(batch)} clicks for {len(user_data)} users")
@@ -134,7 +131,7 @@ async def click_processor():
         except Exception as e:
             logger.error(f"❌ Click processor error: {e}")
         
-        await asyncio.sleep(3)  # Сохраняем раз в 3 секунды
+        await asyncio.sleep(3)
 
 async def update_user_db(user_id: int, data: dict):
     """Обновление пользователя в БД"""
