@@ -144,17 +144,20 @@ async def update_user_db(user_id: int, data: dict):
             # ВЫЧИТАЕМ ВСЕ КЛИКИ, а не 1
             new_energy = current_energy
             if not data.get('mega_boost', False):
-                new_energy = max(0, current_energy - data['clicks'])  # ← ВОТ ТУТ БЫЛА ОШИБКА!
+                # ✅ ВАЖНО: вычитаем ВСЕ клики!
+                new_energy = max(0, current_energy - data.get('clicks', 0))
+            
+            print(f"⚡ Обновление энергии: user={user_id}, было={current_energy}, кликов={data.get('clicks',0)}, стало={new_energy}")
             
             await update_user(user_id, {
-                "coins": user.get("coins", 0) + data['gain'],
+                "coins": user.get("coins", 0) + data.get('gain', 0),
                 "energy": new_energy
             })
             
             # Обновляем кэш
             if user_id in user_cache:
                 user_cache[user_id]['energy'] = new_energy
-                user_cache[user_id]['coins'] = user.get("coins", 0) + data['gain']
+                user_cache[user_id]['coins'] = user.get("coins", 0) + data.get('gain', 0)
                 
     except Exception as e:
         logger.error(f"❌ DB update error for user {user_id}: {e}")
