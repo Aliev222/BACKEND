@@ -316,7 +316,10 @@ async def get_user_data(user_id: int):
             "energy_level": user.get("energy_level", 0),
             "selected_skin": user.get("extra_data", {}).get("selected_skin", "default_SP"),
             "owned_skins": user.get("extra_data", {}).get("owned_skins", ["default_SP"]),
-            "ads_watched": user.get("extra_data", {}).get("ads_watched", 0)
+            "ads_watched": user.get("extra_data", {}).get("ads_watched", 0),
+            # ✅ ДОБАВЛЯЕМ РЕФЕРАЛЬНЫЕ ПОЛЯ
+            "referral_count": user.get("referral_count", 0),
+            "referral_earnings": user.get("referral_earnings", 0)
         }
         
         # Сохраняем в кэш
@@ -742,11 +745,24 @@ async def register_user(request: RegisterRequest):
         if request.referrer_id and request.referrer_id != request.user_id:
             referrer = await get_user(request.referrer_id)
             if referrer:
+                new_coins = referrer.get("coins", 0) + 5000
+                new_count = referrer.get("referral_count", 0) + 1
+                new_earnings = referrer.get("referral_earnings", 0) + 5000
+                
                 await update_user(request.referrer_id, {
-                    "coins": referrer.get("coins", 0) + 5000,
-                    "referral_count": referrer.get("referral_count", 0) + 1,
-                    "referral_earnings": referrer.get("referral_earnings", 0) + 5000
+                    "coins": new_coins,
+                    "referral_count": new_count,
+                    "referral_earnings": new_earnings
                 })
+                
+                # Обновляем кэш
+                if request.referrer_id in user_cache:
+                    user_cache[request.referrer_id]['coins'] = new_coins
+                    # В кэше может не быть этих полей, но добавим
+                    user_cache[request.referrer_id]['referral_count'] = new_count
+                    user_cache[request.referrer_id]['referral_earnings'] = new_earnings
+                
+                logger.info(f"✅ Referral bonus: {request.referrer_id} got +5000 for {request.user_id}")
 
         return {"status": "created", "user": await get_user(request.user_id)}
     except Exception as e:

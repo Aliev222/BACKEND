@@ -93,39 +93,82 @@ async def get_user(user_id: int):
         return None
 
 
-async def add_referral_bonus(referrer_id: int, new_user_id: int):
-    async with AsyncSessionLocal() as session:
-        # 🔍 ПРОВЕРКА: не получал ли уже реферер бонус за этого пользователя
-        # Смотрим на нового пользователя - есть ли у него уже реферер
-        result = await session.execute(
-            select(User).where(User.user_id == new_user_id)
-        )
-        new_user = result.scalar_one_or_none()
-        
-        # Если у нового пользователя уже есть referrer_id, значит бонус уже начислен
-        if new_user and new_user.referrer_id is not None:
-            logging.info(f"⏭️ Бонус уже начислялся за {new_user_id} (реферер: {new_user.referrer_id})")
-            return
-        
-        # 🔍 ПРОВЕРКА: существует ли реферер
-        result = await session.execute(
-            select(User).where(User.user_id == referrer_id)
-        )
-        referrer = result.scalar_one_or_none()
-        
-        if not referrer:
-            logging.warning(f"⚠️ Реферер {referrer_id} не найден")
-            return
-        
-        # ✅ НАЧИСЛЕНИЕ БОНУСА
-        BONUS_AMOUNT = 1000
-        referrer.coins += BONUS_AMOUNT
-        referrer.referral_count += 1
-        referrer.referral_earnings += BONUS_AMOUNT
-        
-        await session.commit()
-        logging.info(f"✅ Реферальный бонус: {referrer_id} получил +{BONUS_AMOUNT} за {new_user_id}")
-        logging.info(f"📊 Теперь у {referrer_id}: приглашено={referrer.referral_count}, заработано={referrer.referral_earnings}")
+# ==================== РЕФЕРАЛЬНАЯ СИСТЕМА ====================
+
+async def add_referral_bonus(referrer_id: int, referral_id: int):
+    """Начисление бонуса рефереру за нового реферала"""
+    try:
+        async with AsyncSessionLocal() as session:
+            # Получаем реферера
+            result = await session.execute(
+                select(User).where(User.user_id == referrer_id)
+            )
+            referrer = result.scalar_one_or_none()
+            
+            if not referrer:
+                logging.error(f"❌ Реферер {referrer_id} не найден при попытке начисления бонуса за реферала {referral_id}")
+                return False
+            
+            # Обновляем поля реферера
+            referrer.coins += 5000  # Бонус за реферала
+            referrer.referral_count += 1
+            referrer.referral_earnings += 5000
+            
+            await session.commit()
+            logging.info(f"✅ Реферер {referrer_id} получил +5000 монет за реферала {referral_id}")
+            logging.info(f"📊 Теперь у реферера {referrer_id}: coins={referrer.coins}, count={referrer.referral_count}")
+            
+            return True
+            
+    except Exception as e:
+        logging.error(f"❌ Ошибка начисления бонуса рефереру {referrer_id} за реферала {referral_id}: {e}")
+        return False
+
+
+async def get_referral_stats(user_id: int):
+    """Получение реферальной статистики пользователя"""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(User).where(User.user_id == user_id)
+            )
+            user = result.scalar_one_or_none()
+            
+            if not user:
+                return {"count": 0, "earnings": 0}
+            
+            return {
+                "count": user.referral_count or 0,
+                "earnings": user.referral_earnings or 0
+            }
+            
+    except Exception as e:
+        logging.error(f"❌ Ошибка получения реферальной статистики для {user_id}: {e}")
+        return {"count": 0, "earnings": 0}
+
+
+async def get_referrals_list(user_id: int):
+    """Получение списка рефералов пользователя"""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(User).where(User.referrer_id == user_id)
+            )
+            referrals = result.scalars().all()
+            
+            return [
+                {
+                    "user_id": ref.user_id,
+                    "username": ref.username,
+                    "joined_at": ref.created_at.isoformat() if ref.created_at else None,
+                    "earned": 5000  # Фиксированный бонус за регистрацию
+                }
+                for ref in referrals
+            ]
+            
+    except Exception as e:
+        logging.error(f"❌ Ошибка получения списка рефералов для {user_id}: {e}")
+        return []
 
 
 async def get_completed_tasks(user_id: int):
@@ -181,19 +224,19 @@ async def add_user(user_id: int, username: str = None, referrer_id: int = None):
             energy_level=0,
             luck_level=0,
             last_passive_income=datetime.utcnow(),
-            referrer_id=referrer_id
+            referrer_id=referrer_id,
+            referral_count=0,
+            referral_earnings=0,
+            extra_data=json.dumps({"owned_skins": ["default_SP"], "ads_watched": 0})  # ✅ ИСПРАВЛЕНО
         )
         
         session.add(new_user)
         await session.commit()
         logging.info(f"✅ Пользователь {user_id} создан, referrer_id={referrer_id}")
         
-        # ВАЖНО: начисляем бонус ТОЛЬКО если есть реферер
         if referrer_id:
             logging.info(f"🎯 Попытка начисления бонуса: реферер {referrer_id} за реферала {user_id}")
             await add_referral_bonus(referrer_id, user_id)
-        else:
-            logging.info(f"ℹ️ Пользователь {user_id} создан без реферера")
         
         return new_user
 
