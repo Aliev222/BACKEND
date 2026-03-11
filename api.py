@@ -539,6 +539,30 @@ async def process_upgrade(request: UpgradeRequest):
         logger.error(f"Error in process_upgrade: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.post("/api/update-energy")
+async def update_energy(request: dict):
+    """Обновление энергии (после рекламы)"""
+    try:
+        user_id = request.get("user_id")
+        energy = request.get("energy")
+        
+        user = await get_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Обновляем энергию
+        await update_user(user_id, {"energy": energy})
+        
+        # Обновляем кэш
+        if user_id in user_cache:
+            user_cache[user_id]['energy'] = energy
+        
+        return {"success": True, "energy": energy}
+        
+    except Exception as e:
+        logger.error(f"Error updating energy: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 @app.post("/api/recover-energy")
 async def recover_energy(request: UserIdRequest):
     try:
