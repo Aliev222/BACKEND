@@ -137,27 +137,31 @@ async def update_user_db(user_id: int, data: dict):
     try:
         user = await get_user(user_id)
         if user:
-            # Получаем АКТУАЛЬНУЮ энергию из БД
             current_energy = user.get("energy", 0)
+            clicks = data.get('clicks', 0)
+            gain = data.get('gain', 0)
             
-            print(f"📦 Получен батч: user={user_id}, clicks={clicks}, gain={gain}")
-            # ВЫЧИТАЕМ ВСЕ КЛИКИ
+            print(f"📦 Батч: user={user_id}, clicks={clicks}, gain={gain}, текущая энергия={current_energy}")
+            
+            # Обновляем монеты
+            new_coins = user.get("coins", 0) + gain
+            
+            # Обновляем энергию (ВЫЧИТАЕМ ВСЕ КЛИКИ!)
             new_energy = current_energy
             if not data.get('mega_boost', False):
-                # ✅ ВАЖНО: используем data['clicks'] из батча
-                clicks_to_subtract = data.get('clicks', 0)
-                new_energy = max(0, current_energy - clicks_to_subtract)
-                print(f"⚡ Вычитаем {clicks_to_subtract} энергии: {current_energy} → {new_energy}")
+                new_energy = max(0, current_energy - clicks)
+                print(f"⚡ ВЫЧИТАЕМ {clicks} энергии: {current_energy} → {new_energy}")
             
+            # Сохраняем в БД
             await update_user(user_id, {
-                "coins": user.get("coins", 0) + data.get('gain', 0),
+                "coins": new_coins,
                 "energy": new_energy
             })
             
             # Обновляем кэш
             if user_id in user_cache:
                 user_cache[user_id]['energy'] = new_energy
-                user_cache[user_id]['coins'] = user.get("coins", 0) + data.get('gain', 0)
+                user_cache[user_id]['coins'] = new_coins
                 
     except Exception as e:
         logger.error(f"❌ DB update error for user {user_id}: {e}")
