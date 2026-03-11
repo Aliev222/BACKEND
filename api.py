@@ -140,6 +140,7 @@ async def update_user_db(user_id: int, data: dict):
             # Получаем АКТУАЛЬНУЮ энергию из БД
             current_energy = user.get("energy", 0)
             
+            print(f"📦 Получен батч: user={user_id}, clicks={clicks}, gain={gain}")
             # ВЫЧИТАЕМ ВСЕ КЛИКИ
             new_energy = current_energy
             if not data.get('mega_boost', False):
