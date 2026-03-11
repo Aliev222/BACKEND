@@ -545,8 +545,12 @@ async def recover_energy(request: UserIdRequest):
         max_energy = user.get("max_energy", BASE_MAX_ENERGY)
         current_energy = user.get("energy", 0)
         
+        # Добавляем 1 энергию
         if current_energy < max_energy:
-            new_energy = min(max_energy, current_energy + 1)
+            new_energy = current_energy + 1
+            # Не даем превысить максимум
+            new_energy = min(max_energy, new_energy)
+            
             await update_user(request.user_id, {"energy": new_energy})
             
             if request.user_id in user_cache:
@@ -990,27 +994,34 @@ async def passive_income(request: PassiveIncomeRequest):
         last_income = user.get('last_passive_income')
         now = datetime.utcnow()
         
-        if not last_income or (now - last_income) >= timedelta(hours=1):
-            if last_income:
-                hours_passed = int((now - last_income).total_seconds() / 3600)
-            else:
-                hours_passed = 1
-            
+        # Считаем часы с последнего сбора
+        if last_income:
+            hours_passed = int((now - last_income).total_seconds() / 3600)
+        else:
+            hours_passed = 1
+        
+        # Ограничиваем максимум 24 часа, чтобы не начислить слишком много
+        hours_passed = min(hours_passed, 24)
+        
+        if hours_passed >= 1:
             hour_value = get_hour_value(user.get("profit_level", 0))
-            total_income = hour_value * max(1, hours_passed)
+            total_income = hour_value * hours_passed
             
-            if total_income > 0:
-                user["coins"] += total_income
-                await update_user(request.user_id, {
-                    "coins": user["coins"],
-                    "last_passive_income": now
-                })
-                
-                if request.user_id in user_cache:
-                    user_cache[request.user_id]['coins'] = user["coins"]
-                
-                return {"success": True, "coins": user["coins"], "income": total_income, 
-                        "message": f"💰 +{total_income} coins"}
+            user["coins"] += total_income
+            await update_user(request.user_id, {
+                "coins": user["coins"],
+                "last_passive_income": now
+            })
+            
+            if request.user_id in user_cache:
+                user_cache[request.user_id]['coins'] = user["coins"]
+            
+            return {
+                "success": True, 
+                "coins": user["coins"], 
+                "income": total_income, 
+                "message": f"💰 +{total_income} coins за {hours_passed}ч"
+            }
         
         return {"success": True, "coins": user["coins"], "income": 0}
     except Exception as e:
