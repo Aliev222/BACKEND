@@ -21,6 +21,8 @@ from DATABASE.base import (
     init_db, get_completed_tasks, add_completed_task
 )
 
+
+
 # ==================== КОНФИГУРАЦИЯ ====================
 
 MAX_REWARD_PER_VIDEO = 5000
@@ -97,6 +99,24 @@ tournament_scores = {}  # {user_id: {"score": 0, "username": "", "last_update": 
 tournament_leaderboard = []  # Кэш таблицы лидеров
 tournament_end_time = datetime.utcnow() + timedelta(hours=24)  # Время окончания
 tournament_prize = 100000  # Приз победителю
+
+def mask_username(username):
+    """Оставляет первые 2 и последние 2 символа, остальное звездочки"""
+    if not username:
+        return "Player"
+    
+    username = str(username)
+    if len(username) <= 4:
+        return username  # Короткие ники не шифруем
+    
+    # Берем первые 2 и последние 2 символа
+    first_two = username[:2]
+    last_two = username[-2:]
+    middle_len = len(username) - 4
+    
+    # Добавляем звездочки в середину
+    masked = f"{first_two}{'*' * min(middle_len, 3)}{last_two}"
+    return masked
 
 def update_leaderboard_cache():
     """Обновление кэша таблицы лидеров"""
@@ -1133,10 +1153,10 @@ class TournamentData(BaseModel):
 
 @app.get("/api/tournament/leaderboard")
 async def get_tournament_leaderboard():
-    """Get top 5 players by coins from database"""
+    """Get top 5 players with avatars and masked names"""
     try:
-        # Получаем всех пользователей из БД
         async with AsyncSessionLocal() as session:
+            # Получаем топ-5 игроков по монетам
             result = await session.execute(
                 select(User)
                 .order_by(User.coins.desc())
@@ -1146,18 +1166,31 @@ async def get_tournament_leaderboard():
             
             players = []
             for idx, user in enumerate(top_players):
+                # Маскируем ник
+                masked_name = mask_username(user.username)
+                
+                # Формируем URL аватарки (работает если есть username в Telegram)
+                avatar_url = None
+                if user.username:
+                    # Стандартный URL аватарки Telegram
+                    avatar_url = f"https://t.me/i/userpic/320/{user.username}.jpg"
+                else:
+                    # Заглушка, если нет username
+                    avatar_url = "/imgg/default_avatar.png"
+                
                 players.append({
                     "rank": idx + 1,
                     "user_id": user.user_id,
-                    "name": user.username or f"Player_{user.user_id}",
+                    "name": masked_name,
+                    "avatar": avatar_url,
                     "score": user.coins
                 })
         
         return {
             "success": True,
             "players": players,
-            "time_left": 86400,  # Заглушка, если не нужен турнир
-            "prize_pool": 100000
+            "prize_pool": 100000,
+            "time_left": 86400  # Если нужен таймер
         }
         
     except Exception as e:
@@ -1197,9 +1230,8 @@ def update_tournament_score(user_id: int, gain: int):
 async def get_player_rank(user_id: int):
     """Get player's rank and coins"""
     try:
-        # Получаем всех пользователей для подсчета ранга
         async with AsyncSessionLocal() as session:
-            # Сначала получаем текущего пользователя
+            # Получаем текущего пользователя
             user_result = await session.execute(
                 select(User).where(User.user_id == user_id)
             )
@@ -1210,17 +1242,18 @@ async def get_player_rank(user_id: int):
                     "success": True,
                     "rank": 0,
                     "score": 0,
-                    "next_rank_score": 0
+                    "next_rank_score": 0,
+                    "avatar": "/imgg/default_avatar.png"
                 }
             
-            # Считаем сколько пользователей имеют больше монет
+            # Считаем ранг
             rank_result = await session.execute(
                 select(User).where(User.coins > user.coins)
             )
             higher_players = rank_result.scalars().all()
             rank = len(higher_players) + 1
             
-            # Находим следующий ранг (игрока сразу выше)
+            # Следующий ранг
             next_rank_score = 0
             if rank > 1:
                 next_user_result = await session.execute(
@@ -1232,18 +1265,26 @@ async def get_player_rank(user_id: int):
                 next_user = next_user_result.scalar_one_or_none()
                 if next_user:
                     next_rank_score = next_user.coins - user.coins
+            
+            # Аватарка
+            avatar_url = None
+            if user.username:
+                avatar_url = f"https://t.me/i/userpic/320/{user.username}.jpg"
+            else:
+                avatar_url = "/imgg/default_avatar.png"
         
         return {
             "success": True,
             "rank": rank,
             "score": user.coins,
-            "next_rank_score": next_rank_score
+            "next_rank_score": next_rank_score,
+            "avatar": avatar_url,
+            "name": mask_username(user.username)
         }
         
     except Exception as e:
         logger.error(f"Error getting player rank: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-
 # ==================== ЗАДАЧИ ====================
 
 _task_completion_store = {}
