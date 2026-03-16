@@ -90,6 +90,111 @@ user_cache = {}  # Локальный кэш пользователей
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# ==================== ТУРНИРНЫЕ ДАННЫЕ ====================
+tournament_scores = {}  # {user_id: {"score": 0, "username": "", "last_update": datetime}}
+tournament_leaderboard = []  # Кэш таблицы лидеров
+tournament_end_time = datetime.utcnow() + timedelta(hours=24)  # Время окончания
+tournament_prize = 100000  # Приз победителю
+
+def update_leaderboard_cache():
+    """Обновление кэша таблицы лидеров"""
+    global tournament_leaderboard, tournament_scores
+    
+    # Сортируем игроков по счету
+    sorted_players = sorted(
+        tournament_scores.items(),
+        key=lambda x: x[1]["score"],
+        reverse=True
+    )[:100]  # Топ-100
+    
+    # Форматируем для ответа
+    tournament_leaderboard = [
+        {
+            "rank": idx + 1,
+            "user_id": player[0],
+            "name": player[1].get("username") or f"Player_{player[0]}",
+            "score": player[1]["score"]
+        }
+        for idx, player in enumerate(sorted_players)
+    ]
+
+def update_tournament_score(user_id: int, gain: int):
+    """Обновление счета в турнире"""
+    global tournament_scores
+    
+    try:
+        # Получаем или создаем запись
+        if user_id not in tournament_scores:
+            # Получаем username из кэша или БД
+            username = None
+            if user_id in user_cache:
+                username = user_cache[user_id].get('username')
+            
+            tournament_scores[user_id] = {
+                "score": 0,
+                "username": username,
+                "last_update": datetime.utcnow()
+            }
+        
+        # Обновляем счет
+        tournament_scores[user_id]["score"] += gain
+        tournament_scores[user_id]["last_update"] = datetime.utcnow()
+        
+        # Обновляем кэш лидеров (топ-100)
+        update_leaderboard_cache()
+        
+    except Exception as e:
+        logger.error(f"Error updating tournament score for {user_id}: {e}")
+
+async def award_tournament_winner(user_id: int, prize: int):
+    """Начисление награды победителю турнира"""
+    try:
+        user = await get_user(user_id)
+        if user:
+            new_coins = user.get("coins", 0) + prize
+            await update_user(user_id, {"coins": new_coins})
+            
+            # Обновляем кэш
+            if user_id in user_cache:
+                user_cache[user_id]['coins'] = new_coins
+            
+            logger.info(f"💰 Победитель турнира {user_id} получил {prize} монет")
+    except Exception as e:
+        logger.error(f"❌ Ошибка награждения победителя: {e}")
+
+async def reset_tournament():
+    """Сброс турнира каждые 24 часа и начисление награды"""
+    global tournament_scores, tournament_end_time, tournament_leaderboard
+    
+    while True:
+        try:
+            now = datetime.utcnow()
+            
+            # Проверяем, не пора ли сбросить турнир
+            if tournament_end_time and now > tournament_end_time:
+                # Находим победителя
+                if tournament_scores:
+                    winner_id = max(tournament_scores.items(), key=lambda x: x[1]["score"])[0]
+                    winner_data = tournament_scores[winner_id]
+                    
+                    # Начисляем награду
+                    await award_tournament_winner(winner_id, tournament_prize)
+                    
+                    logger.info(f"🏆 Турнир завершен! Победитель: {winner_data.get('username', winner_id)}")
+                
+                # Сбрасываем турнир
+                tournament_scores = {}
+                tournament_leaderboard = []
+                tournament_end_time = now + timedelta(hours=24)
+                logger.info(f"🔄 Новый турнир начат, до окончания: 24 часа")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в турнирном таймере: {e}")
+        
+        await asyncio.sleep(60)  # Проверка каждую минуту
+
+
+
 # ==================== ФОНОВЫЕ ЗАДАЧИ ====================
 
 async def click_processor():
@@ -179,6 +284,7 @@ async def lifespan(app: FastAPI):
     
     # Запуск фоновых задач
     asyncio.create_task(click_processor())
+    asyncio.create_task(reset_tournament())
     logger.info("✅ Background tasks started")
     
     yield
@@ -346,6 +452,9 @@ async def process_click(request: ClickRequest):
             'tournament_score': request.tournament_score
         })
         
+        update_tournament_score(request.user_id, request.gain)
+
+
         # Если есть кэш - обновляем его сразу для UI
         if request.user_id in user_cache:
             user_cache[request.user_id]['coins'] += request.gain
@@ -1017,20 +1126,26 @@ class TournamentData(BaseModel):
 async def get_tournament_leaderboard():
     """Get current tournament leaderboard"""
     try:
-        # Здесь должна быть логика получения данных из БД
-        # Пока возвращаем заглушку
+        # Используем кэш, если есть
+        if tournament_leaderboard:
+            players = tournament_leaderboard[:5]  # Топ-5
+        else:
+            players = []
+        
+        # Время до окончания
+        time_left = 86400  # 24 часа в секундах
+        if tournament_end_time:
+            time_left = int((tournament_end_time - datetime.utcnow()).total_seconds())
+            if time_left < 0:
+                time_left = 0
+        
         return {
             "success": True,
-            "players": [
-                {"rank": 1, "name": "CryptoKing", "score": 157890},
-                {"rank": 2, "name": "SpiritMaster", "score": 143200},
-                {"rank": 3, "name": "ClickerPro", "score": 128450},
-                {"rank": 4, "name": "CoinHunter", "score": 112300},
-                {"rank": 5, "name": "TapLegend", "score": 98700}
-            ],
-            "time_left": 86399,  # 23:59:59 в секундах
-            "prize_pool": 100000
+            "players": players,
+            "time_left": time_left,
+            "prize_pool": tournament_prize
         }
+        
     except Exception as e:
         logger.error(f"Error getting leaderboard: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1042,7 +1157,10 @@ async def update_tournament_score(request: TournamentData):
         user_id = request.user_id
         score = request.score
         
-        # Здесь логика обновления счета в БД
+        # Обновляем счет в турнире
+        if user_id in tournament_scores:
+            tournament_scores[user_id]["score"] = score
+            update_leaderboard_cache()
         
         return {"success": True, "message": "Score updated"}
         
@@ -1054,13 +1172,36 @@ async def update_tournament_score(request: TournamentData):
 async def get_player_rank(user_id: int):
     """Get player's current rank in tournament"""
     try:
-        # Здесь логика получения ранга игрока из БД
+        rank = None
+        score = 0
+        
+        if user_id in tournament_scores:
+            score = tournament_scores[user_id]["score"]
+            
+            # Находим ранг
+            sorted_scores = sorted(
+                tournament_scores.items(),
+                key=lambda x: x[1]["score"],
+                reverse=True
+            )
+            
+            for idx, (uid, data) in enumerate(sorted_scores):
+                if uid == user_id:
+                    rank = idx + 1
+                    break
+        
+        # Следующий ранг
+        next_rank_score = None
+        if rank and rank > 1 and len(sorted_scores) > rank - 2:
+            next_rank_score = sorted_scores[rank - 2][1]["score"] - score
+        
         return {
             "success": True,
-            "rank": 42,
-            "score": 87650,
-            "next_rank_score": 90000
+            "rank": rank or 0,
+            "score": score,
+            "next_rank_score": next_rank_score or 0
         }
+        
     except Exception as e:
         logger.error(f"Error getting player rank: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
