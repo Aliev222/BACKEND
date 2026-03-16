@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 from collections import defaultdict
+from sqlalchemy import select
+from DATABASE.base import User, AsyncSessionLocal
 
 from DATABASE.base import (
     get_user, add_user as create_user, update_user,
@@ -1131,26 +1133,31 @@ class TournamentData(BaseModel):
 
 @app.get("/api/tournament/leaderboard")
 async def get_tournament_leaderboard():
-    """Get current tournament leaderboard"""
+    """Get top 5 players by coins from database"""
     try:
-        # Используем кэш, если есть
-        if tournament_leaderboard:
-            players = tournament_leaderboard[:5]  # Топ-5
-        else:
+        # Получаем всех пользователей из БД
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(User)
+                .order_by(User.coins.desc())
+                .limit(5)
+            )
+            top_players = result.scalars().all()
+            
             players = []
-        
-        # Время до окончания
-        time_left = 86400  # 24 часа в секундах
-        if tournament_end_time:
-            time_left = int((tournament_end_time - datetime.utcnow()).total_seconds())
-            if time_left < 0:
-                time_left = 0
+            for idx, user in enumerate(top_players):
+                players.append({
+                    "rank": idx + 1,
+                    "user_id": user.user_id,
+                    "name": user.username or f"Player_{user.user_id}",
+                    "score": user.coins
+                })
         
         return {
             "success": True,
             "players": players,
-            "time_left": time_left,
-            "prize_pool": tournament_prize
+            "time_left": 86400,  # Заглушка, если не нужен турнир
+            "prize_pool": 100000
         }
         
     except Exception as e:
@@ -1188,36 +1195,49 @@ def update_tournament_score(user_id: int, gain: int):
         logger.error(f"Error updating tournament score for {user_id}: {e}")
 @app.get("/api/tournament/player-rank/{user_id}")
 async def get_player_rank(user_id: int):
-    """Get player's current rank in tournament"""
+    """Get player's rank and coins"""
     try:
-        rank = None
-        score = 0
-        
-        if user_id in tournament_scores:
-            score = tournament_scores[user_id]["score"]
-            
-            # Находим ранг
-            sorted_scores = sorted(
-                tournament_scores.items(),
-                key=lambda x: x[1]["score"],
-                reverse=True
+        # Получаем всех пользователей для подсчета ранга
+        async with AsyncSessionLocal() as session:
+            # Сначала получаем текущего пользователя
+            user_result = await session.execute(
+                select(User).where(User.user_id == user_id)
             )
+            user = user_result.scalar_one_or_none()
             
-            for idx, (uid, data) in enumerate(sorted_scores):
-                if uid == user_id:
-                    rank = idx + 1
-                    break
-        
-        # Следующий ранг
-        next_rank_score = None
-        if rank and rank > 1 and len(sorted_scores) > rank - 2:
-            next_rank_score = sorted_scores[rank - 2][1]["score"] - score
+            if not user:
+                return {
+                    "success": True,
+                    "rank": 0,
+                    "score": 0,
+                    "next_rank_score": 0
+                }
+            
+            # Считаем сколько пользователей имеют больше монет
+            rank_result = await session.execute(
+                select(User).where(User.coins > user.coins)
+            )
+            higher_players = rank_result.scalars().all()
+            rank = len(higher_players) + 1
+            
+            # Находим следующий ранг (игрока сразу выше)
+            next_rank_score = 0
+            if rank > 1:
+                next_user_result = await session.execute(
+                    select(User)
+                    .where(User.coins > user.coins)
+                    .order_by(User.coins.asc())
+                    .limit(1)
+                )
+                next_user = next_user_result.scalar_one_or_none()
+                if next_user:
+                    next_rank_score = next_user.coins - user.coins
         
         return {
             "success": True,
-            "rank": rank or 0,
-            "score": score,
-            "next_rank_score": next_rank_score or 0
+            "rank": rank,
+            "score": user.coins,
+            "next_rank_score": next_rank_score
         }
         
     except Exception as e:
