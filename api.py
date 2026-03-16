@@ -100,12 +100,16 @@ def update_leaderboard_cache():
     """Обновление кэша таблицы лидеров"""
     global tournament_leaderboard, tournament_scores
     
+    print(f"🔄 Обновление кэша, игроков: {len(tournament_scores)}")  # ← ОТЛАДКА
+    
     # Сортируем игроков по счету
     sorted_players = sorted(
         tournament_scores.items(),
         key=lambda x: x[1]["score"],
         reverse=True
     )[:100]  # Топ-100
+    
+    print(f"📊 Топ-5: {[(p[0], p[1]['score']) for p in sorted_players[:5]]}")  # ← ОТЛАДКА
     
     # Форматируем для ответа
     tournament_leaderboard = [
@@ -117,6 +121,8 @@ def update_leaderboard_cache():
         }
         for idx, player in enumerate(sorted_players)
     ]
+    
+    print(f"✅ Кэш обновлен, записей: {len(tournament_leaderboard)}")  # ← ОТЛАДКА
 
 def update_tournament_score(user_id: int, gain: int):
     """Обновление счета в турнире"""
