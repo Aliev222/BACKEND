@@ -1169,13 +1169,11 @@ async def get_tournament_leaderboard():
                 # Маскируем ник
                 masked_name = mask_username(user.username)
                 
-                # Формируем URL аватарки (работает если есть username в Telegram)
+                # Формируем URL аватарки
                 avatar_url = None
                 if user.username:
-                    # Стандартный URL аватарки Telegram
                     avatar_url = f"https://t.me/i/userpic/320/{user.username}.jpg"
                 else:
-                    # Заглушка, если нет username
                     avatar_url = "/imgg/default_avatar.png"
                 
                 players.append({
@@ -1186,11 +1184,16 @@ async def get_tournament_leaderboard():
                     "score": user.coins
                 })
         
+        # ✅ ПРАВИЛЬНЫЙ РАСЧЕТ ТАЙМЕРА (до конца дня)
+        now = datetime.utcnow()
+        tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        time_left = int((tomorrow - now).total_seconds())
+        
         return {
             "success": True,
             "players": players,
             "prize_pool": 100000,
-            "time_left": 86400  # Если нужен таймер
+            "time_left": time_left  # ← ТЕПЕРЬ ПРАВИЛЬНОЕ ВРЕМЯ
         }
         
     except Exception as e:
