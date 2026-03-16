@@ -100,16 +100,6 @@ tournament_leaderboard = []  # Кэш таблицы лидеров
 tournament_end_time = datetime.utcnow() + timedelta(hours=24)  # Время окончания
 tournament_prize = 100000  # Приз победителю
 
-# ==================== ЕЖЕДНЕВНЫЙ ТУРНИР ====================
-daily_tournament_scores = {}  # Счет за сегодня
-daily_tournament_leaderboard = []  # Кэш топа
-daily_tournament_end_time = None  # Время окончания сегодня
-daily_tournament_prizes = {
-    1: 100000,  # 1 место
-    2: 50000,   # 2 место
-    3: 25000    # 3 место
-}
-
 def mask_username(username):
     """Оставляет первые 2 и последние 2 символа, остальное звездочки"""
     if not username:
@@ -155,145 +145,6 @@ def update_leaderboard_cache():
     ]
     
     print(f"✅ Кэш обновлен, записей: {len(tournament_leaderboard)}")  # ← ОТЛАДКА
-
-
-def update_daily_tournament_score(user_id: int, gain: int):
-    """Обновление счета в ежедневном турнире"""
-    global daily_tournament_scores
-    
-    try:
-        # Получаем или создаем запись
-        if user_id not in daily_tournament_scores:
-            # Получаем username из кэша или БД
-            username = None
-            avatar = None
-            if user_id in user_cache:
-                username = user_cache[user_id].get('username')
-            
-            daily_tournament_scores[user_id] = {
-                "score": 0,
-                "username": username,
-                "last_update": datetime.utcnow()
-            }
-        
-        # Обновляем счет
-        daily_tournament_scores[user_id]["score"] += gain
-        daily_tournament_scores[user_id]["last_update"] = datetime.utcnow()
-        
-        # Обновляем кэш лидеров
-        update_daily_leaderboard_cache()
-        
-    except Exception as e:
-        logger.error(f"Error updating daily tournament score for {user_id}: {e}")
-
-def update_daily_leaderboard_cache():
-    """Обновление кэша ежедневного турнира"""
-    global daily_tournament_leaderboard, daily_tournament_scores
-    
-    # Сортируем игроков по счету
-    sorted_players = sorted(
-        daily_tournament_scores.items(),
-        key=lambda x: x[1]["score"],
-        reverse=True
-    )[:100]  # Топ-100
-    
-    # Форматируем для ответа
-    daily_tournament_leaderboard = [
-        {
-            "rank": idx + 1,
-            "user_id": player[0],
-            "name": player[1].get("username") or f"Player_{player[0]}",
-            "score": player[1]["score"]
-        }
-        for idx, player in enumerate(sorted_players)
-    ]
-
-async def award_daily_tournament_winners():
-    """Награждение топ-3 игроков ежедневного турнира"""
-    global daily_tournament_scores
-    
-    try:
-        if not daily_tournament_scores:
-            logger.info("📭 Нет участников в ежедневном турнире")
-            return
-        
-        # Сортируем игроков по счету
-        sorted_players = sorted(
-            daily_tournament_scores.items(),
-            key=lambda x: x[1]["score"],
-            reverse=True
-        )[:3]  # Топ-3
-        
-        logger.info(f"🏆 Награждение победителей: {len(sorted_players)} игроков")
-        
-        for idx, (user_id, data) in enumerate(sorted_players):
-            place = idx + 1
-            prize = daily_tournament_prizes.get(place, 0)
-            
-            if prize > 0:
-                # Получаем пользователя из БД
-                user = await get_user(user_id)
-                if user:
-                    new_coins = user.get("coins", 0) + prize
-                    await update_user(user_id, {"coins": new_coins})
-                    
-                    # Обновляем кэш
-                    if user_id in user_cache:
-                        user_cache[user_id]['coins'] = new_coins
-                    
-                    logger.info(f"💰 Игрок {user_id} занял {place} место и получил {prize} монет")
-        
-        # Сохраняем историю победителей (опционально)
-        winners_history = []
-        for idx, (user_id, data) in enumerate(sorted_players):
-            winners_history.append({
-                "date": datetime.utcnow().date().isoformat(),
-                "place": idx + 1,
-                "user_id": user_id,
-                "username": data.get("username"),
-                "score": data.get("score"),
-                "prize": daily_tournament_prizes.get(idx + 1, 0)
-            })
-        
-        # Можно сохранить в БД или файл
-        logger.info(f"📅 Турнир за {datetime.utcnow().date()} завершен")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка награждения: {e}")
-
-async def reset_daily_tournament():
-    """Сброс ежедневного турнира в 00:00 UTC"""
-    global daily_tournament_scores, daily_tournament_leaderboard, daily_tournament_end_time
-    
-    while True:
-        try:
-            now = datetime.utcnow()
-            
-            # Вычисляем время до следующего дня (00:00 UTC)
-            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            seconds_until_midnight = (tomorrow - now).total_seconds()
-            
-            # Устанавливаем время окончания
-            daily_tournament_end_time = tomorrow
-            
-            # Ждем до полуночи
-            logger.info(f"⏰ Следующий сброс турнира через {seconds_until_midnight/3600:.1f} часов")
-            await asyncio.sleep(seconds_until_midnight)
-            
-            # Награждаем победителей
-            await award_daily_tournament_winners()
-            
-            # Сбрасываем турнир
-            daily_tournament_scores = {}
-            daily_tournament_leaderboard = []
-            logger.info(f"🔄 Ежедневный турнир сброшен, новый день начался")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка в ежедневном турнире: {e}")
-            await asyncio.sleep(60)  # Если ошибка, ждем минуту и пробуем снова
-
-
-
 
 def update_tournament_score(user_id: int, gain: int):
     """Обновление счета в турнире"""
@@ -452,13 +303,16 @@ async def update_user_db(user_id: int, data: dict):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Запуск и остановка сервера"""
     logger.info("🚀 Starting Ryoho Clicker API")
     
+    # Инициализация
     await init_db()
+    logger.info("✅ Database initialized")
     
     # Запуск фоновых задач
     asyncio.create_task(click_processor())
-    asyncio.create_task(reset_daily_tournament())  # ← ДОБАВЬ ЭТО
+    asyncio.create_task(reset_tournament())
     logger.info("✅ Background tasks started")
     
     yield
@@ -627,7 +481,7 @@ async def process_click(request: ClickRequest):
             'tournament_score': request.tournament_score
         })
         
-        update_daily_tournament_score(request.user_id, request.gain)
+        update_tournament_score(request.user_id, request.gain)
 
 
         # Если есть кэш - обновляем его сразу для UI
@@ -1730,74 +1584,6 @@ async def get_skins_list():
         }
     ]
     return {"skins": skins}
-
-@app.get("/api/daily-tournament/leaderboard")
-async def get_daily_tournament_leaderboard():
-    """Get current daily tournament leaderboard"""
-    try:
-        # Используем кэш
-        if daily_tournament_leaderboard:
-            players = daily_tournament_leaderboard[:5]  # Топ-5
-        else:
-            players = []
-        
-        # Время до окончания
-        time_left = 86400  # 24 часа по умолчанию
-        if daily_tournament_end_time:
-            time_left = int((daily_tournament_end_time - datetime.utcnow()).total_seconds())
-            if time_left < 0:
-                time_left = 0
-        
-        return {
-            "success": True,
-            "players": players,
-            "time_left": time_left,
-            "prizes": daily_tournament_prizes
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting daily leaderboard: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.get("/api/daily-tournament/player-rank/{user_id}")
-async def get_daily_player_rank(user_id: int):
-    """Get player's rank in daily tournament"""
-    try:
-        rank = None
-        score = 0
-        
-        if user_id in daily_tournament_scores:
-            score = daily_tournament_scores[user_id]["score"]
-            
-            # Находим ранг
-            sorted_scores = sorted(
-                daily_tournament_scores.items(),
-                key=lambda x: x[1]["score"],
-                reverse=True
-            )
-            
-            for idx, (uid, data) in enumerate(sorted_scores):
-                if uid == user_id:
-                    rank = idx + 1
-                    break
-        
-        # Следующий ранг
-        next_rank_score = None
-        if rank and rank > 1 and len(sorted_scores) > rank - 2:
-            next_rank_score = sorted_scores[rank - 2][1]["score"] - score
-        
-        return {
-            "success": True,
-            "rank": rank or 0,
-            "score": score,
-            "next_rank_score": next_rank_score or 0
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting daily player rank: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
 
 @app.post("/api/select-skin")
 async def select_skin(request: SkinRequest):
