@@ -412,6 +412,7 @@ async def get_user_data(user_id: int):
         
         # Формируем ответ
         user_data = {
+            "username": user.get("username"),
             "coins": user.get("coins", 0),
             "energy": user.get("energy", 0),
             "max_energy": user.get("max_energy", BASE_MAX_ENERGY),
@@ -1150,24 +1151,35 @@ async def get_tournament_leaderboard():
         logger.error(f"Error getting leaderboard: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.post("/api/tournament/update-score")
-async def update_tournament_score(request: TournamentData):
-    """Update player's tournament score"""
+def update_tournament_score(user_id: int, gain: int):
+    """Обновление счета в турнире"""
+    global tournament_scores
+    
     try:
-        user_id = request.user_id
-        score = request.score
+        print(f"🔥 ВЫЗОВ update_tournament_score: user={user_id}, gain={gain}")  # ← ДОБАВЬ
         
-        # Обновляем счет в турнире
-        if user_id in tournament_scores:
-            tournament_scores[user_id]["score"] = score
-            update_leaderboard_cache()
+        if user_id not in tournament_scores:
+            print(f"🆕 Новый игрок в турнире: {user_id}")  # ← ДОБАВЬ
+            
+            username = None
+            if user_id in user_cache:
+                username = user_cache[user_id].get('username')
+                print(f"📛 Username из кэша: {username}")  # ← ДОБАВЬ
+            
+            tournament_scores[user_id] = {
+                "score": 0,
+                "username": username,
+                "last_update": datetime.utcnow()
+            }
         
-        return {"success": True, "message": "Score updated"}
+        old_score = tournament_scores[user_id]["score"]
+        tournament_scores[user_id]["score"] += gain
+        print(f"📊 Счет: {old_score} → {tournament_scores[user_id]['score']}")  # ← ДОБАВЬ
+        
+        update_leaderboard_cache()
         
     except Exception as e:
-        logger.error(f"Error updating tournament score: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
+        logger.error(f"Error updating tournament score for {user_id}: {e}")
 @app.get("/api/tournament/player-rank/{user_id}")
 async def get_player_rank(user_id: int):
     """Get player's current rank in tournament"""
