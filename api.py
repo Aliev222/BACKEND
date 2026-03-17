@@ -18,6 +18,8 @@ from DATABASE.base import User, AsyncSessionLocal
 from datetime import datetime, timedelta
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
+from collections import defaultdict, deque
+from dataclasses import dataclass
 
 from DATABASE.base import (
     get_user, add_user as create_user, update_user,
@@ -34,6 +36,22 @@ MIN_BET = 10
 BASE_MAX_ENERGY = 500
 ENERGY_REGEN_SECONDS = 2  # 1 энергия каждые 5 секунд
 
+# ==================== АНТИСПАМ / АНТИЧИТ ====================
+
+MAX_REAL_CLICKS_PER_SECOND = 25   # честный быстрый таппер
+CLICK_BURST_ALLOWANCE = 15        # небольшой запас на батч
+MAX_CLICK_BATCH_SIZE = 200        # жёсткий серверный потолок на один батч
+
+RATE_LIMITS = {
+    "reward_video": (5, 60),         # 5 запросов в минуту
+    "activate_mega_boost": (10, 60), # 10 в минуту
+    "update_energy": (10, 60),       # 10 в минуту
+    "complete_task": (20, 60),       # 20 в минуту
+    "cpa_status": (60, 60),          # 60 в минуту
+    "game_action": (30, 60),         # 30 в минуту на мини-игры
+}
+
+rate_limit_store = defaultdict(deque)
 # ==================== ЦЕНЫ АПГРЕЙДОВ ====================
 
 UPGRADE_PRICES = {
@@ -119,10 +137,61 @@ def mask_username(username):
     return masked
 
 
+# ==================== Вспомогательные функции антиспама ====================
 
 
+def check_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
+    """
+    Простая in-memory защита от спама.
+    True = запрос можно пропустить
+    False = лимит превышен
+    """
+    now = time.time()
+    bucket = rate_limit_store[key]
+
+    # Удаляем старые записи за пределами окна
+    while bucket and bucket[0] <= now - window_seconds:
+        bucket.popleft()
+
+    if len(bucket) >= limit:
+        return False
+
+    bucket.append(now)
+    return True
 
 
+def require_rate_limit(namespace: str, user_id: int, limit: int, window_seconds: int):
+    """
+    Бросает 429, если пользователь превысил лимит.
+    """
+    key = f"{namespace}:{user_id}"
+    if not check_rate_limit(key, limit, window_seconds):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests"
+        )
+
+
+def get_allowed_clicks(user: dict, now: datetime, requested_clicks: int) -> int:
+    """
+    Ограничиваем число кликов в батче по времени с прошлого серверного апдейта.
+    Не тормозит UX, но режет нереалистичный спам.
+    """
+    last_update = _normalize_dt(user.get("last_energy_update"))
+
+    # На первом батче даём разумный стартовый лимит
+    if not last_update:
+        return min(requested_clicks, 60, MAX_CLICK_BATCH_SIZE)
+
+    elapsed = max(0.0, (now - last_update).total_seconds())
+
+    # Сколько честно могло накопиться кликов за это время
+    allowed_by_time = int(elapsed * MAX_REAL_CLICKS_PER_SECOND) + CLICK_BURST_ALLOWANCE
+
+    # Минимальный запас, чтобы честный игрок не упирался в ноль
+    allowed = max(1, min(allowed_by_time, MAX_CLICK_BATCH_SIZE))
+
+    return min(requested_clicks, allowed)
 
 
 
@@ -354,6 +423,8 @@ async def activate_mega_boost(request: BoostActivateRequest):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
+        require_rate_limit("activate_mega_boost", request.user_id, *RATE_LIMITS["activate_mega_boost"])
+
         extra = user.get("extra_data", {})
         if not isinstance(extra, dict):
             extra = {}
@@ -401,6 +472,8 @@ async def reward_video(request: dict):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
+        require_rate_limit("reward_video", user_id, *RATE_LIMITS["reward_video"])
+
         # Начисляем награду
         reward = 5000
         user["coins"] += reward
@@ -517,6 +590,8 @@ async def update_energy(request: dict):
         if not user_id:
             raise HTTPException(status_code=400, detail="user_id required")
 
+        require_rate_limit("update_energy", user_id, *RATE_LIMITS["update_energy"])
+
         user = await get_user(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -551,7 +626,7 @@ async def recover_energy_legacy(request: UserIdRequest):
         max_energy = user.get("max_energy", BASE_MAX_ENERGY)
         current_energy = user.get("energy", 0)
         
-        print(f"⚡ Запрос (legacy): user={request.user_id}, current={current_energy}")
+       
         
         if current_energy < max_energy:
             new_energy = min(max_energy, current_energy + 3)
@@ -563,12 +638,12 @@ async def recover_energy_legacy(request: UserIdRequest):
             
             
             
-            print(f"✅ Энергия: {current_energy} → {new_energy} (+3)")
+            
             return {"energy": new_energy}
         
         return {"energy": current_energy}
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+       
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/sync-energy")
@@ -696,7 +771,7 @@ async def process_clicks_batch(request: ClicksBatchRequest):
 
         now = datetime.utcnow()
 
-        max_energy = int(user.get("max_energy", 500))
+        max_energy = int(user.get("max_energy", BASE_MAX_ENERGY))
         current_energy = calculate_current_energy(user, now)
 
         multitap_level = int(user.get("multitap_level", 0))
@@ -705,54 +780,24 @@ async def process_clicks_batch(request: ClicksBatchRequest):
         extra = user.get("extra_data", {}) or {}
         if isinstance(extra, str):
             try:
-                import json
                 extra = json.loads(extra)
             except Exception:
                 extra = {}
 
-        # Скин
         selected_skin = extra.get("selected_skin", "default_SP")
-        skin_multipliers = {
-            "default_SP": 1.0,
-            "skin_lvl_1": 1.1,
-            "skin_lvl_2": 1.2,
-            "skin_lvl_3": 1.3,
-            "skin_lvl_4": 1.4,
-            "skin_lvl_5": 1.5,
-            "skin_lvl_6": 1.6,
-            "skin_lvl_7": 2.0,
-            "skin_video_1": 1.2,
-            "skin_video_2": 1.3,
-            "skin_video_3": 1.4,
-            "skin_video_4": 1.5,
-            "skin_video_5": 1.75,
-            "skin_video_6": 2.0,
-            "skin_friend_1": 1.1,
-            "skin_friend_2": 1.2,
-            "skin_friend_3": 1.3,
-            "skin_friend_4": 1.5,
-            "skin_friend_5": 1.75,
-            "skin_friend_6": 2.0,
-            "skin_cpa_1": 2.5,
-        }
-        skin_multiplier = float(skin_multipliers.get(selected_skin, 1.0))
+        skin_multiplier = float(SKIN_MULTIPLIERS.get(selected_skin, 1.0))
 
-        # Буст x2
-        mega_boost_active = False
-        active_boosts = extra.get("active_boosts", {}) if isinstance(extra, dict) else {}
-        mega_boost = active_boosts.get("mega_boost")
-        if mega_boost and mega_boost.get("expires_at"):
-            try:
-                expires_at = datetime.fromisoformat(mega_boost["expires_at"])
-                mega_boost_active = now < expires_at
-            except Exception:
-                mega_boost_active = False
+        mega_boost_active = is_mega_boost_active(user)
 
         coin_per_tap = max(1, int(tap_value * skin_multiplier))
         if mega_boost_active:
             coin_per_tap *= 2
 
-        effective_clicks = min(request.clicks, current_energy)
+        # Серверная защита от нереалистичного количества кликов
+        safe_requested_clicks = min(request.clicks, MAX_CLICK_BATCH_SIZE)
+        allowed_clicks = get_allowed_clicks(user, now, safe_requested_clicks)
+
+        effective_clicks = min(allowed_clicks, current_energy)
         gained = effective_clicks * coin_per_tap
 
         new_energy = max(0, current_energy - effective_clicks)
@@ -763,9 +808,6 @@ async def process_clicks_batch(request: ClicksBatchRequest):
             "energy": new_energy,
             "last_energy_update": now
         })
-
-        
-        
 
         return {
             "success": True,
@@ -874,6 +916,8 @@ async def cpa_status(request: dict):
     """Проверка статуса CPA-задания"""
     try:
         user_id = request.get("user_id")
+        if user_id:
+            require_rate_limit("cpa_status", user_id, *RATE_LIMITS["cpa_status"])
         offer_id = request.get("offer_id")
         check_only = request.get("check_only", False)
         
@@ -926,7 +970,7 @@ async def play_coinflip(request: GameRequest):
         user = await get_user(request.user_id)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
-        
+        require_rate_limit("game_action", request.user_id, *RATE_LIMITS["game_action"])
         win = random.choice([True, False])
         if win:
             user["coins"] += request.bet
@@ -950,7 +994,7 @@ async def play_slots(request: GameRequest):
         user = await get_user(request.user_id)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
-        
+        require_rate_limit("game_action", request.user_id, *RATE_LIMITS["game_action"])
         symbols = ["🍒", "🍋", "🍊", "7️⃣", "💎"]
         slots = [random.choice(symbols) for _ in range(3)]
         win = len(set(slots)) == 1
@@ -979,7 +1023,7 @@ async def play_dice(request: GameRequest):
         user = await get_user(request.user_id)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
-        
+        require_rate_limit("game_action", request.user_id, *RATE_LIMITS["game_action"])
         dice1 = random.randint(1, 6)
         dice2 = random.randint(1, 6)
         total = dice1 + dice2
@@ -1021,7 +1065,7 @@ async def play_roulette(request: GameRequest):
         user = await get_user(request.user_id)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
-        
+        require_rate_limit("game_action", request.user_id, *RATE_LIMITS["game_action"])
         red_numbers = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]
         
         result = random.randint(0, 36)
@@ -1226,7 +1270,8 @@ async def complete_task(request: TaskCompleteRequest):
         user = await get_user(request.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
+        require_rate_limit("complete_task", request.user_id, *RATE_LIMITS["complete_task"])
+
         task_id = request.task_id
         
         if task_id == "link_click":
