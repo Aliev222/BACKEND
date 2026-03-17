@@ -634,11 +634,6 @@ async def update_energy(request: dict):
         now = datetime.utcnow()
         max_energy = int(user.get("max_energy", 500))
 
-        await update_user(user_id, {
-            "energy": max_energy,
-            "last_energy_update": now
-        })
-
         if user_id in user_cache:
             user_cache[user_id]["energy"] = max_energy
             user_cache[user_id]["last_energy_update"] = now
