@@ -388,9 +388,7 @@ class EnergySyncRequest(BaseModel):
 
 class ClicksBatchRequest(BaseModel):
     user_id: int
-    clicks: int
-    gain: int
-    mega_boost: bool = False
+    clicks: int = Field(..., ge=1, le=500)
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def get_tap_value(level: int) -> int:
@@ -813,39 +811,127 @@ async def sync_energy(request: EnergySyncRequest):
         logger.error(f"Error in sync_energy: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+SKIN_MULTIPLIERS = {
+    "default_SP": 1.0,
+
+    "skin_lvl_1": 1.1,
+    "skin_lvl_2": 1.2,
+    "skin_lvl_3": 1.3,
+    "skin_lvl_4": 1.4,
+    "skin_lvl_5": 1.5,
+    "skin_lvl_6": 1.6,
+    "skin_lvl_7": 2.0,
+
+    "skin_video_1": 1.2,
+    "skin_video_2": 1.3,
+    "skin_video_3": 1.4,
+    "skin_video_4": 1.5,
+    "skin_video_5": 1.75,
+    "skin_video_6": 2.0,
+
+    "skin_friend_1": 1.1,
+    "skin_friend_2": 1.2,
+    "skin_friend_3": 1.3,
+    "skin_friend_4": 1.5,
+    "skin_friend_5": 1.75,
+    "skin_friend_6": 2.0,
+
+    "skin_cpa_1": 2.5,
+}
+
+
+def get_selected_skin_multiplier(user: dict) -> float:
+    extra = user.get("extra_data", {})
+    if not isinstance(extra, dict):
+        return 1.0
+
+    selected_skin = extra.get("selected_skin", "default_SP")
+    return SKIN_MULTIPLIERS.get(selected_skin, 1.0)
+
+
+def is_mega_boost_active(user: dict) -> bool:
+    extra = user.get("extra_data", {})
+    if not isinstance(extra, dict):
+        return False
+
+    active_boosts = extra.get("active_boosts", {})
+    boost = active_boosts.get("mega_boost")
+    if not boost:
+        return False
+
+    expires_at = boost.get("expires_at")
+    if not expires_at:
+        return False
+
+    try:
+        expires_dt = datetime.fromisoformat(expires_at)
+        return datetime.utcnow() < expires_dt
+    except Exception:
+        return False
+
 
 @app.post("/api/clicks")
 async def process_clicks_batch(request: ClicksBatchRequest):
-    """Обработка пачки кликов"""
+    """Сервер сам считает награду и списание энергии"""
     try:
         user = await get_user(request.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        # Обновляем монеты
-        new_coins = user.get("coins", 0) + request.gain
-        
-        # Обновляем энергию (если не mega boost)
-        new_energy = user.get("energy", 0)
-        if not request.mega_boost:
-            new_energy = max(0, new_energy - request.clicks)
-        
-        # Сохраняем
-        await update_user(request.user_id, {
+
+        clicks_requested = max(1, min(request.clicks, 500))
+
+        mega_boost_active = is_mega_boost_active(user)
+
+        current_energy = user.get("energy", 0)
+        current_coins = user.get("coins", 0)
+        multitap_level = user.get("multitap_level", 0)
+
+        tap_value = get_tap_value(multitap_level)
+        skin_multiplier = get_selected_skin_multiplier(user)
+
+        coin_per_tap = int(max(1, tap_value * skin_multiplier))
+        if mega_boost_active:
+            coin_per_tap *= 2
+
+        if mega_boost_active:
+            effective_clicks = clicks_requested
+            new_energy = current_energy
+        else:
+            effective_clicks = min(clicks_requested, current_energy)
+            new_energy = max(0, current_energy - effective_clicks)
+
+        gained = effective_clicks * coin_per_tap
+        new_coins = current_coins + gained
+
+        updates = {
             "coins": new_coins,
             "energy": new_energy
-        })
-        
-        # Обновляем кэш
+        }
+
+        await update_user(request.user_id, updates)
+
         if request.user_id in user_cache:
-            user_cache[request.user_id]['coins'] = new_coins
-            user_cache[request.user_id]['energy'] = new_energy
-        
-        logger.info(f"👆 Clicks: user={request.user_id}, clicks={request.clicks}, "
-                   f"gain={request.gain}, mega={request.mega_boost}")
-        
-        return {"success": True, "coins": new_coins, "energy": new_energy}
-        
+            user_cache[request.user_id]["coins"] = new_coins
+            user_cache[request.user_id]["energy"] = new_energy
+
+        if gained > 0:
+            update_tournament_score(request.user_id, gained)
+
+        return {
+            "success": True,
+            "coins": new_coins,
+            "energy": new_energy,
+            "max_energy": user.get("max_energy", BASE_MAX_ENERGY),
+            "gained": gained,
+            "effective_clicks": effective_clicks,
+            "coin_per_tap": coin_per_tap,
+            "mega_boost_active": mega_boost_active,
+            "profit_per_tap": tap_value,
+            "profit_per_hour": get_hour_value(user.get("profit_level", 0))
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in process_clicks_batch: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
