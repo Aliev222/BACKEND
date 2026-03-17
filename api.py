@@ -417,9 +417,7 @@ async def reward_video(request: dict):
         })
         
         # Обновляем кэш
-        if user_id in user_cache:
-            user_cache[user_id]['coins'] = user["coins"]
-            user_cache[user_id]['ads_watched'] = extra["ads_watched"]
+        
         
         return {
             "success": True,
@@ -492,12 +490,7 @@ async def process_upgrade(request: UpgradeRequest):
         await update_user(request.user_id, updates)
         
         # Обновляем кэш
-        if request.user_id in user_cache:
-            user_cache[request.user_id]['coins'] = user["coins"]
-            if boost_type == "energy":
-                user_cache[request.user_id]['max_energy'] = updates["max_energy"]
-                user_cache[request.user_id]['energy'] = updates["energy"]
-
+        
         return {
             "success": True,
             "coins": user["coins"],
@@ -531,9 +524,7 @@ async def update_energy(request: dict):
         now = datetime.utcnow()
         max_energy = int(user.get("max_energy", 500))
 
-        if user_id in user_cache:
-            user_cache[user_id]["energy"] = max_energy
-            user_cache[user_id]["last_energy_update"] = now
+        
 
         return {
             "success": True,
@@ -570,8 +561,7 @@ async def recover_energy_legacy(request: UserIdRequest):
                 "last_energy_update": datetime.utcnow()
             })
             
-            if request.user_id in user_cache:
-                user_cache[request.user_id]['energy'] = new_energy
+            
             
             print(f"✅ Энергия: {current_energy} → {new_energy} (+3)")
             return {"energy": new_energy}
@@ -622,11 +612,7 @@ async def sync_energy(request: EnergySyncRequest):
         if update_data:
             await update_user(request.user_id, update_data)
 
-            if request.user_id in user_cache:
-                if "energy" in update_data:
-                    user_cache[request.user_id]["energy"] = update_data["energy"]
-                if "last_energy_update" in update_data:
-                    user_cache[request.user_id]["last_energy_update"] = update_data["last_energy_update"]
+            
 
         return {
             "success": True,
@@ -778,10 +764,7 @@ async def process_clicks_batch(request: ClicksBatchRequest):
             "last_energy_update": now
         })
 
-        if request.user_id in user_cache:
-            user_cache[request.user_id]["coins"] = new_coins
-            user_cache[request.user_id]["energy"] = new_energy
-            user_cache[request.user_id]["last_energy_update"] = now
+        
         
 
         return {
@@ -849,11 +832,7 @@ async def register_user(request: RegisterRequest):
                 })
                 
                 # Обновляем кэш
-                if request.referrer_id in user_cache:
-                    user_cache[request.referrer_id]['coins'] = new_coins
-                    # В кэше может не быть этих полей, но добавим
-                    user_cache[request.referrer_id]['referral_count'] = new_count
-                    user_cache[request.referrer_id]['referral_earnings'] = new_earnings
+                
                 
                 logger.info(f"✅ Referral bonus: {request.referrer_id} got +5000 for {request.user_id}")
 
@@ -927,8 +906,7 @@ async def cpa_status(request: dict):
                 user["coins"] += reward
                 await update_user(user_id, {"coins": user["coins"]})
                 
-                if request.user_id in user_cache:
-                    user_cache[request.user_id]['coins'] = user["coins"]
+                
                 
                 logger.info(f"CPA completed: user {user_id}, offer {offer_id}, reward {reward}")
             
@@ -959,8 +937,7 @@ async def play_coinflip(request: GameRequest):
         
         await update_user(request.user_id, {"coins": user["coins"]})
         
-        if request.user_id in user_cache:
-            user_cache[request.user_id]['coins'] = user["coins"]
+        
         
         return {"success": True, "coins": user["coins"], "message": message}
     except Exception as e:
@@ -989,8 +966,7 @@ async def play_slots(request: GameRequest):
         
         await update_user(request.user_id, {"coins": user["coins"]})
         
-        if request.user_id in user_cache:
-            user_cache[request.user_id]['coins'] = user["coins"]
+       
         
         return {"success": True, "coins": user["coins"], "slots": slots, "message": message}
     except Exception as e:
@@ -1030,8 +1006,7 @@ async def play_dice(request: GameRequest):
         
         await update_user(request.user_id, {"coins": user["coins"]})
         
-        if request.user_id in user_cache:
-            user_cache[request.user_id]['coins'] = user["coins"]
+        
         
         return {"success": True, "coins": user["coins"], "dice1": dice1, "dice2": dice2, "message": message}
     except Exception as e:
@@ -1084,8 +1059,7 @@ async def play_roulette(request: GameRequest):
         
         await update_user(request.user_id, {"coins": user["coins"]})
         
-        if request.user_id in user_cache:
-            user_cache[request.user_id]['coins'] = user["coins"]
+        
         
         return {
             "success": True,
@@ -1155,32 +1129,6 @@ async def get_tournament_leaderboard():
         logger.error(f"Error getting leaderboard: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-def update_tournament_score(user_id: int, gain: int):
-    """Обновление счета в турнире"""
-    global tournament_scores
-    
-    try:
-        print(f"🔥 ВЫЗОВ update_tournament_score: user={user_id}, gain={gain}")  # ← ДОБАВЬ
-        
-        if user_id not in tournament_scores:
-            print(f"🆕 Новый игрок в турнире: {user_id}")  # ← ДОБАВЬ
-            
-            username = None
-            if user_id in user_cache:
-                username = user_cache[user_id].get('username')
-                print(f"📛 Username из кэша: {username}")  # ← ДОБАВЬ
-            
-            tournament_scores[user_id] = {
-                "score": 0,
-                "username": username,
-                "last_update": datetime.utcnow()
-            }
-        
-        old_score = tournament_scores[user_id]["score"]
-        tournament_scores[user_id]["score"] += gain
-        print(f"📊 Счет: {old_score} → {tournament_scores[user_id]['score']}")  # ← ДОБАВЬ
-        
-        update_leaderboard_cache()
         
     except Exception as e:
         logger.error(f"Error updating tournament score for {user_id}: {e}")
@@ -1284,8 +1232,7 @@ async def complete_task(request: TaskCompleteRequest):
         if task_id == "link_click":
             user["coins"] += 25000
             await update_user(request.user_id, {"coins": user["coins"]})
-            if request.user_id in user_cache:
-                user_cache[request.user_id]['coins'] = user["coins"]
+            
             return {"success": True, "message": "🔗 +25000 coins!", "coins": user["coins"]}
         
         completed = await get_completed_tasks(request.user_id) or []
@@ -1296,8 +1243,6 @@ async def complete_task(request: TaskCompleteRequest):
             user["coins"] += 25000
             await add_completed_task(request.user_id, task_id)
             await update_user(request.user_id, {"coins": user["coins"]})
-            if request.user_id in user_cache:
-                user_cache[request.user_id]['coins'] = user["coins"]
             return {"success": True, "message": "🎁 +25000 coins!", "coins": user["coins"]}
         
         elif task_id == "energy_refill":
@@ -1309,8 +1254,6 @@ async def complete_task(request: TaskCompleteRequest):
                 user["coins"] += 20000
                 await add_completed_task(request.user_id, task_id)
                 await update_user(request.user_id, {"coins": user["coins"]})
-                if request.user_id in user_cache:
-                    user_cache[request.user_id]['coins'] = user["coins"]
                 return {"success": True, "message": "👥 +20000 coins!", "coins": user["coins"]}
             else:
                 raise HTTPException(status_code=400, detail="Not enough friends")
@@ -1353,8 +1296,6 @@ async def passive_income(request: PassiveIncomeRequest):
                 "last_passive_income": now
             })
             
-            if request.user_id in user_cache:
-                user_cache[request.user_id]['coins'] = user["coins"]
             
             return {
                 "success": True, 
@@ -1554,8 +1495,6 @@ async def select_skin(request: SkinRequest):
         extra["selected_skin"] = request.skin_id
         await update_user(request.user_id, {"extra_data": extra})
         
-        if request.user_id in user_cache:
-            user_cache[request.user_id]['selected_skin'] = request.skin_id
         
         return {"success": True, "selected_skin": request.skin_id}
     except Exception as e:
@@ -1591,9 +1530,7 @@ async def unlock_skin(request: dict):
             await update_user(user_id, {"extra_data": extra})
             
             # Обновляем кэш
-            if user_id in user_cache:
-                user_cache[user_id]['owned_skins'] = owned_skins
-                user_cache[user_id]['selected_skin'] = extra.get("selected_skin", skin_id)
+           
             
             logger.info(f"✅ Skin {skin_id} unlocked for user {user_id}")
             
