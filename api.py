@@ -198,6 +198,17 @@ def get_allowed_clicks(user: dict, now: datetime, requested_clicks: int) -> int:
     return min(requested_clicks, allowed)
 
 
+async def reset_tournament_loop():
+    while True:
+        now = datetime.utcnow()
+        tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        sleep_seconds = (tomorrow - now).total_seconds()
+
+        await asyncio.sleep(sleep_seconds)
+
+        if redis_client:
+            await redis_client.delete("tournament:leaderboard")
+            logger.info("🏆 Tournament reset")
 
 # ==================== LIFESPAN ====================
 
@@ -227,7 +238,7 @@ async def lifespan(app: FastAPI):
             redis_client = None
     else:
         logger.warning("⚠️ REDIS_URL is not set")
-
+    asyncio.create_task(reset_tournament_loop())
     logger.info("✅ Background tasks started")
     yield
 
@@ -848,8 +859,16 @@ async def process_clicks_batch(request: ClicksBatchRequest):
         effective_clicks = min(allowed_clicks, current_energy)
         gained = effective_clicks * coin_per_tap
 
+        if redis_client:
+            await redis_client.zincrby(
+                "tournament:leaderboard",
+                gained,
+                str(request.user_id)
+            )
+
         new_energy = max(0, current_energy - effective_clicks)
         new_coins = int(user.get("coins", 0)) + gained
+        
 
         await update_user(request.user_id, {
             "coins": new_coins,
@@ -1177,56 +1196,45 @@ class TournamentData(BaseModel):
 
 @app.get("/api/tournament/leaderboard")
 async def get_tournament_leaderboard():
-    """Get top 5 players with avatars and masked names"""
     try:
-        async with AsyncSessionLocal() as session:
-            # Получаем топ-5 игроков по монетам
-            result = await session.execute(
-                select(User)
-                .order_by(User.coins.desc())
-                .limit(5)
-            )
-            top_players = result.scalars().all()
-            
-            players = []
-            for idx, user in enumerate(top_players):
-                # Маскируем ник
-                masked_name = mask_username(user.username)
-                
-                # Формируем URL аватарки
-                avatar_url = None
-                if user.username:
-                    avatar_url = f"https://t.me/i/userpic/320/{user.username}.jpg"
-                else:
-                    avatar_url = "/imgg/default_avatar.png"
-                
-                players.append({
-                    "rank": idx + 1,
-                    "user_id": user.user_id,
-                    "name": masked_name,
-                    "avatar": avatar_url,
-                    "score": user.coins
-                })
-        
-        # ✅ ПРАВИЛЬНЫЙ РАСЧЕТ ТАЙМЕРА (до конца дня)
+        if not redis_client:
+            return {"success": False, "players": []}
+
+        top = await redis_client.zrevrange(
+            "tournament:leaderboard",
+            0,
+            4,
+            withscores=True
+        )
+
+        players = []
+
+        for idx, (user_id, score) in enumerate(top):
+            user = await get_user(int(user_id))
+
+            players.append({
+                "rank": idx + 1,
+                "user_id": int(user_id),
+                "name": mask_username(user.get("username") if user else None),
+                "avatar": f"https://t.me/i/userpic/320/{user.get('username')}.jpg" if user and user.get("username") else "/imgg/default_avatar.png",
+                "score": int(score)
+            })
+
         now = datetime.utcnow()
         tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         time_left = int((tomorrow - now).total_seconds())
-        
+
         return {
             "success": True,
             "players": players,
             "prize_pool": 100000,
-            "time_left": time_left  # ← ТЕПЕРЬ ПРАВИЛЬНОЕ ВРЕМЯ
+            "time_left": time_left
         }
-        
-    except Exception as e:
-        logger.error(f"Error getting leaderboard: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
 
-        
     except Exception as e:
-        logger.error(f"Error updating tournament score for {user_id}: {e}")
+        logger.error(f"Leaderboard error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    
 @app.get("/api/tournament/player-rank/{user_id}")
 async def get_player_rank(user_id: int):
     """Get player's rank and coins"""
@@ -1286,6 +1294,7 @@ async def get_player_rank(user_id: int):
     except Exception as e:
         logger.error(f"Error getting player rank: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
 # ==================== ЗАДАЧИ ====================
 
 _task_completion_store = {}
