@@ -15,6 +15,9 @@ from contextlib import asynccontextmanager
 from collections import defaultdict
 from sqlalchemy import select
 from DATABASE.base import User, AsyncSessionLocal
+from datetime import datetime, timedelta
+from fastapi import HTTPException
+from pydantic import BaseModel, Field
 
 from DATABASE.base import (
     get_user, add_user as create_user, update_user,
@@ -29,6 +32,7 @@ MAX_REWARD_PER_VIDEO = 5000
 MAX_BET = 1000000
 MIN_BET = 10
 BASE_MAX_ENERGY = 500
+ENERGY_REGEN_SECONDS = 5  # 1 энергия каждые 5 секунд
 
 # ==================== ЦЕНЫ АПГРЕЙДОВ ====================
 
@@ -84,16 +88,16 @@ HOUR_VALUES = [
     51073, 51073, 51073, 51073, 51073, 51073, 51073, 51073, 51073, 51073
 ]
 
-# ==================== IN-MEMORY CACHE ====================
 
-click_queue = asyncio.Queue()
-user_cache = {}  # Локальный кэш пользователей
 
 # ==================== LOGGING ====================
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
+
+user_cache = {}
 # ==================== ТУРНИРНЫЕ ДАННЫЕ ====================
 tournament_scores = {}  # {user_id: {"score": 0, "username": "", "last_update": datetime}}
 tournament_leaderboard = []  # Кэш таблицы лидеров
@@ -223,81 +227,6 @@ async def reset_tournament():
 
 
 
-# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
-
-async def click_processor():
-    """Обработка кликов пачками (раз в 3 секунды)"""
-    while True:
-        try:
-            batch = []
-            for _ in range(1000):
-                try:
-                    click = await asyncio.wait_for(click_queue.get(), timeout=0.01)
-                    batch.append(click)
-                except asyncio.TimeoutError:
-                    break
-            
-            if batch:
-                # Группируем по пользователям
-                user_data = defaultdict(lambda: {'clicks': 0, 'gain': 0, 'mega_boost': False})
-                for click in batch:
-                    uid = click['user_id']
-                    # ✅ Добавляем проверки, чтобы не было None
-                    user_data[uid]['clicks'] += click.get('clicks', 1)
-                    user_data[uid]['gain'] += click.get('gain', 0)
-                    user_data[uid]['mega_boost'] = click.get('mega_boost', False)
-                
-                for uid, data in user_data.items():
-                    # Обновляем кэш
-                    if uid in user_cache:
-                        user_cache[uid]['coins'] += data['gain']
-                        if not data['mega_boost']:
-                            # ✅ ВАЖНО: вычитаем ВСЕ клики
-                            user_cache[uid]['energy'] = max(0, user_cache[uid]['energy'] - data['clicks'])
-                    
-                    # Асинхронно обновляем БД
-                    asyncio.create_task(update_user_db(uid, data))
-                
-                logger.info(f"✅ Processed {len(batch)} clicks for {len(user_data)} users")
-        
-        except Exception as e:
-            logger.error(f"❌ Click processor error: {e}")
-        
-        await asyncio.sleep(3)
-
-async def update_user_db(user_id: int, data: dict):
-    """Обновление пользователя в БД"""
-    try:
-        user = await get_user(user_id)
-        if user:
-            current_energy = user.get("energy", 0)
-            clicks = data.get('clicks', 0)
-            gain = data.get('gain', 0)
-            
-            print(f"📦 Батч: user={user_id}, clicks={clicks}, gain={gain}, текущая энергия={current_energy}")
-            
-            # Обновляем монеты
-            new_coins = user.get("coins", 0) + gain
-            
-            # Обновляем энергию (ВЫЧИТАЕМ ВСЕ КЛИКИ!)
-            new_energy = current_energy
-            if not data.get('mega_boost', False):
-                new_energy = max(0, current_energy - clicks)
-                print(f"⚡ ВЫЧИТАЕМ {clicks} энергии: {current_energy} → {new_energy}")
-            
-            # Сохраняем в БД
-            await update_user(user_id, {
-                "coins": new_coins,
-                "energy": new_energy
-            })
-            
-            # Обновляем кэш
-            if user_id in user_cache:
-                user_cache[user_id]['energy'] = new_energy
-                user_cache[user_id]['coins'] = new_coins
-                
-    except Exception as e:
-        logger.error(f"❌ DB update error for user {user_id}: {e}")
 
 # ==================== LIFESPAN ====================
 
@@ -311,7 +240,6 @@ async def lifespan(app: FastAPI):
     logger.info("✅ Database initialized")
     
     # Запуск фоновых задач
-    asyncio.create_task(click_processor())
     asyncio.create_task(reset_tournament())
     logger.info("✅ Background tasks started")
     
@@ -337,12 +265,6 @@ app.add_middleware(
 )
 
 # ==================== МОДЕЛИ ====================
-class ClickRequest(BaseModel):
-    user_id: int
-    clicks: int = 1
-    gain: int
-    mega_boost: bool = False
-    tournament_score: Optional[int] = None
 
 class UpgradeRequest(BaseModel):
     user_id: int
@@ -387,6 +309,7 @@ class EnergySyncRequest(BaseModel):
 class ClicksBatchRequest(BaseModel):
     user_id: int
     clicks: int = Field(..., ge=1, le=500)
+
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def get_tap_value(level: int) -> int:
@@ -400,103 +323,96 @@ def get_max_energy(level: int) -> int:
 
 # ==================== ЭНДПОИНТЫ ====================
 
+def _normalize_dt(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def calculate_current_energy(user: dict, now: datetime | None = None) -> int:
+    """Считает актуальную энергию на сервере по stored energy + времени."""
+    now = now or datetime.utcnow()
+
+    stored_energy = int(user.get("energy", 0))
+    max_energy = int(user.get("max_energy", 500))
+    last_update = _normalize_dt(user.get("last_energy_update"))
+
+    if stored_energy >= max_energy:
+        return max_energy
+
+    if not last_update:
+        return min(stored_energy, max_energy)
+
+    seconds_passed = max(0, int((now - last_update).total_seconds()))
+    gained = seconds_passed // ENERGY_REGEN_SECONDS
+
+    return min(max_energy, stored_energy + gained)
+
+
+def build_energy_payload(user: dict, now: datetime | None = None) -> dict:
+    """Готовит серверный снимок энергии для фронта."""
+    now = now or datetime.utcnow()
+    max_energy = int(user.get("max_energy", 500))
+    current_energy = calculate_current_energy(user, now)
+
+    return {
+        "energy": current_energy,
+        "max_energy": max_energy,
+        "regen_seconds": ENERGY_REGEN_SECONDS,
+        "server_time": now.isoformat()
+    }
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
 @app.get("/api/user/{user_id}")
 async def get_user_data(user_id: int):
-    """Быстрое получение данных пользователя (из кэша или БД)"""
     try:
-        # Сначала проверяем кэш
-        if user_id in user_cache:
-            return user_cache[user_id]
-        
-        # Если нет в кэше - грузим из БД
         user = await get_user(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        # ===== НОВЫЙ КОД: обновляем энергию по времени =====
+
         now = datetime.utcnow()
-        last_update = user.get("last_energy_update")
-        
-        if last_update:
-            seconds_passed = (now - last_update).total_seconds()
-            gained = int(seconds_passed // 5)  # 1 энергия за 5 секунд
-            if gained > 0:
-                new_energy = min(user.get("energy", 0) + gained, 
-                                user.get("max_energy", BASE_MAX_ENERGY))
-                await update_user(user_id, {
-                    "energy": new_energy,
-                    "last_energy_update": now
-                })
-                user["energy"] = new_energy
-        # ===== КОНЕЦ НОВОГО КОДА =====
-        
-        # Формируем ответ
-        user_data = {
+        current_energy = calculate_current_energy(user, now)
+        max_energy = int(user.get("max_energy", BASE_MAX_ENERGY))
+
+        # сохраняем baseline, чтобы сервер и клиент смотрели на одну точку
+        await update_user(user_id, {
+            "energy": current_energy,
+            "last_energy_update": now
+        })
+
+        return {
+            "user_id": user["user_id"],
             "username": user.get("username"),
             "coins": user.get("coins", 0),
-            "energy": user.get("energy", 0),
-            "max_energy": user.get("max_energy", BASE_MAX_ENERGY),
-            "profit_per_tap": get_tap_value(user.get("multitap_level", 0)),
-            "profit_per_hour": get_hour_value(user.get("profit_level", 0)),
+            "energy": current_energy,
+            "max_energy": max_energy,
+            "profit_per_tap": user.get("profit_per_tap", 1),
+            "profit_per_hour": user.get("profit_per_hour", 100),
             "multitap_level": user.get("multitap_level", 0),
             "profit_level": user.get("profit_level", 0),
             "energy_level": user.get("energy_level", 0),
-            "selected_skin": user.get("extra_data", {}).get("selected_skin", "default_SP"),
-            "owned_skins": user.get("extra_data", {}).get("owned_skins", ["default_SP"]),
-            "ads_watched": user.get("extra_data", {}).get("ads_watched", 0),
-            # ✅ ДОБАВЛЯЕМ РЕФЕРАЛЬНЫЕ ПОЛЯ
-            "referral_count": user.get("referral_count", 0),
-            "referral_earnings": user.get("referral_earnings", 0)
+            "owned_skins": (user.get("extra_data", {}) or {}).get("owned_skins", ["default_SP"]),
+            "selected_skin": (user.get("extra_data", {}) or {}).get("selected_skin", "default_SP"),
+            "ads_watched": (user.get("extra_data", {}) or {}).get("ads_watched", 0),
+            "regen_seconds": ENERGY_REGEN_SECONDS,
+            "server_time": now.isoformat()
         }
-        
-        # Сохраняем в кэш
-        user_cache[user_id] = user_data
-        
-        return user_data
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error in get_user_data: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.post("/api/click")
-async def process_click(request: ClickRequest):
-    """СУПЕР-БЫСТРЫЙ клик (просто кладем в очередь)"""
-    try:
-        # Мгновенно кладем в очередь
-        await click_queue.put({
-            'user_id': request.user_id,
-            'gain': request.gain,
-            'clicks': request.clicks,
-            'mega_boost': request.mega_boost,
-            'tournament_score': request.tournament_score
-        })
-        
-        update_tournament_score(request.user_id, request.gain)
-
-
-        # Если есть кэш - обновляем его сразу для UI
-        if request.user_id in user_cache:
-            user_cache[request.user_id]['coins'] += request.gain
-            if not request.mega_boost:
-                user_cache[request.user_id]['energy'] = max(0, 
-                    user_cache[request.user_id]['energy'] - request.clicks)
-        
-        # Мгновенный ответ!
-        return {
-            "success": True,
-            "queued": True,
-            "cached": request.user_id in user_cache
-        }
-        
-    except Exception as e:
-        logger.error(f"Error queueing click: {e}")
-        return {"success": False, "error": str(e)}
 
 @app.get("/api/mega-boost-status/{user_id}")
 async def get_mega_boost_status(user_id: int):
@@ -706,26 +622,39 @@ async def process_upgrade(request: UpgradeRequest):
 
 @app.post("/api/update-energy")
 async def update_energy(request: dict):
-    """Обновление энергии (после рекламы)"""
     try:
         user_id = request.get("user_id")
-        energy = request.get("energy")
-        
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id required")
+
         user = await get_user(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        # Обновляем энергию
-        await update_user(user_id, {"energy": energy})
-        
-        # Обновляем кэш
+
+        now = datetime.utcnow()
+        max_energy = int(user.get("max_energy", 500))
+
+        await update_user(user_id, {
+            "energy": max_energy,
+            "last_energy_update": now
+        })
+
         if user_id in user_cache:
-            user_cache[user_id]['energy'] = energy
-        
-        return {"success": True, "energy": energy}
-        
+            user_cache[user_id]["energy"] = max_energy
+            user_cache[user_id]["last_energy_update"] = now
+
+        return {
+            "success": True,
+            "energy": max_energy,
+            "max_energy": max_energy,
+            "regen_seconds": ENERGY_REGEN_SECONDS,
+            "server_time": now.isoformat()
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error updating energy: {e}")
+        logger.error(f"Error in update_energy: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/recover-energy")
@@ -762,46 +691,32 @@ async def recover_energy_legacy(request: UserIdRequest):
 
 @app.post("/api/sync-energy")
 async def sync_energy(request: EnergySyncRequest):
-    """Синхронизация энергии: сервер сам считает восстановление"""
+    """Серверный sync энергии. Клиент ничего не навязывает."""
     try:
         user = await get_user(request.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
         now = datetime.utcnow()
-        last_update = user.get("last_energy_update")
-        current_energy = user.get("energy", 0)
-        max_energy = user.get("max_energy", BASE_MAX_ENERGY)
+        current_energy = calculate_current_energy(user, now)
+        max_energy = int(user.get("max_energy", 500))
 
-        # Если энергии уже максимум — просто обновим timestamp и вернём максимум
-        if current_energy >= max_energy:
-            final_energy = max_energy
-        else:
-            server_gained = 0
-
-            if last_update:
-                seconds_passed = (now - last_update).total_seconds()
-                server_gained = int(seconds_passed // 5)  # 1 энергия за 5 секунд
-
-            final_energy = min(current_energy + server_gained, max_energy)
-
+        # Сохраняем пересчитанную энергию как новый baseline
         await update_user(request.user_id, {
-            "energy": final_energy,
+            "energy": current_energy,
             "last_energy_update": now
         })
 
         if request.user_id in user_cache:
-            user_cache[request.user_id]["energy"] = final_energy
+            user_cache[request.user_id]["energy"] = current_energy
             user_cache[request.user_id]["last_energy_update"] = now
 
-        logger.info(
-            f"⚡ Energy sync: user={request.user_id}, "
-            f"stored={current_energy}, final={final_energy}, max={max_energy}"
-        )
-
         return {
-            "energy": final_energy,
-            "max_energy": max_energy
+            "success": True,
+            "energy": current_energy,
+            "max_energy": max_energy,
+            "regen_seconds": ENERGY_REGEN_SECONDS,
+            "server_time": now.isoformat()
         }
 
     except HTTPException:
@@ -871,62 +786,106 @@ def is_mega_boost_active(user: dict) -> bool:
 
 @app.post("/api/clicks")
 async def process_clicks_batch(request: ClicksBatchRequest):
-    """Сервер сам считает награду и списание энергии"""
     try:
         user = await get_user(request.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        clicks_requested = max(1, min(request.clicks, 500))
+        now = datetime.utcnow()
 
-        mega_boost_active = is_mega_boost_active(user)
+        max_energy = int(user.get("max_energy", 500))
+        current_energy = calculate_current_energy(user, now)
 
-        current_energy = user.get("energy", 0)
-        current_coins = user.get("coins", 0)
-        multitap_level = user.get("multitap_level", 0)
-
+        multitap_level = int(user.get("multitap_level", 0))
         tap_value = get_tap_value(multitap_level)
-        skin_multiplier = get_selected_skin_multiplier(user)
 
-        coin_per_tap = int(max(1, tap_value * skin_multiplier))
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                import json
+                extra = json.loads(extra)
+            except Exception:
+                extra = {}
+
+        # Скин
+        selected_skin = extra.get("selected_skin", "default_SP")
+        skin_multipliers = {
+            "default_SP": 1.0,
+            "skin_lvl_1": 1.1,
+            "skin_lvl_2": 1.2,
+            "skin_lvl_3": 1.3,
+            "skin_lvl_4": 1.4,
+            "skin_lvl_5": 1.5,
+            "skin_lvl_6": 1.6,
+            "skin_lvl_7": 2.0,
+            "skin_video_1": 1.2,
+            "skin_video_2": 1.3,
+            "skin_video_3": 1.4,
+            "skin_video_4": 1.5,
+            "skin_video_5": 1.75,
+            "skin_video_6": 2.0,
+            "skin_friend_1": 1.1,
+            "skin_friend_2": 1.2,
+            "skin_friend_3": 1.3,
+            "skin_friend_4": 1.5,
+            "skin_friend_5": 1.75,
+            "skin_friend_6": 2.0,
+            "skin_cpa_1": 2.5,
+        }
+        skin_multiplier = float(skin_multipliers.get(selected_skin, 1.0))
+
+        # Буст x2
+        mega_boost_active = False
+        active_boosts = extra.get("active_boosts", {}) if isinstance(extra, dict) else {}
+        mega_boost = active_boosts.get("mega_boost")
+        if mega_boost and mega_boost.get("expires_at"):
+            try:
+                expires_at = datetime.fromisoformat(mega_boost["expires_at"])
+                mega_boost_active = now < expires_at
+            except Exception:
+                mega_boost_active = False
+
+        coin_per_tap = max(1, int(tap_value * skin_multiplier))
         if mega_boost_active:
             coin_per_tap *= 2
 
-        if mega_boost_active:
-            effective_clicks = clicks_requested
-            new_energy = current_energy
-        else:
-            effective_clicks = min(clicks_requested, current_energy)
-            new_energy = max(0, current_energy - effective_clicks)
-
+        effective_clicks = min(request.clicks, current_energy)
         gained = effective_clicks * coin_per_tap
-        new_coins = current_coins + gained
 
-        updates = {
+        new_energy = max(0, current_energy - effective_clicks)
+        new_coins = int(user.get("coins", 0)) + gained
+
+        await update_user(request.user_id, {
             "coins": new_coins,
-            "energy": new_energy
-        }
-
-        await update_user(request.user_id, updates)
+            "energy": new_energy,
+            "last_energy_update": now
+        })
 
         if request.user_id in user_cache:
             user_cache[request.user_id]["coins"] = new_coins
             user_cache[request.user_id]["energy"] = new_energy
+            user_cache[request.user_id]["last_energy_update"] = now
 
+        # Турнир
         if gained > 0:
-            update_tournament_score(request.user_id, gained)
+            try:
+                update_tournament_score(request.user_id, gained)
+            except Exception:
+                pass
 
         return {
             "success": True,
             "coins": new_coins,
             "energy": new_energy,
-            "max_energy": user.get("max_energy", BASE_MAX_ENERGY),
+            "max_energy": max_energy,
+            "regen_seconds": ENERGY_REGEN_SECONDS,
+            "server_time": now.isoformat(),
             "gained": gained,
             "effective_clicks": effective_clicks,
             "coin_per_tap": coin_per_tap,
-            "mega_boost_active": mega_boost_active,
             "profit_per_tap": tap_value,
-            "profit_per_hour": get_hour_value(user.get("profit_level", 0))
+            "profit_per_hour": get_hour_value(int(user.get("profit_level", 0))),
+            "mega_boost_active": mega_boost_active
         }
 
     except HTTPException:
