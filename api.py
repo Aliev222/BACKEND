@@ -383,8 +383,6 @@ class BoostActivateRequest(BaseModel):
 
 class EnergySyncRequest(BaseModel):
     user_id: int
-    energy: int
-    gained: int
 
 class ClicksBatchRequest(BaseModel):
     user_id: int
@@ -764,49 +762,50 @@ async def recover_energy_legacy(request: UserIdRequest):
 
 @app.post("/api/sync-energy")
 async def sync_energy(request: EnergySyncRequest):
-    """Синхронизация энергии (клиент раз в 15 сек)"""
+    """Синхронизация энергии: сервер сам считает восстановление"""
     try:
         user = await get_user(request.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
+
         now = datetime.utcnow()
         last_update = user.get("last_energy_update")
+        current_energy = user.get("energy", 0)
         max_energy = user.get("max_energy", BASE_MAX_ENERGY)
-        
-        # Сколько должно было восстановиться по времени
-        if last_update:
-            seconds_passed = (now - last_update).total_seconds()
-            server_gained = int(seconds_passed // 5)  # 1 энергия за 5 секунд
+
+        # Если энергии уже максимум — просто обновим timestamp и вернём максимум
+        if current_energy >= max_energy:
+            final_energy = max_energy
         else:
             server_gained = 0
-        
-        # Серверная энергия (то, что должно быть по расчёту)
-        server_energy = user.get("energy", 0) + server_gained
-        server_energy = min(server_energy, max_energy)
-        
-        # Клиентская энергия (то, что прислал игрок)
-        client_energy = request.energy
-        
-        # Берём МАКСИМУМ
-        final_energy = max(client_energy, server_energy)
-        final_energy = min(final_energy, max_energy)
-        
-        # Обновляем в БД
+
+            if last_update:
+                seconds_passed = (now - last_update).total_seconds()
+                server_gained = int(seconds_passed // 5)  # 1 энергия за 5 секунд
+
+            final_energy = min(current_energy + server_gained, max_energy)
+
         await update_user(request.user_id, {
             "energy": final_energy,
             "last_energy_update": now
         })
-        
-        # Обновляем кэш
+
         if request.user_id in user_cache:
-            user_cache[request.user_id]['energy'] = final_energy
-        
-        logger.info(f"⚡ Energy sync: user={request.user_id}, client={client_energy}, "
-                   f"server={server_energy}, final={final_energy}")
-        
-        return {"energy": final_energy}
-        
+            user_cache[request.user_id]["energy"] = final_energy
+            user_cache[request.user_id]["last_energy_update"] = now
+
+        logger.info(
+            f"⚡ Energy sync: user={request.user_id}, "
+            f"stored={current_energy}, final={final_energy}, max={max_energy}"
+        )
+
+        return {
+            "energy": final_energy,
+            "max_energy": max_energy
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in sync_energy: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
