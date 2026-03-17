@@ -691,25 +691,50 @@ async def recover_energy_legacy(request: UserIdRequest):
 
 @app.post("/api/sync-energy")
 async def sync_energy(request: EnergySyncRequest):
-    """Серверный sync энергии. Клиент ничего не навязывает."""
+    """Серверный sync энергии без сброса таймера регена."""
     try:
         user = await get_user(request.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
         now = datetime.utcnow()
+
+        old_energy = int(user.get("energy", 0))
+        max_energy = int(user.get("max_energy", BASE_MAX_ENERGY))
+        last_update = _normalize_dt(user.get("last_energy_update"))
+
         current_energy = calculate_current_energy(user, now)
-        max_energy = int(user.get("max_energy", 500))
 
-        # Сохраняем пересчитанную энергию как новый baseline
-        await update_user(request.user_id, {
-            "energy": current_energy,
-            "last_energy_update": now
-        })
+        update_data = {}
 
-        if request.user_id in user_cache:
-            user_cache[request.user_id]["energy"] = current_energy
-            user_cache[request.user_id]["last_energy_update"] = now
+        # Обновляем baseline только если энергия реально выросла
+        if current_energy != old_energy:
+            update_data["energy"] = current_energy
+
+            if last_update:
+                seconds_passed = max(0, int((now - last_update).total_seconds()))
+                gained = seconds_passed // ENERGY_REGEN_SECONDS
+
+                if gained > 0:
+                    update_data["last_energy_update"] = last_update + timedelta(
+                        seconds=gained * ENERGY_REGEN_SECONDS
+                    )
+            else:
+                update_data["last_energy_update"] = now
+
+        # Если энергия уже полная, держим baseline консистентным
+        if current_energy >= max_energy and not update_data.get("last_energy_update"):
+            update_data["last_energy_update"] = now
+            update_data["energy"] = max_energy
+
+        if update_data:
+            await update_user(request.user_id, update_data)
+
+            if request.user_id in user_cache:
+                if "energy" in update_data:
+                    user_cache[request.user_id]["energy"] = update_data["energy"]
+                if "last_energy_update" in update_data:
+                    user_cache[request.user_id]["last_energy_update"] = update_data["last_energy_update"]
 
         return {
             "success": True,
