@@ -237,6 +237,8 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Shutting down")
 
 # ==================== CORS ====================
+app = FastAPI(title="Ryoho Clicker API", lifespan=lifespan)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -1013,11 +1015,12 @@ async def cpa_status(request: dict):
 @app.post("/api/game/coinflip")
 async def play_coinflip(request: GameRequest):
     try:
+        await require_redis_rate_limit("game_action", request.user_id, 30, 60)
+
         user = await get_user(request.user_id)
-        await require_redis_rate_limit("update_energy", user_id, 10, 60)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
-        require_rate_limit("game_action", request.user_id, *RATE_LIMITS["game_action"])
+
         win = random.choice([True, False])
         if win:
             user["coins"] += request.bet
@@ -1025,11 +1028,9 @@ async def play_coinflip(request: GameRequest):
         else:
             user["coins"] -= request.bet
             message = f"😞 You lost {request.bet} coins"
-        
+
         await update_user(request.user_id, {"coins": user["coins"]})
-        
-        
-        
+
         return {"success": True, "coins": user["coins"], "message": message}
     except Exception as e:
         logger.error(f"Error in coinflip: {e}")
@@ -1038,16 +1039,17 @@ async def play_coinflip(request: GameRequest):
 @app.post("/api/game/slots")
 async def play_slots(request: GameRequest):
     try:
+        await require_redis_rate_limit("game_action", request.user_id, 30, 60)
+
         user = await get_user(request.user_id)
-        await require_redis_rate_limit("update_energy", user_id, 10, 60)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
-        require_rate_limit("game_action", request.user_id, *RATE_LIMITS["game_action"])
+
         symbols = ["🍒", "🍋", "🍊", "7️⃣", "💎"]
         slots = [random.choice(symbols) for _ in range(3)]
         win = len(set(slots)) == 1
         multiplier = 10 if "7️⃣" in slots and win else 5 if "💎" in slots and win else 3
-        
+
         if win:
             win_amount = request.bet * multiplier
             user["coins"] += win_amount
@@ -1055,11 +1057,9 @@ async def play_slots(request: GameRequest):
         else:
             user["coins"] -= request.bet
             message = f"😞 You lost {request.bet} coins"
-        
+
         await update_user(request.user_id, {"coins": user["coins"]})
-        
-       
-        
+
         return {"success": True, "coins": user["coins"], "slots": slots, "message": message}
     except Exception as e:
         logger.error(f"Error in slots: {e}")
@@ -1068,17 +1068,18 @@ async def play_slots(request: GameRequest):
 @app.post("/api/game/dice")
 async def play_dice(request: GameRequest):
     try:
+        await require_redis_rate_limit("game_action", request.user_id, 30, 60)
+
         user = await get_user(request.user_id)
-        await require_redis_rate_limit("update_energy", user_id, 10, 60)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
-        require_rate_limit("game_action", request.user_id, *RATE_LIMITS["game_action"])
+
         dice1 = random.randint(1, 6)
         dice2 = random.randint(1, 6)
         total = dice1 + dice2
         win = False
         multiplier = 1
-        
+
         if request.prediction == "7" and total == 7:
             win = True
             multiplier = 5
@@ -1088,7 +1089,7 @@ async def play_dice(request: GameRequest):
         elif request.prediction == "odd" and total % 2 == 1:
             win = True
             multiplier = 2
-        
+
         if win:
             win_amount = request.bet * multiplier
             user["coins"] += win_amount
@@ -1096,12 +1097,16 @@ async def play_dice(request: GameRequest):
         else:
             user["coins"] -= request.bet
             message = f"😞 You lost {request.bet} coins"
-        
+
         await update_user(request.user_id, {"coins": user["coins"]})
-        
-        
-        
-        return {"success": True, "coins": user["coins"], "dice1": dice1, "dice2": dice2, "message": message}
+
+        return {
+            "success": True,
+            "coins": user["coins"],
+            "dice1": dice1,
+            "dice2": dice2,
+            "message": message
+        }
     except Exception as e:
         logger.error(f"Error in dice: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1109,17 +1114,16 @@ async def play_dice(request: GameRequest):
 
 @app.post("/api/game/roulette")
 async def play_roulette(request: GameRequest):
-    """Play roulette game"""
     try:
+        await require_redis_rate_limit("game_action", request.user_id, 30, 60)
+
         user = await get_user(request.user_id)
-        await require_redis_rate_limit("update_energy", user_id, 10, 60)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
-        require_rate_limit("game_action", request.user_id, *RATE_LIMITS["game_action"])
+
         red_numbers = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]
-        
         result = random.randint(0, 36)
-        
+
         if result == 0:
             result_color = 'green'
             result_symbol = '🟢'
@@ -1129,10 +1133,10 @@ async def play_roulette(request: GameRequest):
         else:
             result_color = 'black'
             result_symbol = '⚫'
-        
+
         win = False
         multiplier = 0
-        
+
         if request.bet_type == 'number' and request.bet_value == result:
             win = True
             multiplier = 35
@@ -1142,7 +1146,7 @@ async def play_roulette(request: GameRequest):
         elif request.bet_type == result_color:
             win = True
             multiplier = 2
-        
+
         if win:
             win_amount = request.bet * multiplier
             user["coins"] += win_amount
@@ -1150,11 +1154,9 @@ async def play_roulette(request: GameRequest):
         else:
             user["coins"] -= request.bet
             message = f"😞 {result_symbol} {result} - You lost {request.bet} coins"
-        
+
         await update_user(request.user_id, {"coins": user["coins"]})
-        
-        
-        
+
         return {
             "success": True,
             "coins": user["coins"],
@@ -1164,7 +1166,6 @@ async def play_roulette(request: GameRequest):
             "win": win,
             "message": message
         }
-        
     except Exception as e:
         logger.error(f"Error in play_roulette: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
