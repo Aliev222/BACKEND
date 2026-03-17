@@ -9,7 +9,7 @@ import logging
 # Используем переменную окружения или значение по умолчанию
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://...")
 
-engine = create_async_engine(DATABASE_URL, echo=True)
+engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 

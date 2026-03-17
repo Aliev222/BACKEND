@@ -98,11 +98,7 @@ logger = logging.getLogger(__name__)
 
 
 user_cache = {}
-# ==================== ТУРНИРНЫЕ ДАННЫЕ ====================
-tournament_scores = {}  # {user_id: {"score": 0, "username": "", "last_update": datetime}}
-tournament_leaderboard = []  # Кэш таблицы лидеров
-tournament_end_time = datetime.utcnow() + timedelta(hours=24)  # Время окончания
-tournament_prize = 100000  # Приз победителю
+# ==================== ТУРНИРНЫЕ ДАННЫЕ ==================
 
 def mask_username(username):
     """Оставляет первые 2 и последние 2 символа, остальное звездочки"""
@@ -122,108 +118,10 @@ def mask_username(username):
     masked = f"{first_two}{'*' * min(middle_len, 3)}{last_two}"
     return masked
 
-def update_leaderboard_cache():
-    """Обновление кэша таблицы лидеров"""
-    global tournament_leaderboard, tournament_scores
-    
-    print(f"🔄 Обновление кэша, игроков: {len(tournament_scores)}")  # ← ОТЛАДКА
-    
-    # Сортируем игроков по счету
-    sorted_players = sorted(
-        tournament_scores.items(),
-        key=lambda x: x[1]["score"],
-        reverse=True
-    )[:100]  # Топ-100
-    
-    print(f"📊 Топ-5: {[(p[0], p[1]['score']) for p in sorted_players[:5]]}")  # ← ОТЛАДКА
-    
-    # Форматируем для ответа
-    tournament_leaderboard = [
-        {
-            "rank": idx + 1,
-            "user_id": player[0],
-            "name": player[1].get("username") or f"Player_{player[0]}",
-            "score": player[1]["score"]
-        }
-        for idx, player in enumerate(sorted_players)
-    ]
-    
-    print(f"✅ Кэш обновлен, записей: {len(tournament_leaderboard)}")  # ← ОТЛАДКА
 
-def update_tournament_score(user_id: int, gain: int):
-    """Обновление счета в турнире"""
-    global tournament_scores
-    
-    try:
-        # Получаем или создаем запись
-        if user_id not in tournament_scores:
-            # Получаем username из кэша или БД
-            username = None
-            if user_id in user_cache:
-                username = user_cache[user_id].get('username')
-            
-            tournament_scores[user_id] = {
-                "score": 0,
-                "username": username,
-                "last_update": datetime.utcnow()
-            }
-        
-        # Обновляем счет
-        tournament_scores[user_id]["score"] += gain
-        tournament_scores[user_id]["last_update"] = datetime.utcnow()
-        
-        # Обновляем кэш лидеров (топ-100)
-        update_leaderboard_cache()
-        
-    except Exception as e:
-        logger.error(f"Error updating tournament score for {user_id}: {e}")
 
-async def award_tournament_winner(user_id: int, prize: int):
-    """Начисление награды победителю турнира"""
-    try:
-        user = await get_user(user_id)
-        if user:
-            new_coins = user.get("coins", 0) + prize
-            await update_user(user_id, {"coins": new_coins})
-            
-            # Обновляем кэш
-            if user_id in user_cache:
-                user_cache[user_id]['coins'] = new_coins
-            
-            logger.info(f"💰 Победитель турнира {user_id} получил {prize} монет")
-    except Exception as e:
-        logger.error(f"❌ Ошибка награждения победителя: {e}")
 
-async def reset_tournament():
-    """Сброс турнира каждые 24 часа и начисление награды"""
-    global tournament_scores, tournament_end_time, tournament_leaderboard
-    
-    while True:
-        try:
-            now = datetime.utcnow()
-            
-            # Проверяем, не пора ли сбросить турнир
-            if tournament_end_time and now > tournament_end_time:
-                # Находим победителя
-                if tournament_scores:
-                    winner_id = max(tournament_scores.items(), key=lambda x: x[1]["score"])[0]
-                    winner_data = tournament_scores[winner_id]
-                    
-                    # Начисляем награду
-                    await award_tournament_winner(winner_id, tournament_prize)
-                    
-                    logger.info(f"🏆 Турнир завершен! Победитель: {winner_data.get('username', winner_id)}")
-                
-                # Сбрасываем турнир
-                tournament_scores = {}
-                tournament_leaderboard = []
-                tournament_end_time = now + timedelta(hours=24)
-                logger.info(f"🔄 Новый турнир начат, до окончания: 24 часа")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка в турнирном таймере: {e}")
-        
-        await asyncio.sleep(60)  # Проверка каждую минуту
+
 
 
 
@@ -240,7 +138,6 @@ async def lifespan(app: FastAPI):
     logger.info("✅ Database initialized")
     
     # Запуск фоновых задач
-    asyncio.create_task(reset_tournament())
     logger.info("✅ Background tasks started")
     
     yield
@@ -885,13 +782,7 @@ async def process_clicks_batch(request: ClicksBatchRequest):
             user_cache[request.user_id]["coins"] = new_coins
             user_cache[request.user_id]["energy"] = new_energy
             user_cache[request.user_id]["last_energy_update"] = now
-
-        # Турнир
-        if gained > 0:
-            try:
-                update_tournament_score(request.user_id, gained)
-            except Exception:
-                pass
+        
 
         return {
             "success": True,
