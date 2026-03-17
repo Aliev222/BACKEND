@@ -8,3 +8,4 @@ httpx
 python-multipart
 aiohttp
 aiogram
+redis[hiredis]>

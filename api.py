@@ -20,6 +20,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 from collections import defaultdict, deque
 from dataclasses import dataclass
+import redis.asyncio as redis
 
 from DATABASE.base import (
     get_user, add_user as create_user, update_user,
@@ -52,6 +53,9 @@ RATE_LIMITS = {
 }
 
 rate_limit_store = defaultdict(deque)
+
+REDIS_URL = os.getenv("REDIS_URL")
+redis_client = None
 # ==================== ЦЕНЫ АПГРЕЙДОВ ====================
 
 UPGRADE_PRICES = {
@@ -199,21 +203,38 @@ def get_allowed_clicks(user: dict, now: datetime, requested_clicks: int) -> int:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Запуск и остановка сервера"""
+    global redis_client
+
     logger.info("🚀 Starting Ryoho Clicker API")
-    
-    # Инициализация
+
     await init_db()
     logger.info("✅ Database initialized")
-    
-    # Запуск фоновых задач
-    logger.info("✅ Background tasks started")
-    
-    yield
-    
-    logger.info("🛑 Shutting down")
 
-app = FastAPI(title="Ryoho Clicker API", lifespan=lifespan)
+    if REDIS_URL:
+        redis_client = redis.from_url(
+            REDIS_URL,
+            encoding="utf-8",
+            decode_responses=True,
+            socket_timeout=2,
+            socket_connect_timeout=2,
+            retry_on_timeout=True,
+        )
+        try:
+            await redis_client.ping()
+            logger.info("✅ Redis connected")
+        except Exception as e:
+            logger.error(f"❌ Redis connection failed: {e}")
+            redis_client = None
+    else:
+        logger.warning("⚠️ REDIS_URL is not set")
+
+    logger.info("✅ Background tasks started")
+    yield
+
+    if redis_client:
+        await redis_client.close()
+
+    logger.info("🛑 Shutting down")
 
 # ==================== CORS ====================
 
@@ -288,6 +309,27 @@ def get_max_energy(level: int) -> int:
     return min(1000, BASE_MAX_ENERGY + level * 5)
 
 # ==================== ЭНДПОИНТЫ ====================
+
+async def redis_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
+    """
+    True = можно пропустить
+    False = лимит превышен
+    """
+    if redis_client is None:
+        return True  # fallback, чтобы игра не падала
+
+    current = await redis_client.incr(key)
+    if current == 1:
+        await redis_client.expire(key, window_seconds)
+
+    return current <= limit
+
+
+async def require_redis_rate_limit(namespace: str, user_id: int, limit: int, window_seconds: int):
+    allowed = await redis_rate_limit(f"rl:{namespace}:{user_id}", limit, window_seconds)
+    if not allowed:
+        raise HTTPException(status_code=429, detail="Too many requests")
+
 
 def _normalize_dt(value):
     if value is None:
@@ -420,6 +462,7 @@ async def activate_mega_boost(request: BoostActivateRequest):
     """Activate mega boost (x2 coins + infinite energy for 5 minutes)"""
     try:
         user = await get_user(request.user_id)
+        await require_redis_rate_limit("activate_mega_boost", request.user_id, 10, 60)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -468,6 +511,8 @@ async def reward_video(request: dict):
     try:
         user_id = request.get("user_id")
         
+        await require_redis_rate_limit("reward_video", user_id, 5, 60)
+
         user = await get_user(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -587,6 +632,7 @@ async def process_upgrade(request: UpgradeRequest):
 async def update_energy(request: dict):
     try:
         user_id = request.get("user_id")
+        await require_redis_rate_limit("update_energy", user_id, 10, 60)
         if not user_id:
             raise HTTPException(status_code=400, detail="user_id required")
 
@@ -968,6 +1014,7 @@ async def cpa_status(request: dict):
 async def play_coinflip(request: GameRequest):
     try:
         user = await get_user(request.user_id)
+        await require_redis_rate_limit("update_energy", user_id, 10, 60)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
         require_rate_limit("game_action", request.user_id, *RATE_LIMITS["game_action"])
@@ -992,6 +1039,7 @@ async def play_coinflip(request: GameRequest):
 async def play_slots(request: GameRequest):
     try:
         user = await get_user(request.user_id)
+        await require_redis_rate_limit("update_energy", user_id, 10, 60)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
         require_rate_limit("game_action", request.user_id, *RATE_LIMITS["game_action"])
@@ -1021,6 +1069,7 @@ async def play_slots(request: GameRequest):
 async def play_dice(request: GameRequest):
     try:
         user = await get_user(request.user_id)
+        await require_redis_rate_limit("update_energy", user_id, 10, 60)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
         require_rate_limit("game_action", request.user_id, *RATE_LIMITS["game_action"])
@@ -1063,6 +1112,7 @@ async def play_roulette(request: GameRequest):
     """Play roulette game"""
     try:
         user = await get_user(request.user_id)
+        await require_redis_rate_limit("update_energy", user_id, 10, 60)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
         require_rate_limit("game_action", request.user_id, *RATE_LIMITS["game_action"])
