@@ -1742,6 +1742,29 @@ async def unlock_skin(request: dict):
     except Exception as e:
         logger.error(f"Error in unlock_skin: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+@app.get("/admin/fix-db")
+async def fix_db():
+    try:
+        from sqlalchemy import text
+
+        async with async_session() as session:
+            await session.execute(text("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS last_energy_update TIMESTAMP
+            """))
+
+            await session.execute(text("""
+                UPDATE users
+                SET last_energy_update = NOW()
+                WHERE last_energy_update IS NULL
+            """))
+
+            await session.commit()
+
+        return {"status": "ok"}
+    except Exception as e:
+        return {"error": str(e)}
+
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":

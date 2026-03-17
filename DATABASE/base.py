@@ -35,6 +35,7 @@ class User(Base):
     boost_level = Column(Integer, default=0)
 
     last_passive_income = Column(DateTime, default=datetime.utcnow)
+    last_energy_update = Column(DateTime, default=datetime.utcnow)
 
     referrer_id = Column(BigInteger, nullable=True)
     referral_count = Column(Integer, default=0)
@@ -85,6 +86,7 @@ async def get_user(user_id: int):
                 "profit_level": user.profit_level,
                 "energy_level": user.energy_level,
                 "last_passive_income": user.last_passive_income,
+                "last_energy_update": user.last_energy_update,
                 "luck_level": user.luck_level,
                 "referral_count": user.referral_count,
                 "referral_earnings": user.referral_earnings,
@@ -224,6 +226,7 @@ async def add_user(user_id: int, username: str = None, referrer_id: int = None):
             energy_level=0,
             luck_level=0,
             last_passive_income=datetime.utcnow(),
+            last_energy_update=datetime.utcnow(),
             referrer_id=referrer_id,
             referral_count=0,
             referral_earnings=0,
@@ -269,6 +272,8 @@ async def update_user(user_id: int, data: dict):
             user.energy_level = data['energy_level']
         if 'last_passive_income' in data:
             user.last_passive_income = data['last_passive_income']
+        if 'last_energy_update' in data:
+            user.last_energy_update = data['last_energy_update']
         if 'extra_data' in data:
             user.extra_data = json.dumps(data['extra_data'])
 
