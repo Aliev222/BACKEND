@@ -32,7 +32,7 @@ MAX_REWARD_PER_VIDEO = 5000
 MAX_BET = 1000000
 MIN_BET = 10
 BASE_MAX_ENERGY = 500
-ENERGY_REGEN_SECONDS = 5  # 1 энергия каждые 5 секунд
+ENERGY_REGEN_SECONDS = 2  # 1 энергия каждые 5 секунд
 
 # ==================== ЦЕНЫ АПГРЕЙДОВ ====================
 
