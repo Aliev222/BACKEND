@@ -59,7 +59,7 @@ RATE_LIMITS = {
     "game_action": (30, 60),         # 30 в минуту на мини-игры
 }
 
-rate_limit_store = defaultdict(deque)
+
 
 REDIS_URL = os.getenv("REDIS_URL")
 redis_client = None
@@ -177,24 +177,6 @@ async def invalidate_user_cache(user_id: int):
     if redis_client:
         await redis_client.delete(f"{USER_CACHE_PREFIX}{user_id}")
 
-def check_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
-    """
-    Простая in-memory защита от спама.
-    True = запрос можно пропустить
-    False = лимит превышен
-    """
-    now = time.time()
-    bucket = rate_limit_store[key]
-
-    # Удаляем старые записи за пределами окна
-    while bucket and bucket[0] <= now - window_seconds:
-        bucket.popleft()
-
-    if len(bucket) >= limit:
-        return False
-
-    bucket.append(now)
-    return True
 
 
 
@@ -236,6 +218,8 @@ async def reset_tournament_loop():
                 logger.info("🏆 Tournament leaderboard reset")
         except Exception as e:
             logger.error(f"Error resetting tournament leaderboard: {e}")
+
+
 
 # ==================== LIFESPAN ====================
 
@@ -337,6 +321,14 @@ class EnergySyncRequest(BaseModel):
 class ClicksBatchRequest(BaseModel):
     user_id: int
     clicks: int = Field(..., ge=1, le=500)
+    batch_id: str
+
+class RewardVideoStartRequest(BaseModel):
+    user_id: int
+
+class RewardVideoClaimRequest(BaseModel):
+    user_id: int
+    ad_session_id: str
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 async def acquire_once_lock(key: str, ttl: int = 10) -> bool:
@@ -345,6 +337,11 @@ async def acquire_once_lock(key: str, ttl: int = 10) -> bool:
     result = await redis_client.set(key, "1", ex=ttl, nx=True)
     return bool(result)
 
+async def acquire_idempotency_key(key: str, ttl: int = 60) -> bool:
+    if not redis_client:
+        return True
+    result = await redis_client.set(key, "1", ex=ttl, nx=True)
+    return bool(result)
 
 def get_tap_value(level: int) -> int:
     return 1 + level
@@ -509,11 +506,16 @@ async def get_user_data(user_id: int):
 async def get_mega_boost_status(user_id: int):
     """Get mega boost status"""
     try:
-        user = await get_user(user_id)
+        user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        extra = user.get("extra_data", {})
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except:
+                extra = {}
         active_boosts = extra.get("active_boosts", {})
         now = datetime.utcnow()
         
@@ -545,15 +547,18 @@ async def get_mega_boost_status(user_id: int):
 async def activate_mega_boost(request: BoostActivateRequest):
     """Activate mega boost (x2 coins + infinite energy for 5 minutes)"""
     try:
-        user = await get_user(request.user_id)
+        user = await get_user_cached(request.user_id)
         await require_redis_rate_limit("activate_mega_boost", request.user_id, 10, 60)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
 
-        extra = user.get("extra_data", {})
-        if not isinstance(extra, dict):
-            extra = {}
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except:
+                extra = {}
         
         active_boosts = extra.get("active_boosts", {})
         now = datetime.utcnow()
@@ -578,6 +583,7 @@ async def activate_mega_boost(request: BoostActivateRequest):
         active_boosts["mega_boost"] = {"active": True, "expires_at": expires_at}
         extra["active_boosts"] = active_boosts
         await update_user(request.user_id, {"extra_data": extra})
+        await invalidate_user_cache(request.user_id)
         
         return {
             "success": True,
@@ -589,52 +595,99 @@ async def activate_mega_boost(request: BoostActivateRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/reward-video")
-async def reward_video(request: dict):
-    """Handle rewarded video watch"""
+async def reward_video(request: RewardVideoClaimRequest):
     try:
-        user_id = request.get("user_id")
-        if not user_id:
-            raise HTTPException(status_code=400, detail="user_id required")
+        await require_redis_rate_limit("reward_video", request.user_id, 5, 60)
 
-        lock_key = f"lock:reward_video:{user_id}"
+        if not redis_client:
+            raise HTTPException(status_code=500, detail="Redis required")
+
+        lock_key = f"lock:reward_video:{request.user_id}"
         locked = await acquire_once_lock(lock_key, ttl=15)
         if not locked:
             raise HTTPException(status_code=429, detail="Reward already being processed")
-        
-        await require_redis_rate_limit("reward_video", user_id, 5, 60)
 
-        user = await get_user_cached(user_id)
+        session_key = f"adsession:reward:{request.ad_session_id}"
+        raw = await redis_client.get(session_key)
+        if not raw:
+            raise HTTPException(status_code=400, detail="Invalid or expired ad session")
+
+        session = json.loads(raw)
+
+        if int(session.get("user_id")) != request.user_id:
+            raise HTTPException(status_code=400, detail="Ad session does not belong to user")
+
+        if session.get("claimed") is True:
+            raise HTTPException(status_code=409, detail="Reward already claimed")
+
+        user = await get_user_cached(request.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-
-        # Начисляем награду
         reward = 5000
-        user["coins"] += reward
-        
-        # Обновляем счетчик просмотренных видео
-        extra = user.get("extra_data", {})
+        new_coins = int(user.get("coins", 0)) + reward
+
+        extra = user.get("extra_data", {}) or {}
         if not isinstance(extra, dict):
             extra = {}
-        extra["ads_watched"] = extra.get("ads_watched", 0) + 1
-        
-        await update_user(user_id, {
-            "coins": user["coins"],
+
+        extra["ads_watched"] = int(extra.get("ads_watched", 0)) + 1
+
+        await update_user(request.user_id, {
+            "coins": new_coins,
             "extra_data": extra
         })
-        await invalidate_user_cache(user_id)
-        
-        # Обновляем кэш
-        
-        
+        await invalidate_user_cache(request.user_id)
+
+        session["claimed"] = True
+        await redis_client.setex(session_key, 120, json.dumps(session))
+
         return {
             "success": True,
-            "coins": user["coins"],
+            "coins": new_coins,
             "ads_watched": extra["ads_watched"]
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in reward_video: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/api/reward-video/start")
+async def reward_video_start(request: RewardVideoStartRequest):
+    try:
+        await require_redis_rate_limit("reward_video_start", request.user_id, 10, 60)
+
+        if not redis_client:
+            raise HTTPException(status_code=500, detail="Redis required")
+
+        user = await get_user_cached(request.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        ad_session_id = f"{request.user_id}:{int(time.time())}:{random.randint(100000, 999999)}"
+        key = f"adsession:reward:{ad_session_id}"
+
+        await redis_client.setex(
+            key,
+            120,
+            json.dumps({
+                "user_id": request.user_id,
+                "claimed": False,
+                "created_at": time.time()
+            })
+        )
+
+        return {
+            "success": True,
+            "ad_session_id": ad_session_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in reward_video_start: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -649,9 +702,12 @@ async def ad_watched(request: dict):
         if not user:
             return {"success": False}
         
-        extra = user.get("extra_data", {})
-        if not isinstance(extra, dict):
-            extra = {}
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except:
+                extra = {}
         
         # Сохраняем статистику
         ads_history = extra.get("ads_history", [])
@@ -670,10 +726,49 @@ async def ad_watched(request: dict):
         logger.error(f"Error in ad_watched: {e}")
         return {"success": False}
 
+@app.post("/api/ads/increment")
+async def increment_ads_watched(request: UserIdRequest):
+    try:
+        user = await get_user_cached(request.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        await require_redis_rate_limit("ads_increment", request.user_id, 20, 60)
+
+        lock_key = f"lock:ads_increment:{request.user_id}"
+        locked = await acquire_once_lock(lock_key, ttl=5)
+        if not locked:
+            raise HTTPException(status_code=429, detail="Ad already being processed")
+
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except:
+                extra = {}
+
+        ads_watched = int(extra.get("ads_watched", 0)) + 1
+        extra["ads_watched"] = ads_watched
+
+        await update_user(request.user_id, {"extra_data": extra})
+        await invalidate_user_cache(request.user_id)
+
+        return {
+            "success": True,
+            "ads_watched": ads_watched
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in increment_ads_watched: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @app.post("/api/upgrade")
 async def process_upgrade(request: UpgradeRequest):
     try:
-        user = await get_user(request.user_id)
+        user = await get_user_cached(request.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -699,6 +794,7 @@ async def process_upgrade(request: UpgradeRequest):
             updates["energy"] = new_max
 
         await update_user(request.user_id, updates)
+        await invalidate_user_cache(request.user_id)
         
         # Обновляем кэш
         
@@ -759,7 +855,7 @@ async def update_energy(request: dict):
 async def recover_energy_legacy(request: UserIdRequest):
     """Старый эндпоинт для обратной совместимости"""
     try:
-        user = await get_user(request.user_id)
+        user = await get_user_cached(request.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -775,6 +871,7 @@ async def recover_energy_legacy(request: UserIdRequest):
                 "energy": new_energy,
                 "last_energy_update": datetime.utcnow()
             })
+            await invalidate_user_cache(request.user_id)
             
             
             
@@ -790,7 +887,8 @@ async def recover_energy_legacy(request: UserIdRequest):
 async def sync_energy(request: EnergySyncRequest):
     """Серверный sync энергии без сброса таймера регена."""
     try:
-        user = await get_user(request.user_id)
+        user = await get_user_cached(request.user_id)
+        
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -826,6 +924,7 @@ async def sync_energy(request: EnergySyncRequest):
 
         if update_data:
             await update_user(request.user_id, update_data)
+            await invalidate_user_cache(request.user_id)
 
             
 
@@ -873,18 +972,24 @@ SKIN_MULTIPLIERS = {
 
 
 def get_selected_skin_multiplier(user: dict) -> float:
-    extra = user.get("extra_data", {})
-    if not isinstance(extra, dict):
-        return 1.0
+    extra = user.get("extra_data", {}) or {}
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except:
+            extra = {}
 
     selected_skin = extra.get("selected_skin", "default_SP")
     return SKIN_MULTIPLIERS.get(selected_skin, 1.0)
 
 
 def is_mega_boost_active(user: dict) -> bool:
-    extra = user.get("extra_data", {})
-    if not isinstance(extra, dict):
-        return False
+    extra = user.get("extra_data", {}) or {}
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except:
+            extra = {}
 
     active_boosts = extra.get("active_boosts", {})
     boost = active_boosts.get("mega_boost")
@@ -934,6 +1039,11 @@ async def can_unlock_skin(user: dict, skin_id: str) -> bool:
         return False
 
     extra = user.get("extra_data", {}) or {}
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except:
+            extra = {}
 
     if req["type"] == "level":
         level = int(user.get("multitap_level", 0))
@@ -959,7 +1069,18 @@ async def can_unlock_skin(user: dict, skin_id: str) -> bool:
 @app.post("/api/clicks")
 async def process_clicks_batch(request: ClicksBatchRequest):
     try:
-        user = await get_user(request.user_id)
+        user = await get_user_cached(request.user_id)
+        
+        if request.clicks > MAX_CLICK_BATCH_SIZE:
+            raise HTTPException(status_code=400, detail="Too many clicks in batch")
+
+        batch_key = f"idem:clicks:{request.user_id}:{request.batch_id}"
+        is_new_batch = await acquire_idempotency_key(batch_key, ttl=120)
+        if not is_new_batch:
+            logger.warning(f"Duplicate click batch rejected: user={request.user_id}, batch_id={request.batch_id}")
+            raise HTTPException(status_code=409, detail="Duplicate batch")
+
+
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -1091,13 +1212,15 @@ async def register_user(request: RegisterRequest):
                     "referral_count": new_count,
                     "referral_earnings": new_earnings
                 })
+                await invalidate_user_cache(request.referrer_id)
                 
                 # Обновляем кэш
                 
                 
                 logger.info(f"✅ Referral bonus: {request.referrer_id} got +5000 for {request.user_id}")
 
-        return {"status": "created", "user": await get_user(request.user_id)}
+        created_user = await get_user_cached(request.user_id)
+        return {"status": "created", "user": created_user}
     except Exception as e:
         logger.error(f"Error in register_user: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1205,6 +1328,11 @@ async def increment_ads_watched(request: UserIdRequest):
             raise HTTPException(status_code=404, detail="User not found")
 
         extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except:
+                extra = {}
         ads_watched = int(extra.get("ads_watched", 0)) + 1
         extra["ads_watched"] = ads_watched
 
@@ -1233,7 +1361,7 @@ async def play_coinflip(request: GameRequest):
             raise HTTPException(status_code=429, detail="Game request already in progress")
         await require_redis_rate_limit("game_action", request.user_id, 30, 60)
         
-        user = await get_user(request.user_id)
+        user = await get_user_cached(request.user_id)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
 
@@ -1246,6 +1374,7 @@ async def play_coinflip(request: GameRequest):
             message = f"😞 You lost {request.bet} coins"
 
         await update_user(request.user_id, {"coins": user["coins"]})
+        await invalidate_user_cache(request.user_id)
 
         return {"success": True, "coins": user["coins"], "message": message}
     except Exception as e:
@@ -1261,7 +1390,7 @@ async def play_slots(request: GameRequest):
             raise HTTPException(status_code=429, detail="Game request already in progress")
         await require_redis_rate_limit("game_action", request.user_id, 30, 60)
 
-        user = await get_user(request.user_id)
+        user = await get_user_cached(request.user_id)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
 
@@ -1279,6 +1408,7 @@ async def play_slots(request: GameRequest):
             message = f"😞 You lost {request.bet} coins"
 
         await update_user(request.user_id, {"coins": user["coins"]})
+        await invalidate_user_cache(request.user_id)
 
         return {"success": True, "coins": user["coins"], "slots": slots, "message": message}
     except Exception as e:
@@ -1295,7 +1425,7 @@ async def play_dice(request: GameRequest):
         
         await require_redis_rate_limit("game_action", request.user_id, 30, 60)
 
-        user = await get_user(request.user_id)
+        user = await get_user_cached(request.user_id)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
 
@@ -1324,6 +1454,7 @@ async def play_dice(request: GameRequest):
             message = f"😞 You lost {request.bet} coins"
 
         await update_user(request.user_id, {"coins": user["coins"]})
+        await invalidate_user_cache(request.user_id)
 
         return {
             "success": True,
@@ -1346,7 +1477,7 @@ async def play_roulette(request: GameRequest):
             raise HTTPException(status_code=429, detail="Game request already in progress")
         await require_redis_rate_limit("game_action", request.user_id, 30, 60)
 
-        user = await get_user(request.user_id)
+        user = await get_user_cached(request.user_id)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
 
@@ -1385,6 +1516,7 @@ async def play_roulette(request: GameRequest):
             message = f"😞 {result_symbol} {result} - You lost {request.bet} coins"
 
         await update_user(request.user_id, {"coins": user["coins"]})
+        await invalidate_user_cache(request.user_id)
 
         return {
             "success": True,
@@ -1551,7 +1683,7 @@ async def get_tasks(user_id: int):
 @app.post("/api/complete-task")
 async def complete_task(request: TaskCompleteRequest):
     try:
-        user = await get_user(request.user_id)
+        user = await get_user_cached(request.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -1560,6 +1692,7 @@ async def complete_task(request: TaskCompleteRequest):
         if task_id == "link_click":
             user["coins"] += 25000
             await update_user(request.user_id, {"coins": user["coins"]})
+            await invalidate_user_cache(request.user_id)
             
             return {"success": True, "message": "🔗 +25000 coins!", "coins": user["coins"]}
         
@@ -1571,6 +1704,7 @@ async def complete_task(request: TaskCompleteRequest):
             user["coins"] += 25000
             await add_completed_task(request.user_id, task_id)
             await update_user(request.user_id, {"coins": user["coins"]})
+            await invalidate_user_cache(request.user_id)
             return {"success": True, "message": "🎁 +25000 coins!", "coins": user["coins"]}
         
         elif task_id == "energy_refill":
@@ -1582,6 +1716,7 @@ async def complete_task(request: TaskCompleteRequest):
                 user["coins"] += 20000
                 await add_completed_task(request.user_id, task_id)
                 await update_user(request.user_id, {"coins": user["coins"]})
+                await invalidate_user_cache(request.user_id)
                 return {"success": True, "message": "👥 +20000 coins!", "coins": user["coins"]}
             else:
                 raise HTTPException(status_code=400, detail="Not enough friends")
@@ -1815,30 +1950,7 @@ async def get_skins_list():
 @app.post("/api/select-skin")
 async def select_skin(request: SkinRequest):
     try:
-        user = await get_user(request.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        extra = user.get("extra_data", {})
-        extra["selected_skin"] = request.skin_id
-        await update_user(request.user_id, {"extra_data": extra})
-        
-        
-        return {"success": True, "selected_skin": request.skin_id}
-    except Exception as e:
-        logger.error(f"Error in select_skin: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-@app.post("/api/unlock-skin")
-async def unlock_skin(request: dict):
-    try:
-        user_id = request.get("user_id")
-        skin_id = request.get("skin_id")
-
-        if not user_id or not skin_id:
-            raise HTTPException(status_code=400, detail="user_id and skin_id required")
-
-        user = await get_user_cached(user_id)
+        user = await get_user_cached(request.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -1847,39 +1959,71 @@ async def unlock_skin(request: dict):
             extra = {}
 
         owned_skins = extra.get("owned_skins", ["default_SP"])
+        if request.skin_id not in owned_skins:
+            raise HTTPException(status_code=400, detail="Skin not owned")
 
-        if skin_id in owned_skins:
-            return {
-                "success": False,
-                "message": "Skin already owned",
-                "owned_skins": owned_skins
-            }
+        extra["selected_skin"] = request.skin_id
 
-        allowed = await can_unlock_skin(user, skin_id)
-        if not allowed:
-            raise HTTPException(status_code=400, detail="Skin unlock requirements not met")
+        await update_user(request.user_id, {"extra_data": extra})
+        await invalidate_user_cache(request.user_id)
 
-        owned_skins.append(skin_id)
-        extra["owned_skins"] = owned_skins
-
-        if not extra.get("selected_skin"):
-            extra["selected_skin"] = "default_SP"
-
-        await update_user(user_id, {"extra_data": extra})
-        await invalidate_user_cache(user_id)
-
-        logger.info(f"✅ Skin {skin_id} unlocked for user {user_id}")
-
-        return {
-            "success": True,
-            "owned_skins": owned_skins,
-            "selected_skin": extra.get("selected_skin", "default_SP")
-        }
+        return {"success": True, "selected_skin": request.skin_id}
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in unlock_skin: {e}")
+        logger.error(f"Error in select_skin: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/api/unlock-skin")
+async def unlock_skin(request: SkinRequest):
+    try:
+        user = await get_user_cached(request.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except:
+                extra = {}
+
+        owned = extra.get("owned_skins", ["default_SP"])
+        ads_watched = int(extra.get("ads_watched", 0))
+
+        # 🔥 проверка скинов
+        SKINS_REQUIREMENTS = {
+            "skin_video_1": 5,
+            "skin_video_2": 10,
+            "skin_video_3": 20,
+            "skin_video_4": 25,
+            "skin_video_5": 35,
+            "skin_video_6": 50,
+        }
+
+        if request.skin_id in owned:
+            return {"success": True}
+
+        if request.skin_id in SKINS_REQUIREMENTS:
+            required = SKINS_REQUIREMENTS[request.skin_id]
+
+            if ads_watched < required:
+                raise HTTPException(status_code=400, detail="Not enough ads watched")
+
+        # ✅ добавляем скин
+        owned.append(request.skin_id)
+        extra["owned_skins"] = owned
+
+        await update_user(request.user_id, {"extra_data": extra})
+        await invalidate_user_cache(request.user_id)
+
+        return {"success": True}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unlock skin error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/admin/fix-db")
