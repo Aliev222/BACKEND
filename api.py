@@ -154,7 +154,7 @@ async def get_user_cached(user_id: int) -> dict | None:
         if cached:
             try:
                 return json.loads(cached)
-            except:
+            except Exception:
                 pass
 
     user = await get_user(user_id)
@@ -165,7 +165,7 @@ async def get_user_cached(user_id: int) -> dict | None:
         await redis_client.setex(
             f"{USER_CACHE_PREFIX}{user_id}",
             USER_CACHE_TTL,
-            json.dumps(user)
+            json.dumps(user, default=str)
         )
 
     return user
@@ -536,8 +536,7 @@ async def activate_mega_boost(request: BoostActivateRequest):
         await require_redis_rate_limit("activate_mega_boost", request.user_id, 10, 60)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        require_rate_limit("activate_mega_boost", request.user_id, *RATE_LIMITS["activate_mega_boost"])
+
 
         extra = user.get("extra_data", {})
         if not isinstance(extra, dict):
@@ -707,9 +706,6 @@ async def update_energy(request: dict):
         await require_redis_rate_limit("update_energy", user_id, 10, 60)
         if not user_id:
             raise HTTPException(status_code=400, detail="user_id required")
-
-
-
         user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -717,7 +713,11 @@ async def update_energy(request: dict):
         now = datetime.utcnow()
         max_energy = int(user.get("max_energy", 500))
 
-        
+        await update_user(user_id, {
+            "energy": max_energy,
+            "last_energy_update": now
+        })
+        await invalidate_user_cache(user_id)
 
         return {
             "success": True,
@@ -911,45 +911,46 @@ async def process_clicks_batch(request: ClicksBatchRequest):
         if mega_boost_active:
             coin_per_tap *= 2
 
-        # Серверная защита от нереалистичного количества кликов
+        # защита
         safe_requested_clicks = min(request.clicks, MAX_CLICK_BATCH_SIZE)
         allowed_clicks = get_allowed_clicks(user, now, safe_requested_clicks)
 
         effective_clicks = min(allowed_clicks, current_energy)
         gained = effective_clicks * coin_per_tap
 
-        if redis_client:
-            await redis_client.zincrby(
-                "tournament:leaderboard",
-                gained,
-                str(request.user_id)
-            )
-
+        # новые значения
         new_energy = max(0, current_energy - effective_clicks)
         new_coins = int(user.get("coins", 0)) + gained
-        
 
+        # ✅ ВСЕГДА сохраняем энергию сразу
+        await update_user(request.user_id, {
+            "energy": new_energy,
+            "last_energy_update": now
+        })
+
+        # ✅ монеты — через Redis buffer
         if redis_client:
-            await redis_client.hincrby(
-                CLICK_BUFFER_KEY,
-                str(request.user_id),
-                gained
-            )
+            if gained > 0:
+                await redis_client.hincrby(
+                    CLICK_BUFFER_KEY,
+                    str(request.user_id),
+                    gained
+                )
+
+                # турнир (ОДИН раз)
+                await redis_client.zincrby(
+                    TOURNAMENT_KEY,
+                    gained,
+                    str(request.user_id)
+                )
         else:
-            # fallback если Redis умер
+            # fallback
             await update_user(request.user_id, {
-                "coins": new_coins,
-                "energy": new_energy,
-                "last_energy_update": now
+                "coins": new_coins
             })
 
-        if redis_client and gained > 0:
-            await redis_client.zincrby(
-                TOURNAMENT_KEY,
-                gained,
-                str(request.user_id)
-            )
-
+        # ✅ инвалидируем кэш
+        await invalidate_user_cache(request.user_id)
 
         return {
             "success": True,
