@@ -36,6 +36,14 @@ ENERGY_REGEN_SECONDS = 2  # 1 энергия каждые 5 секунд
 TOURNAMENT_KEY = "tournament:leaderboard"
 TOURNAMENT_PRIZE_POOL = 100000
 
+
+
+#=================ключи
+CLICK_BUFFER_KEY = "clicks:buffer"
+CLICK_FLUSH_INTERVAL = 5  # секунд
+USER_CACHE_PREFIX = "user:cache:"
+USER_CACHE_TTL = 60  # секунд
+
 # ==================== АНТИСПАМ / АНТИЧИТ ====================
 
 MAX_REAL_CLICKS_PER_SECOND = 25   # честный быстрый таппер
@@ -140,8 +148,34 @@ def mask_username(username):
     return masked
 
 
+async def get_user_cached(user_id: int) -> dict | None:
+    if redis_client:
+        cached = await redis_client.get(f"{USER_CACHE_PREFIX}{user_id}")
+        if cached:
+            try:
+                return json.loads(cached)
+            except:
+                pass
+
+    user = await get_user(user_id)
+    if not user:
+        return None
+
+    if redis_client:
+        await redis_client.setex(
+            f"{USER_CACHE_PREFIX}{user_id}",
+            USER_CACHE_TTL,
+            json.dumps(user)
+        )
+
+    return user
+
 # ==================== Вспомогательные функции антиспама ====================
 
+
+async def invalidate_user_cache(user_id: int):
+    if redis_client:
+        await redis_client.delete(f"{USER_CACHE_PREFIX}{user_id}")
 
 def check_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
     """
@@ -231,9 +265,10 @@ async def lifespan(app: FastAPI):
             redis_client = None
     else:
         logger.warning("⚠️ REDIS_URL is not set")
-    
+
     if redis_client:
         asyncio.create_task(reset_tournament_loop())
+        asyncio.create_task(flush_click_buffer_loop())
 
     logger.info("✅ Background tasks started")
     yield
@@ -381,6 +416,40 @@ def build_energy_payload(user: dict, now: datetime | None = None) -> dict:
         "server_time": now.isoformat()
     }
 
+async def flush_click_buffer_loop():
+    while True:
+        await asyncio.sleep(CLICK_FLUSH_INTERVAL)
+
+        if not redis_client:
+            continue
+
+        try:
+            data = await redis_client.hgetall(CLICK_BUFFER_KEY)
+            if not data:
+                continue
+
+            for user_id_str, coins_str in data.items():
+                user_id = int(user_id_str)
+                coins_to_add = int(coins_str)
+
+                user = await get_user_cached(user_id)
+                if not user:
+                    continue
+
+                new_coins = user.get("coins", 0) + coins_to_add
+
+                await update_user(user_id, {
+                    "coins": new_coins
+                })
+                await invalidate_user_cache(user_id)
+
+            await redis_client.delete(CLICK_BUFFER_KEY)
+
+            logger.info(f"💾 Flushed {len(data)} users from Redis buffer")
+
+        except Exception as e:
+            logger.error(f"Flush error: {e}")
+
 
 @app.get("/health")
 async def health():
@@ -389,7 +458,7 @@ async def health():
 @app.get("/api/user/{user_id}")
 async def get_user_data(user_id: int):
     try:
-        user = await get_user(user_id)
+        user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -442,6 +511,7 @@ async def get_mega_boost_status(user_id: int):
                     del active_boosts["mega_boost"]
                     extra["active_boosts"] = active_boosts
                     await update_user(user_id, {"extra_data": extra})
+                    await invalidate_user_cache(user_id)
                     return {"active": False}
                 else:
                     remaining = int((expires - now).total_seconds())
@@ -514,11 +584,10 @@ async def reward_video(request: dict):
         
         await require_redis_rate_limit("reward_video", user_id, 5, 60)
 
-        user = await get_user(user_id)
+        user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        require_rate_limit("reward_video", user_id, *RATE_LIMITS["reward_video"])
+
 
         # Начисляем награду
         reward = 5000
@@ -534,6 +603,7 @@ async def reward_video(request: dict):
             "coins": user["coins"],
             "extra_data": extra
         })
+        await invalidate_user_cache(user_id)
         
         # Обновляем кэш
         
@@ -556,7 +626,7 @@ async def ad_watched(request: dict):
         user_id = request.get("user_id")
         reward_type = request.get("reward_type")
         
-        user = await get_user(user_id)
+        user = await get_user_cached(user_id)
         if not user:
             return {"success": False}
         
@@ -573,6 +643,7 @@ async def ad_watched(request: dict):
         extra["ads_history"] = ads_history
         
         await update_user(user_id, {"extra_data": extra})
+        await invalidate_user_cache(user_id)
         
         return {"success": True}
         
@@ -637,9 +708,9 @@ async def update_energy(request: dict):
         if not user_id:
             raise HTTPException(status_code=400, detail="user_id required")
 
-        require_rate_limit("update_energy", user_id, *RATE_LIMITS["update_energy"])
 
-        user = await get_user(user_id)
+
+        user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -858,11 +929,19 @@ async def process_clicks_batch(request: ClicksBatchRequest):
         new_coins = int(user.get("coins", 0)) + gained
         
 
-        await update_user(request.user_id, {
-            "coins": new_coins,
-            "energy": new_energy,
-            "last_energy_update": now
-        })
+        if redis_client:
+            await redis_client.hincrby(
+                CLICK_BUFFER_KEY,
+                str(request.user_id),
+                gained
+            )
+        else:
+            # fallback если Redis умер
+            await update_user(request.user_id, {
+                "coins": new_coins,
+                "energy": new_energy,
+                "last_energy_update": now
+            })
 
         if redis_client and gained > 0:
             await redis_client.zincrby(
@@ -896,7 +975,7 @@ async def process_clicks_batch(request: ClicksBatchRequest):
 @app.get("/api/upgrade-prices/{user_id}")
 async def get_upgrade_prices(user_id: int):
     try:
-        user = await get_user(user_id)
+        user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -955,7 +1034,7 @@ async def register_user(request: RegisterRequest):
 async def get_referral_data(user_id: int):
     """Get referral statistics"""
     try:
-        user = await get_user(user_id)
+        user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -980,7 +1059,7 @@ async def cpa_status(request: dict):
     try:
         user_id = request.get("user_id")
         if user_id:
-            require_rate_limit("cpa_status", user_id, *RATE_LIMITS["cpa_status"])
+            await require_redis_rate_limit("cpa_status", user_id, *RATE_LIMITS["cpa_status"])
         offer_id = request.get("offer_id")
         check_only = request.get("check_only", False)
         
@@ -1001,7 +1080,7 @@ async def cpa_status(request: dict):
         if elapsed > 30 and not _cpa_store[cpa_key]["completed"]:
             _cpa_store[cpa_key]["completed"] = True
             
-            user = await get_user(user_id)
+            user = await get_user_cached(user_id)
             if user:
                 rewards = {
                     "cpa_1": 50000,
@@ -1012,6 +1091,7 @@ async def cpa_status(request: dict):
                 
                 user["coins"] += reward
                 await update_user(user_id, {"coins": user["coins"]})
+                await invalidate_user_cache(user_id)
                 
                 
                 
@@ -1210,7 +1290,7 @@ async def get_tournament_leaderboard():
                 except ValueError:
                     continue
 
-                user = await get_user(user_id)
+                user = await get_user_cached(user_id)
 
                 username = user.get("username") if user else None
                 avatar_url = (
@@ -1247,7 +1327,7 @@ async def get_tournament_leaderboard():
 async def get_player_rank(user_id: int):
     """Get player's rank from Redis leaderboard"""
     try:
-        user = await get_user(user_id)
+        user = await get_user_cached(user_id)
         if not user:
             return {
                 "success": True,
@@ -1312,7 +1392,7 @@ _task_completion_store = {}
 @app.get("/api/tasks/{user_id}")
 async def get_tasks(user_id: int):
     try:
-        user = await get_user(user_id)
+        user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -1340,7 +1420,6 @@ async def complete_task(request: TaskCompleteRequest):
         user = await get_user(request.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        require_rate_limit("complete_task", request.user_id, *RATE_LIMITS["complete_task"])
 
         task_id = request.task_id
         
@@ -1624,7 +1703,7 @@ async def unlock_skin(request: dict):
         skin_id = request.get("skin_id")
         method = request.get("method", "ads")
         
-        user = await get_user(user_id)
+        user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -1643,6 +1722,7 @@ async def unlock_skin(request: dict):
                 extra["selected_skin"] = skin_id
             
             await update_user(user_id, {"extra_data": extra})
+            await invalidate_user_cache(user_id)
             
             # Обновляем кэш
            
