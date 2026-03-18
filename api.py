@@ -1197,6 +1197,31 @@ async def cpa_status(request: dict):
         logger.error(f"CPA status error: {e}")
         return {"completed": False}
 
+@app.post("/api/ads/increment")
+async def increment_ads_watched(request: UserIdRequest):
+    try:
+        user = await get_user_cached(request.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = user.get("extra_data", {}) or {}
+        ads_watched = int(extra.get("ads_watched", 0)) + 1
+        extra["ads_watched"] = ads_watched
+
+        await update_user(request.user_id, {"extra_data": extra})
+        await invalidate_user_cache(request.user_id)
+
+        return {
+            "success": True,
+            "ads_watched": ads_watched
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in increment_ads_watched: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 # ==================== МИНИ-ИГРЫ ====================
 
 @app.post("/api/game/coinflip")
