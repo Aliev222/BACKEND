@@ -1377,8 +1377,10 @@ async def play_coinflip(request: GameRequest):
         await invalidate_user_cache(request.user_id)
 
         return {"success": True, "coins": user["coins"], "message": message}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error in coinflip: {e}")
+        logger.error(f"Error in dice: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/game/slots")
@@ -1411,8 +1413,10 @@ async def play_slots(request: GameRequest):
         await invalidate_user_cache(request.user_id)
 
         return {"success": True, "coins": user["coins"], "slots": slots, "message": message}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error in slots: {e}")
+        logger.error(f"Error in dice: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/game/dice")
@@ -1463,6 +1467,8 @@ async def play_dice(request: GameRequest):
             "dice2": dice2,
             "message": message
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in dice: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1527,8 +1533,10 @@ async def play_roulette(request: GameRequest):
             "win": win,
             "message": message
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error in play_roulette: {e}")
+        logger.error(f"Error in dice: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 # ==================== TOURNAMENT ENDPOINTS ====================
 
