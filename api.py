@@ -339,6 +339,12 @@ class ClicksBatchRequest(BaseModel):
     clicks: int = Field(..., ge=1, le=500)
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+async def acquire_once_lock(key: str, ttl: int = 10) -> bool:
+    if not redis_client:
+        return True
+    result = await redis_client.set(key, "1", ex=ttl, nx=True)
+    return bool(result)
+
 
 def get_tap_value(level: int) -> int:
     return 1 + level
@@ -418,29 +424,34 @@ def build_energy_payload(user: dict, now: datetime | None = None) -> dict:
 
 async def flush_click_buffer_loop():
     while True:
-        await asyncio.sleep(CLICK_FLUSH_INTERVAL)
-
-        if not redis_client:
-            continue
-
         try:
-            data = await redis_client.hgetall(CLICK_BUFFER_KEY)
-            if not data:
+            if not redis_client:
+                await asyncio.sleep(5)
                 continue
 
-            for user_id_str, coins_str in data.items():
-                user_id = int(user_id_str)
-                coins_to_add = int(coins_str)
+            data = await redis_client.hgetall(CLICK_BUFFER_KEY)
 
-                user = await get_user_cached(user_id)
+            if not data:
+                await asyncio.sleep(5)
+                continue
+
+            for user_id, coins in data.items():
+                user_id = int(user_id)
+                coins = int(coins)
+
+                if coins <= 0:
+                    continue
+
+                user = await get_user(user_id)
                 if not user:
                     continue
 
-                new_coins = user.get("coins", 0) + coins_to_add
+                new_coins = int(user.get("coins", 0)) + coins
 
                 await update_user(user_id, {
                     "coins": new_coins
                 })
+
                 await invalidate_user_cache(user_id)
 
             await redis_client.delete(CLICK_BUFFER_KEY)
@@ -449,6 +460,8 @@ async def flush_click_buffer_loop():
 
         except Exception as e:
             logger.error(f"Flush error: {e}")
+
+        await asyncio.sleep(5)
 
 
 @app.get("/health")
@@ -580,6 +593,13 @@ async def reward_video(request: dict):
     """Handle rewarded video watch"""
     try:
         user_id = request.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id required")
+
+        lock_key = f"lock:reward_video:{user_id}"
+        locked = await acquire_once_lock(lock_key, ttl=15)
+        if not locked:
+            raise HTTPException(status_code=429, detail="Reward already being processed")
         
         await require_redis_rate_limit("reward_video", user_id, 5, 60)
 
@@ -658,6 +678,8 @@ async def process_upgrade(request: UpgradeRequest):
             raise HTTPException(status_code=404, detail="User not found")
         
         boost_type = request.boost_type
+        if boost_type not in UPGRADE_PRICES:
+            raise HTTPException(status_code=400, detail="Invalid boost type")
         current_level = user.get(f"{boost_type}_level", 0)
         
         if current_level >= len(UPGRADE_PRICES[boost_type]):
@@ -879,6 +901,60 @@ def is_mega_boost_active(user: dict) -> bool:
     except Exception:
         return False
 
+SKIN_REQUIREMENTS = {
+    "skin_lvl_1": {"type": "level", "value": 1},
+    "skin_lvl_2": {"type": "level", "value": 10},
+    "skin_lvl_3": {"type": "level", "value": 25},
+    "skin_lvl_4": {"type": "level", "value": 50},
+    "skin_lvl_5": {"type": "level", "value": 75},
+    "skin_lvl_6": {"type": "level", "value": 100},
+    "skin_lvl_7": {"type": "level", "value": 150},
+
+    "skin_video_1": {"type": "ads", "count": 1},
+    "skin_video_2": {"type": "ads", "count": 5},
+    "skin_video_3": {"type": "ads", "count": 10},
+    "skin_video_4": {"type": "ads", "count": 20},
+    "skin_video_5": {"type": "ads", "count": 50},
+    "skin_video_6": {"type": "ads", "count": 100},
+
+    "skin_friend_1": {"type": "friends", "count": 1},
+    "skin_friend_2": {"type": "friends", "count": 3},
+    "skin_friend_3": {"type": "friends", "count": 5},
+    "skin_friend_4": {"type": "friends", "count": 10},
+    "skin_friend_5": {"type": "friends", "count": 20},
+    "skin_friend_6": {"type": "friends", "count": 50},
+
+    "skin_cpa_1": {"type": "cpa", "offer_id": "cpa_1"},
+}
+
+
+async def can_unlock_skin(user: dict, skin_id: str) -> bool:
+    req = SKIN_REQUIREMENTS.get(skin_id)
+    if not req:
+        return False
+
+    extra = user.get("extra_data", {}) or {}
+
+    if req["type"] == "level":
+        level = int(user.get("multitap_level", 0))
+        return level >= int(req["value"])
+
+    if req["type"] == "ads":
+        ads_watched = int(extra.get("ads_watched", 0))
+        return ads_watched >= int(req["count"])
+
+    if req["type"] == "friends":
+        referral_count = int(user.get("referral_count", 0))
+        return referral_count >= int(req["count"])
+
+    if req["type"] == "cpa":
+        if not redis_client:
+            return False
+        cpa_key = f"cpa:{user['user_id']}:{req['offer_id']}"
+        data = await redis_client.hgetall(cpa_key)
+        return bool(data and data.get("completed") == "1")
+
+    return False
 
 @app.post("/api/clicks")
 async def process_clicks_batch(request: ClicksBatchRequest):
@@ -1052,56 +1128,71 @@ async def get_referral_data(user_id: int):
 
 # ==================== CPA ENDPOINTS ====================
 
-_cpa_store = {}
+
 
 @app.post("/api/cpa-status")
 async def cpa_status(request: dict):
     """Проверка статуса CPA-задания"""
     try:
         user_id = request.get("user_id")
-        if user_id:
-            await require_redis_rate_limit("cpa_status", user_id, *RATE_LIMITS["cpa_status"])
         offer_id = request.get("offer_id")
         check_only = request.get("check_only", False)
-        
-        cpa_key = f"cpa_{user_id}_{offer_id}"
-        
+
+        if not user_id or not offer_id:
+            raise HTTPException(status_code=400, detail="user_id and offer_id required")
+
+        await require_redis_rate_limit("cpa_status", user_id, *RATE_LIMITS["cpa_status"])
+
+        if not redis_client:
+            raise HTTPException(status_code=500, detail="Redis is required for CPA")
+
+        cpa_key = f"cpa:{user_id}:{offer_id}"
+        now_ts = time.time()
+
+        data = await redis_client.hgetall(cpa_key)
+
         if check_only:
-            return {"completed": cpa_key in _cpa_store and _cpa_store[cpa_key].get("completed", False)}
-        
-        if cpa_key not in _cpa_store:
-            _cpa_store[cpa_key] = {
-                "start_time": time.time(),
-                "completed": False
-            }
+            return {"completed": bool(data and data.get("completed") == "1")}
+
+        if not data:
+            await redis_client.hset(cpa_key, mapping={
+                "start_time": str(now_ts),
+                "completed": "0"
+            })
+            await redis_client.expire(cpa_key, 86400)
             return {"completed": False}
-        
-        elapsed = time.time() - _cpa_store[cpa_key]["start_time"]
-        
-        if elapsed > 30 and not _cpa_store[cpa_key]["completed"]:
-            _cpa_store[cpa_key]["completed"] = True
-            
-            user = await get_user_cached(user_id)
-            if user:
-                rewards = {
-                    "cpa_1": 50000,
-                    "cpa_2": 100000,
-                    "cpa_3": 25000
-                }
-                reward = rewards.get(offer_id, 50000)
-                
-                user["coins"] += reward
-                await update_user(user_id, {"coins": user["coins"]})
-                await invalidate_user_cache(user_id)
-                
-                
-                
-                logger.info(f"CPA completed: user {user_id}, offer {offer_id}, reward {reward}")
-            
+
+        start_time = float(data.get("start_time", now_ts))
+        completed = data.get("completed") == "1"
+
+        if completed:
             return {"completed": True}
-        
-        return {"completed": False}
-        
+
+        elapsed = now_ts - start_time
+        if elapsed < 30:
+            return {"completed": False}
+
+        await redis_client.hset(cpa_key, "completed", "1")
+
+        user = await get_user_cached(user_id)
+        if user:
+            rewards = {
+                "cpa_1": 50000,
+                "cpa_2": 100000,
+                "cpa_3": 25000
+            }
+            reward = rewards.get(offer_id, 50000)
+
+            new_coins = int(user.get("coins", 0)) + reward
+            await update_user(user_id, {"coins": new_coins})
+            await invalidate_user_cache(user_id)
+
+            logger.info(f"CPA completed: user {user_id}, offer {offer_id}, reward {reward}")
+
+        return {"completed": True}
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"CPA status error: {e}")
         return {"completed": False}
@@ -1111,8 +1202,12 @@ async def cpa_status(request: dict):
 @app.post("/api/game/coinflip")
 async def play_coinflip(request: GameRequest):
     try:
+        lock_key = f"lock:game:coinflip:{request.user_id}"
+        locked = await acquire_once_lock(lock_key, ttl=3)
+        if not locked:
+            raise HTTPException(status_code=429, detail="Game request already in progress")
         await require_redis_rate_limit("game_action", request.user_id, 30, 60)
-
+        
         user = await get_user(request.user_id)
         if not user or user.get("coins", 0) < request.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
@@ -1135,6 +1230,10 @@ async def play_coinflip(request: GameRequest):
 @app.post("/api/game/slots")
 async def play_slots(request: GameRequest):
     try:
+        lock_key = f"lock:game:slots:{request.user_id}"
+        locked = await acquire_once_lock(lock_key, ttl=3)
+        if not locked:
+            raise HTTPException(status_code=429, detail="Game request already in progress")
         await require_redis_rate_limit("game_action", request.user_id, 30, 60)
 
         user = await get_user(request.user_id)
@@ -1164,6 +1263,11 @@ async def play_slots(request: GameRequest):
 @app.post("/api/game/dice")
 async def play_dice(request: GameRequest):
     try:
+        lock_key = f"lock:game:dice:{request.user_id}"
+        locked = await acquire_once_lock(lock_key, ttl=3)
+        if not locked:
+            raise HTTPException(status_code=429, detail="Game request already in progress")
+        
         await require_redis_rate_limit("game_action", request.user_id, 30, 60)
 
         user = await get_user(request.user_id)
@@ -1211,6 +1315,10 @@ async def play_dice(request: GameRequest):
 @app.post("/api/game/roulette")
 async def play_roulette(request: GameRequest):
     try:
+        lock_key = f"lock:game:roulette:{request.user_id}"
+        locked = await acquire_once_lock(lock_key, ttl=3)
+        if not locked:
+            raise HTTPException(status_code=429, detail="Game request already in progress")
         await require_redis_rate_limit("game_action", request.user_id, 30, 60)
 
         user = await get_user(request.user_id)
@@ -1698,50 +1806,53 @@ async def select_skin(request: SkinRequest):
 
 @app.post("/api/unlock-skin")
 async def unlock_skin(request: dict):
-    """Unlock skin for user"""
     try:
         user_id = request.get("user_id")
         skin_id = request.get("skin_id")
-        method = request.get("method", "ads")
-        
+
+        if not user_id or not skin_id:
+            raise HTTPException(status_code=400, detail="user_id and skin_id required")
+
         user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        extra = user.get("extra_data", {})
+
+        extra = user.get("extra_data", {}) or {}
         if not isinstance(extra, dict):
             extra = {}
-        
+
         owned_skins = extra.get("owned_skins", ["default_SP"])
-        
-        if skin_id not in owned_skins:
-            owned_skins.append(skin_id)
-            extra["owned_skins"] = owned_skins
-            
-            # Если это первый скин, делаем его выбранным
-            if len(owned_skins) == 1:
-                extra["selected_skin"] = skin_id
-            
-            await update_user(user_id, {"extra_data": extra})
-            await invalidate_user_cache(user_id)
-            
-            # Обновляем кэш
-           
-            
-            logger.info(f"✅ Skin {skin_id} unlocked for user {user_id}")
-            
+
+        if skin_id in owned_skins:
             return {
-                "success": True,
-                "owned_skins": owned_skins,
-                "selected_skin": extra.get("selected_skin", skin_id)
+                "success": False,
+                "message": "Skin already owned",
+                "owned_skins": owned_skins
             }
-        
+
+        allowed = await can_unlock_skin(user, skin_id)
+        if not allowed:
+            raise HTTPException(status_code=400, detail="Skin unlock requirements not met")
+
+        owned_skins.append(skin_id)
+        extra["owned_skins"] = owned_skins
+
+        if not extra.get("selected_skin"):
+            extra["selected_skin"] = "default_SP"
+
+        await update_user(user_id, {"extra_data": extra})
+        await invalidate_user_cache(user_id)
+
+        logger.info(f"✅ Skin {skin_id} unlocked for user {user_id}")
+
         return {
-            "success": False,
-            "message": "Skin already owned",
-            "owned_skins": owned_skins
+            "success": True,
+            "owned_skins": owned_skins,
+            "selected_skin": extra.get("selected_skin", "default_SP")
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in unlock_skin: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
