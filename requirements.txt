@@ -3,9 +3,11 @@ uvicorn[standard]
 pydantic
 python-dotenv
 asyncpg
+aiosqlite
 sqlalchemy
 httpx
 python-multipart
 aiohttp
 aiogram
-redis[hiredis]>
+redis[hiredis]
+prometheus-client

@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse, Response
 import asyncio
 import uvicorn
 import random
@@ -10,147 +9,155 @@ import json
 import os
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
-from collections import defaultdict
 from sqlalchemy import select
 from DATABASE.base import User, AsyncSessionLocal
 from collections import defaultdict, deque
 from dataclasses import dataclass
 import redis.asyncio as redis
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from DATABASE.base import (
     get_user, add_user as create_user, update_user,
     init_db, get_completed_tasks, add_completed_task
 )
-
-
-
-# ==================== КОНФИГУРАЦИЯ ====================
-
-MAX_REWARD_PER_VIDEO = 5000
-MAX_BET = 1000000
-MIN_BET = 10
-BASE_MAX_ENERGY = 500
-ENERGY_REGEN_SECONDS = 2  # 1 энергия каждые 5 секунд
-TOURNAMENT_KEY = "tournament:leaderboard"
-TOURNAMENT_PRIZE_POOL = 100000
-
-
-
-#=================ключи
-CLICK_BUFFER_KEY = "clicks:buffer"
-CLICK_FLUSH_INTERVAL = 5  # секунд
-USER_CACHE_PREFIX = "user:cache:"
-USER_CACHE_TTL = 60  # секунд
-
-# ==================== АНТИСПАМ / АНТИЧИТ ====================
-
-MAX_REAL_CLICKS_PER_SECOND = 25   # честный быстрый таппер
-CLICK_BURST_ALLOWANCE = 15        # небольшой запас на батч
-MAX_CLICK_BATCH_SIZE = 200        # жёсткий серверный потолок на один батч
-
-RATE_LIMITS = {
-    "reward_video": (5, 60),         # 5 запросов в минуту
-    "activate_mega_boost": (10, 60), # 10 в минуту
-    "update_energy": (10, 60),       # 10 в минуту
-    "complete_task": (20, 60),       # 20 в минуту
-    "cpa_status": (60, 60),          # 60 в минуту
-    "game_action": (30, 60),         # 30 в минуту на мини-игры
-}
-
+from schemas import (
+    BoostActivateRequest,
+    ClicksBatchRequest,
+    EnergySyncRequest,
+    GameRequest,
+    PassiveIncomeRequest,
+    RegisterRequest,
+    RewardVideoClaimRequest,
+    RewardVideoStartRequest,
+    SkinRequest,
+    TaskCompleteRequest,
+    TournamentData,
+    UpgradeRequest,
+    UserIdRequest,
+)
+from core.game_config import (
+    BASE_MAX_ENERGY,
+    CLICK_BURST_ALLOWANCE,
+    CLICK_BUFFER_KEY,
+    CLICK_FLUSH_INTERVAL,
+    ENERGY_REGEN_SECONDS,
+    HOUR_VALUES,
+    MAX_BET,
+    MAX_CLICK_BATCH_SIZE,
+    MAX_REAL_CLICKS_PER_SECOND,
+    MAX_REWARD_PER_VIDEO,
+    MIN_BET,
+    RATE_LIMITS,
+    TOURNAMENT_KEY,
+    TOURNAMENT_PRIZE_POOL,
+    UPGRADE_PRICES,
+    USER_CACHE_PREFIX,
+    USER_CACHE_TTL,
+)
+from core.game_logic import (
+    build_energy_payload,
+    calculate_current_energy,
+    get_allowed_clicks,
+    get_hour_value,
+    get_max_energy,
+    get_tap_value,
+    mask_username,
+    normalize_dt,
+)
+from core.telegram_auth import verify_telegram_init_data
 
 
 REDIS_URL = os.getenv("REDIS_URL")
 redis_client = None
-# ==================== ЦЕНЫ АПГРЕЙДОВ ====================
-
-UPGRADE_PRICES = {
-    "multitap": [
-        50, 75, 100, 150, 200, 300, 450, 650, 900, 1200,
-        1600, 2100, 2700, 3400, 4200, 5100, 6100, 7200, 8400, 9700,
-        11100, 12600, 14200, 15900, 17700, 19600, 21600, 23700, 25900, 28200,
-        30600, 33100, 35700, 38400, 41200, 44100, 47100, 50200, 53400, 56700,
-        60100, 63600, 67200, 70900, 74700, 78600, 82600, 86700, 90900, 95200,
-        100000, 105000, 110000, 115000, 120000, 125000, 130000, 135000, 140000, 145000,
-        150000, 160000, 170000, 180000, 190000, 200000, 210000, 220000, 230000, 240000,
-        250000, 270000, 290000, 310000, 330000, 350000, 370000, 390000, 410000, 430000,
-        450000, 500000, 550000, 600000, 650000, 700000, 750000, 800000, 850000, 900000,
-        950000, 1000000, 1100000, 1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000
-    ],
-    "profit": [
-        40, 60, 90, 130, 180, 240, 310, 390, 480, 580,
-        690, 810, 940, 1080, 1230, 1390, 1560, 1740, 1930, 2130,
-        2340, 2560, 2790, 3030, 3280, 3540, 3810, 4090, 4380, 4680,
-        4990, 5310, 5640, 5980, 6330, 6690, 7060, 7440, 7830, 8230,
-        8640, 9060, 9490, 9930, 10380, 10840, 11310, 11790, 12280, 12780,
-        13300, 13850, 14420, 15010, 15620, 16250, 16900, 17570, 18260, 18970,
-        19700, 20450, 21220, 22010, 22820, 23650, 24500, 25370, 26260, 27170,
-        28100, 29050, 30020, 31010, 32020, 33050, 34100, 35170, 36260, 37370,
-        38500, 39650, 40820, 42010, 43220, 44450, 45700, 46970, 48260, 49570,
-        50900, 52250, 53620, 55010, 56420, 57850, 59300, 60770, 62260, 63770
-    ],
-    "energy": [
-        30, 45, 65, 90, 120, 155, 195, 240, 290, 345,
-        405, 470, 540, 615, 695, 780, 870, 965, 1065, 1170,
-        1280, 1395, 1515, 1640, 1770, 1905, 2045, 2190, 2340, 2495,
-        2655, 2820, 2990, 3165, 3345, 3530, 3720, 3915, 4115, 4320,
-        4530, 4745, 4965, 5190, 5420, 5655, 5895, 6140, 6390, 6645,
-        6905, 7170, 7440, 7715, 7995, 8280, 8570, 8865, 9165, 9470,
-        9780, 10095, 10415, 10740, 11070, 11405, 11745, 12090, 12440, 12795,
-        13155, 13520, 13890, 14265, 14645, 15030, 15420, 15815, 16215, 16620,
-        17030, 17445, 17865, 18290, 18720, 19155, 19595, 20040, 20490, 20945,
-        21405, 21870, 22340, 22815, 23295, 23780, 24270, 24765, 25265, 25770
-    ],
-}
-
-HOUR_VALUES = [
-    10, 15, 22, 32, 45, 62, 83, 108, 138, 173,
-    215, 265, 324, 393, 473, 565, 670, 789, 923, 1073,
-    1240, 1425, 1629, 1853, 2098, 2365, 2655, 2969, 3308, 3673,
-    4065, 4485, 4934, 5413, 5923, 6465, 7040, 7649, 8293, 8973,
-    9690, 10445, 11239, 12073, 12948, 13865, 14825, 15829, 16878, 17973,
-    19115, 20305, 21544, 22833, 24173, 25565, 27010, 28509, 30063, 31673,
-    33340, 35065, 36849, 38693, 40598, 42565, 44595, 46689, 48848, 51073,
-    51073, 51073, 51073, 51073, 51073, 51073, 51073, 51073, 51073, 51073,
-    51073, 51073, 51073, 51073, 51073, 51073, 51073, 51073, 51073, 51073,
-    51073, 51073, 51073, 51073, 51073, 51073, 51073, 51073, 51073, 51073
-]
+LOCAL_LOCKS: dict[str, float] = {}
+LOCAL_IDEMPOTENCY_KEYS: dict[str, float] = {}
+LOCAL_RATE_LIMITS_STATE: dict[str, deque[float]] = defaultdict(deque)
+# Single lightweight reconnect helper to avoid code duplication
+async def try_reconnect_redis() -> None:
+    global redis_client
+    if not REDIS_URL or redis_client is not None:
+        return
+    client = redis.from_url(
+        REDIS_URL,
+        encoding="utf-8",
+        decode_responses=True,
+        socket_timeout=2,
+        socket_connect_timeout=2,
+        retry_on_timeout=True,
+    )
+    try:
+        await client.ping()
+        redis_client = client
+        logger.info("✓ Redis reconnected")
+    except Exception as e:
+        logger.warning(f"Redis reconnect failed: {e}")
+        redis_client = None
 
 
+async def get_redis_or_none() -> redis.Redis | None:
+    """
+    Best-effort Redis with single reconnect attempt. No exceptions.
+    """
+    if redis_client is None:
+        await try_reconnect_redis()
+    return redis_client
 
+
+async def redis_or_503() -> redis.Redis:
+    """
+    Strong guarantee: return redis connection or raise 503.
+    """
+    conn = await get_redis_or_none()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+    return conn
+
+
+# ==================== METRICS ====================
+HTTP_REQUESTS_TOTAL = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "path", "status"],
+)
+HTTP_REQUEST_DURATION = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ["method", "path"],
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10),
+)
+REDIS_ERRORS = Counter("redis_errors_total", "Redis operation errors")
+DB_ERRORS = Counter("db_errors_total", "Database operation errors")
+RATE_LIMIT_REJECTS = Counter(
+    "rate_limit_rejects_total",
+    "Rate-limit rejections",
+    ["namespace"],
+)
 # ==================== LOGGING ====================
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
+async def require_telegram_user(request: Request, expected_user_id: int | None = None) -> dict:
+    telegram_user = verify_telegram_init_data(
+        request.headers.get("X-Telegram-Init-Data", "")
+    )
+
+    if expected_user_id is not None and int(telegram_user.get("id", 0)) != int(expected_user_id):
+        raise HTTPException(status_code=403, detail="Telegram user mismatch")
+
+    return telegram_user
+
+
 
 
 # ==================== ТУРНИРНЫЕ ДАННЫЕ ==================
 
-def mask_username(username):
-    """Оставляет первые 2 и последние 2 символа, остальное звездочки"""
-    if not username:
-        return "Player"
-    
-    username = str(username)
-    if len(username) <= 4:
-        return username  # Короткие ники не шифруем
-    
-    # Берем первые 2 и последние 2 символа
-    first_two = username[:2]
-    last_two = username[-2:]
-    middle_len = len(username) - 4
-    
-    # Добавляем звездочки в середину
-    masked = f"{first_two}{'*' * min(middle_len, 3)}{last_two}"
-    return masked
-
-
 async def get_user_cached(user_id: int) -> dict | None:
-    if redis_client:
-        cached = await redis_client.get(f"{USER_CACHE_PREFIX}{user_id}")
+    conn = await get_redis_or_none()
+    if conn:
+        cached = await conn.get(f"{USER_CACHE_PREFIX}{user_id}")
         if cached:
             try:
                 return json.loads(cached)
@@ -161,8 +168,9 @@ async def get_user_cached(user_id: int) -> dict | None:
     if not user:
         return None
 
-    if redis_client:
-        await redis_client.setex(
+    conn = await get_redis_or_none()
+    if conn:
+        await conn.setex(
             f"{USER_CACHE_PREFIX}{user_id}",
             USER_CACHE_TTL,
             json.dumps(user, default=str)
@@ -174,32 +182,11 @@ async def get_user_cached(user_id: int) -> dict | None:
 
 
 async def invalidate_user_cache(user_id: int):
-    if redis_client:
-        await redis_client.delete(f"{USER_CACHE_PREFIX}{user_id}")
+    conn = await get_redis_or_none()
+    if conn:
+        await conn.delete(f"{USER_CACHE_PREFIX}{user_id}")
 
 
-
-
-def get_allowed_clicks(user: dict, now: datetime, requested_clicks: int) -> int:
-    """
-    Ограничиваем число кликов в батче по времени с прошлого серверного апдейта.
-    Не тормозит UX, но режет нереалистичный спам.
-    """
-    last_update = _normalize_dt(user.get("last_energy_update"))
-
-    # На первом батче даём разумный стартовый лимит
-    if not last_update:
-        return min(requested_clicks, 60, MAX_CLICK_BATCH_SIZE)
-
-    elapsed = max(0.0, (now - last_update).total_seconds())
-
-    # Сколько честно могло накопиться кликов за это время
-    allowed_by_time = int(elapsed * MAX_REAL_CLICKS_PER_SECOND) + CLICK_BURST_ALLOWANCE
-
-    # Минимальный запас, чтобы честный игрок не упирался в ноль
-    allowed = max(1, min(allowed_by_time, MAX_CLICK_BATCH_SIZE))
-
-    return min(requested_clicks, allowed)
 
 
 async def reset_tournament_loop():
@@ -213,8 +200,9 @@ async def reset_tournament_loop():
         await asyncio.sleep(sleep_seconds)
 
         try:
-            if redis_client:
-                await redis_client.delete(TOURNAMENT_KEY)
+            redis_conn = await get_redis_or_none()
+            if redis_conn:
+                await redis_conn.delete(TOURNAMENT_KEY)
                 logger.info("🏆 Tournament leaderboard reset")
         except Exception as e:
             logger.error(f"Error resetting tournament leaderboard: {e}")
@@ -279,154 +267,134 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    path = request.url.path
+    method = request.method
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        duration = time.perf_counter() - start
+        HTTP_REQUESTS_TOTAL.labels(method=method, path=path, status=str(status_code)).inc()
+        HTTP_REQUEST_DURATION.labels(method=method, path=path).observe(duration)
+
+
+@app.get("/metrics")
+async def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
 # ==================== МОДЕЛИ ====================
-
-class UpgradeRequest(BaseModel):
-    user_id: int
-    boost_type: str
-
-class UserIdRequest(BaseModel):
-    user_id: int
-
-class RegisterRequest(BaseModel):
-    user_id: int
-    username: Optional[str] = None
-    referrer_id: Optional[int] = None
-
-class SkinRequest(BaseModel):
-    user_id: int
-    skin_id: str
-
-class GameRequest(BaseModel):
-    user_id: int
-    bet: int = Field(..., ge=10, le=1000000)
-    prediction: Optional[str] = None
-    bet_type: Optional[str] = None
-    bet_value: Optional[int] = None
-
-class TaskCompleteRequest(BaseModel):
-    user_id: int
-    task_id: str
-
-class PassiveIncomeRequest(BaseModel):
-    user_id: int
-
-
-class BoostActivateRequest(BaseModel):
-    user_id: int
-
-class EnergySyncRequest(BaseModel):
-    user_id: int
-
-class ClicksBatchRequest(BaseModel):
-    user_id: int
-    clicks: int = Field(..., ge=1, le=500)
-    batch_id: str
-
-class RewardVideoStartRequest(BaseModel):
-    user_id: int
-
-class RewardVideoClaimRequest(BaseModel):
-    user_id: int
-    ad_session_id: str
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 async def acquire_once_lock(key: str, ttl: int = 10) -> bool:
-    if not redis_client:
-        return True
-    result = await redis_client.set(key, "1", ex=ttl, nx=True)
-    return bool(result)
+    conn = await get_redis_or_none()
+    if conn:
+        try:
+            result = await conn.set(key, "1", ex=ttl, nx=True)
+            return bool(result)
+        except Exception as e:
+            logger.warning(f"Redis acquire_once_lock failed, fallback to local: {e}")
+
+    now = time.monotonic()
+    expires_at = LOCAL_LOCKS.get(key)
+    if expires_at and expires_at > now:
+        return False
+
+    LOCAL_LOCKS[key] = now + ttl
+    return True
 
 async def acquire_idempotency_key(key: str, ttl: int = 60) -> bool:
-    if not redis_client:
-        return True
-    result = await redis_client.set(key, "1", ex=ttl, nx=True)
-    return bool(result)
+    conn = await get_redis_or_none()
+    if conn:
+        try:
+            result = await conn.set(key, "1", ex=ttl, nx=True)
+            return bool(result)
+        except Exception as e:
+            logger.warning(f"Redis acquire_idempotency_key failed, fallback to local: {e}")
 
-def get_tap_value(level: int) -> int:
-    return 1 + level
+    now = time.monotonic()
+    expires_at = LOCAL_IDEMPOTENCY_KEYS.get(key)
+    if expires_at and expires_at > now:
+        return False
 
-def get_hour_value(level: int) -> int:
-    return HOUR_VALUES[min(level, len(HOUR_VALUES)-1)]
+    LOCAL_IDEMPOTENCY_KEYS[key] = now + ttl
+    return True
 
-def get_max_energy(level: int) -> int:
-    return min(1000, BASE_MAX_ENERGY + level * 5)
+
+async def require_user_action_lock(namespace: str, user_id: int, ttl: int = 5):
+    lock_key = f"lock:{namespace}:{user_id}"
+    locked = await acquire_once_lock(lock_key, ttl=ttl)
+    if not locked:
+        raise HTTPException(status_code=429, detail="Action already in progress")
+
+
+async def ensure_redis_available() -> redis.Redis:
+    """
+    Try reconnect once and guarantee redis_client or raise 503.
+    """
+    return await redis_or_503()
 
 # ==================== ЭНДПОИНТЫ ====================
+
+def _local_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
+    now = time.monotonic()
+    bucket = LOCAL_RATE_LIMITS_STATE[key]
+
+    while bucket and (now - bucket[0]) >= window_seconds:
+        bucket.popleft()
+
+    if len(bucket) >= limit:
+        return False
+
+    bucket.append(now)
+    return True
+
 
 async def redis_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
     """
     True = можно пропустить
     False = лимит превышен
     """
-    if redis_client is None:
-        return True  # fallback, чтобы игра не падала
+    global redis_client
 
-    current = await redis_client.incr(key)
-    if current == 1:
-        await redis_client.expire(key, window_seconds)
+    conn = await get_redis_or_none()
 
-    return current <= limit
+    if conn is None:
+        return _local_rate_limit(key, limit, window_seconds)
+
+    try:
+        current = await conn.incr(key)
+        if current == 1:
+            await conn.expire(key, window_seconds)
+        return current <= limit
+    except Exception as e:
+        logger.warning(f"Redis rate_limit failed, fallback to local: {e}")
+        REDIS_ERRORS.inc()
+        redis_client = None
+        return _local_rate_limit(key, limit, window_seconds)
 
 
 async def require_redis_rate_limit(namespace: str, user_id: int, limit: int, window_seconds: int):
     allowed = await redis_rate_limit(f"rl:{namespace}:{user_id}", limit, window_seconds)
     if not allowed:
+        RATE_LIMIT_REJECTS.labels(namespace=namespace).inc()
         raise HTTPException(status_code=429, detail="Too many requests")
 
-
-def _normalize_dt(value):
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    try:
-        return datetime.fromisoformat(value)
-    except Exception:
-        return None
-
-
-def calculate_current_energy(user: dict, now: datetime | None = None) -> int:
-    """Считает актуальную энергию на сервере по stored energy + времени."""
-    now = now or datetime.utcnow()
-
-    stored_energy = int(user.get("energy", 0))
-    max_energy = int(user.get("max_energy", 500))
-    last_update = _normalize_dt(user.get("last_energy_update"))
-
-    if stored_energy >= max_energy:
-        return max_energy
-
-    if not last_update:
-        return min(stored_energy, max_energy)
-
-    seconds_passed = max(0, int((now - last_update).total_seconds()))
-    gained = seconds_passed // ENERGY_REGEN_SECONDS
-
-    return min(max_energy, stored_energy + gained)
-
-
-def build_energy_payload(user: dict, now: datetime | None = None) -> dict:
-    """Готовит серверный снимок энергии для фронта."""
-    now = now or datetime.utcnow()
-    max_energy = int(user.get("max_energy", 500))
-    current_energy = calculate_current_energy(user, now)
-
-    return {
-        "energy": current_energy,
-        "max_energy": max_energy,
-        "regen_seconds": ENERGY_REGEN_SECONDS,
-        "server_time": now.isoformat()
-    }
 
 async def flush_click_buffer_loop():
     while True:
         try:
-            if not redis_client:
+            conn = await get_redis_or_none()
+            if not conn:
                 await asyncio.sleep(5)
                 continue
 
-            data = await redis_client.hgetall(CLICK_BUFFER_KEY)
+            data = await conn.hgetall(CLICK_BUFFER_KEY)
 
             if not data:
                 await asyncio.sleep(5)
@@ -451,9 +419,9 @@ async def flush_click_buffer_loop():
 
                 await invalidate_user_cache(user_id)
 
-            await redis_client.delete(CLICK_BUFFER_KEY)
+            await conn.delete(CLICK_BUFFER_KEY)
 
-            logger.info(f"💾 Flushed {len(data)} users from Redis buffer")
+            logger.info(f"Flushed {len(data)} users from Redis buffer")
 
         except Exception as e:
             logger.error(f"Flush error: {e}")
@@ -463,11 +431,45 @@ async def flush_click_buffer_loop():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    details: dict[str, Any] = {}
+    overall = "ok"
+
+    # Redis check
+    redis_status = "skipped"
+    if REDIS_URL:
+        try:
+            conn = await get_redis_or_none()
+            if conn:
+                await asyncio.wait_for(conn.ping(), timeout=0.5)
+                redis_status = "ok"
+            else:
+                redis_status = "unavailable"
+        except Exception as e:
+            redis_status = f"error: {e}"
+            logger.warning(f"Health redis check failed: {e}")
+            REDIS_ERRORS.inc()
+    details["redis"] = redis_status
+
+    # DB check
+    db_status = "ok"
+    try:
+        async with AsyncSessionLocal() as session:
+            await asyncio.wait_for(session.execute(select(1)), timeout=0.5)
+    except Exception as e:
+        db_status = f"error: {e}"
+        logger.warning(f"Health db check failed: {e}")
+        DB_ERRORS.inc()
+    details["db"] = db_status
+
+    if any(s != "ok" and not str(s).startswith("skipped") for s in details.values()):
+        overall = "degraded"
+
+    return {"status": overall, "details": details}
 
 @app.get("/api/user/{user_id}")
-async def get_user_data(user_id: int):
+async def get_user_data(user_id: int, request: Request):
     try:
+        await require_telegram_user(request, user_id)
         user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -503,9 +505,10 @@ async def get_user_data(user_id: int):
 
 
 @app.get("/api/mega-boost-status/{user_id}")
-async def get_mega_boost_status(user_id: int):
+async def get_mega_boost_status(user_id: int, request: Request):
     """Get mega boost status"""
     try:
+        await require_telegram_user(request, user_id)
         user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -544,11 +547,12 @@ async def get_mega_boost_status(user_id: int):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/activate-mega-boost")
-async def activate_mega_boost(request: BoostActivateRequest):
+async def activate_mega_boost(payload: BoostActivateRequest, request: Request):
     """Activate mega boost (x2 coins + infinite energy for 5 minutes)"""
     try:
-        user = await get_user_cached(request.user_id)
-        await require_redis_rate_limit("activate_mega_boost", request.user_id, 10, 60)
+        await require_telegram_user(request, payload.user_id)
+        user = await get_user_cached(payload.user_id)
+        await require_redis_rate_limit("activate_mega_boost", payload.user_id, 10, 60)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -582,8 +586,8 @@ async def activate_mega_boost(request: BoostActivateRequest):
         expires_at = (now + timedelta(minutes=5)).isoformat()
         active_boosts["mega_boost"] = {"active": True, "expires_at": expires_at}
         extra["active_boosts"] = active_boosts
-        await update_user(request.user_id, {"extra_data": extra})
-        await invalidate_user_cache(request.user_id)
+        await update_user(payload.user_id, {"extra_data": extra})
+        await invalidate_user_cache(payload.user_id)
         
         return {
             "success": True,
@@ -595,32 +599,32 @@ async def activate_mega_boost(request: BoostActivateRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/reward-video")
-async def reward_video(request: RewardVideoClaimRequest):
+async def reward_video(payload: RewardVideoClaimRequest, request: Request):
     try:
-        await require_redis_rate_limit("reward_video", request.user_id, 5, 60)
+        await require_telegram_user(request, payload.user_id)
+        await require_redis_rate_limit("reward_video", payload.user_id, 5, 60)
 
-        if not redis_client:
-            raise HTTPException(status_code=500, detail="Redis required")
+        redis_conn = await ensure_redis_available()
 
-        lock_key = f"lock:reward_video:{request.user_id}"
+        lock_key = f"lock:reward_video:{payload.user_id}"
         locked = await acquire_once_lock(lock_key, ttl=15)
         if not locked:
             raise HTTPException(status_code=429, detail="Reward already being processed")
 
-        session_key = f"adsession:reward:{request.ad_session_id}"
-        raw = await redis_client.get(session_key)
+        session_key = f"adsession:reward:{payload.ad_session_id}"
+        raw = await redis_conn.get(session_key)
         if not raw:
             raise HTTPException(status_code=400, detail="Invalid or expired ad session")
 
         session = json.loads(raw)
 
-        if int(session.get("user_id")) != request.user_id:
+        if int(session.get("user_id")) != payload.user_id:
             raise HTTPException(status_code=400, detail="Ad session does not belong to user")
 
         if session.get("claimed") is True:
             raise HTTPException(status_code=409, detail="Reward already claimed")
 
-        user = await get_user_cached(request.user_id)
+        user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -633,14 +637,14 @@ async def reward_video(request: RewardVideoClaimRequest):
 
         extra["ads_watched"] = int(extra.get("ads_watched", 0)) + 1
 
-        await update_user(request.user_id, {
+        await update_user(payload.user_id, {
             "coins": new_coins,
             "extra_data": extra
         })
-        await invalidate_user_cache(request.user_id)
+        await invalidate_user_cache(payload.user_id)
 
         session["claimed"] = True
-        await redis_client.setex(session_key, 120, json.dumps(session))
+        await redis_conn.setex(session_key, 120, json.dumps(session))
 
         return {
             "success": True,
@@ -655,25 +659,25 @@ async def reward_video(request: RewardVideoClaimRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/reward-video/start")
-async def reward_video_start(request: RewardVideoStartRequest):
+async def reward_video_start(payload: RewardVideoStartRequest, request: Request):
     try:
-        await require_redis_rate_limit("reward_video_start", request.user_id, 10, 60)
+        await require_telegram_user(request, payload.user_id)
+        await require_redis_rate_limit("reward_video_start", payload.user_id, 10, 60)
 
-        if not redis_client:
-            raise HTTPException(status_code=500, detail="Redis required")
+        redis_conn = await ensure_redis_available()
 
-        user = await get_user_cached(request.user_id)
+        user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        ad_session_id = f"{request.user_id}:{int(time.time())}:{random.randint(100000, 999999)}"
+        ad_session_id = f"{payload.user_id}:{int(time.time())}:{random.randint(100000, 999999)}"
         key = f"adsession:reward:{ad_session_id}"
 
-        await redis_client.setex(
+        await redis_conn.setex(
             key,
             120,
             json.dumps({
-                "user_id": request.user_id,
+                "user_id": payload.user_id,
                 "claimed": False,
                 "created_at": time.time()
             })
@@ -692,11 +696,13 @@ async def reward_video_start(request: RewardVideoStartRequest):
 
 
 @app.post("/api/ad-watched")
-async def ad_watched(request: dict):
+async def ad_watched(payload: dict, request: Request):
     """Track ad watch statistics"""
     try:
-        user_id = request.get("user_id")
-        reward_type = request.get("reward_type")
+        user_id = payload.get("user_id")
+        reward_type = payload.get("reward_type")
+        await require_telegram_user(request, user_id)
+        await require_user_action_lock("ad_watched", user_id, ttl=3)
         
         user = await get_user_cached(user_id)
         if not user:
@@ -715,7 +721,7 @@ async def ad_watched(request: dict):
             "type": reward_type,
             "timestamp": datetime.utcnow().isoformat()
         })
-        extra["ads_history"] = ads_history
+        extra["ads_history"] = ads_history[-50:]
         
         await update_user(user_id, {"extra_data": extra})
         await invalidate_user_cache(user_id)
@@ -727,15 +733,16 @@ async def ad_watched(request: dict):
         return {"success": False}
 
 @app.post("/api/ads/increment")
-async def increment_ads_watched(request: UserIdRequest):
+async def increment_ads_watched(payload: UserIdRequest, request: Request):
     try:
-        user = await get_user_cached(request.user_id)
+        await require_telegram_user(request, payload.user_id)
+        user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        await require_redis_rate_limit("ads_increment", request.user_id, 20, 60)
+        await require_redis_rate_limit("ads_increment", payload.user_id, 20, 60)
 
-        lock_key = f"lock:ads_increment:{request.user_id}"
+        lock_key = f"lock:ads_increment:{payload.user_id}"
         locked = await acquire_once_lock(lock_key, ttl=5)
         if not locked:
             raise HTTPException(status_code=429, detail="Ad already being processed")
@@ -750,8 +757,8 @@ async def increment_ads_watched(request: UserIdRequest):
         ads_watched = int(extra.get("ads_watched", 0)) + 1
         extra["ads_watched"] = ads_watched
 
-        await update_user(request.user_id, {"extra_data": extra})
-        await invalidate_user_cache(request.user_id)
+        await update_user(payload.user_id, {"extra_data": extra})
+        await invalidate_user_cache(payload.user_id)
 
         return {
             "success": True,
@@ -766,13 +773,15 @@ async def increment_ads_watched(request: UserIdRequest):
 
 
 @app.post("/api/upgrade")
-async def process_upgrade(request: UpgradeRequest):
+async def process_upgrade(payload: UpgradeRequest, request: Request):
     try:
-        user = await get_user_cached(request.user_id)
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("upgrade", payload.user_id, ttl=3)
+        user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        boost_type = request.boost_type
+        boost_type = payload.boost_type
         if boost_type not in UPGRADE_PRICES:
             raise HTTPException(status_code=400, detail="Invalid boost type")
         current_level = user.get(f"{boost_type}_level", 0)
@@ -793,8 +802,8 @@ async def process_upgrade(request: UpgradeRequest):
             updates["max_energy"] = new_max
             updates["energy"] = new_max
 
-        await update_user(request.user_id, updates)
-        await invalidate_user_cache(request.user_id)
+        await update_user(payload.user_id, updates)
+        await invalidate_user_cache(payload.user_id)
         
         # Обновляем кэш
         
@@ -818,10 +827,12 @@ async def process_upgrade(request: UpgradeRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/update-energy")
-async def update_energy(request: dict):
+async def update_energy(payload: dict, request: Request):
     try:
-        user_id = request.get("user_id")
+        user_id = payload.get("user_id")
+        await require_telegram_user(request, user_id)
         await require_redis_rate_limit("update_energy", user_id, 10, 60)
+        await require_user_action_lock("update_energy", user_id, ttl=3)
         if not user_id:
             raise HTTPException(status_code=400, detail="user_id required")
         user = await get_user_cached(user_id)
@@ -852,10 +863,12 @@ async def update_energy(request: dict):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/recover-energy")
-async def recover_energy_legacy(request: UserIdRequest):
+async def recover_energy_legacy(payload: UserIdRequest, request: Request):
     """Старый эндпоинт для обратной совместимости"""
     try:
-        user = await get_user_cached(request.user_id)
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("recover_energy", payload.user_id, ttl=3)
+        user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -867,11 +880,11 @@ async def recover_energy_legacy(request: UserIdRequest):
         if current_energy < max_energy:
             new_energy = min(max_energy, current_energy + 3)
             
-            await update_user(request.user_id, {
+            await update_user(payload.user_id, {
                 "energy": new_energy,
                 "last_energy_update": datetime.utcnow()
             })
-            await invalidate_user_cache(request.user_id)
+            await invalidate_user_cache(payload.user_id)
             
             
             
@@ -884,10 +897,11 @@ async def recover_energy_legacy(request: UserIdRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/sync-energy")
-async def sync_energy(request: EnergySyncRequest):
+async def sync_energy(payload: EnergySyncRequest, request: Request):
     """Серверный sync энергии без сброса таймера регена."""
     try:
-        user = await get_user_cached(request.user_id)
+        await require_telegram_user(request, payload.user_id)
+        user = await get_user_cached(payload.user_id)
         
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -896,7 +910,7 @@ async def sync_energy(request: EnergySyncRequest):
 
         old_energy = int(user.get("energy", 0))
         max_energy = int(user.get("max_energy", BASE_MAX_ENERGY))
-        last_update = _normalize_dt(user.get("last_energy_update"))
+        last_update = normalize_dt(user.get("last_energy_update"))
 
         current_energy = calculate_current_energy(user, now)
 
@@ -923,8 +937,8 @@ async def sync_energy(request: EnergySyncRequest):
             update_data["energy"] = max_energy
 
         if update_data:
-            await update_user(request.user_id, update_data)
-            await invalidate_user_cache(request.user_id)
+            await update_user(payload.user_id, update_data)
+            await invalidate_user_cache(payload.user_id)
 
             
 
@@ -1058,26 +1072,28 @@ async def can_unlock_skin(user: dict, skin_id: str) -> bool:
         return referral_count >= int(req["count"])
 
     if req["type"] == "cpa":
-        if not redis_client:
+        conn = await get_redis_or_none()
+        if not conn:
             return False
         cpa_key = f"cpa:{user['user_id']}:{req['offer_id']}"
-        data = await redis_client.hgetall(cpa_key)
+        data = await conn.hgetall(cpa_key)
         return bool(data and data.get("completed") == "1")
 
     return False
 
 @app.post("/api/clicks")
-async def process_clicks_batch(request: ClicksBatchRequest):
+async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
     try:
-        user = await get_user_cached(request.user_id)
+        await require_telegram_user(request, payload.user_id)
+        user = await get_user_cached(payload.user_id)
         
-        if request.clicks > MAX_CLICK_BATCH_SIZE:
+        if payload.clicks > MAX_CLICK_BATCH_SIZE:
             raise HTTPException(status_code=400, detail="Too many clicks in batch")
 
-        batch_key = f"idem:clicks:{request.user_id}:{request.batch_id}"
+        batch_key = f"idem:clicks:{payload.user_id}:{payload.batch_id}"
         is_new_batch = await acquire_idempotency_key(batch_key, ttl=120)
         if not is_new_batch:
-            logger.warning(f"Duplicate click batch rejected: user={request.user_id}, batch_id={request.batch_id}")
+            logger.warning(f"Duplicate click batch rejected: user={payload.user_id}, batch_id={payload.batch_id}")
             raise HTTPException(status_code=409, detail="Duplicate batch")
 
 
@@ -1109,7 +1125,7 @@ async def process_clicks_batch(request: ClicksBatchRequest):
             coin_per_tap *= 2
 
         # защита
-        safe_requested_clicks = min(request.clicks, MAX_CLICK_BATCH_SIZE)
+        safe_requested_clicks = min(payload.clicks, MAX_CLICK_BATCH_SIZE)
         allowed_clicks = get_allowed_clicks(user, now, safe_requested_clicks)
 
         effective_clicks = min(allowed_clicks, current_energy)
@@ -1119,35 +1135,24 @@ async def process_clicks_batch(request: ClicksBatchRequest):
         new_energy = max(0, current_energy - effective_clicks)
         new_coins = int(user.get("coins", 0)) + gained
 
-        # ✅ ВСЕГДА сохраняем энергию сразу
-        await update_user(request.user_id, {
+        # Сохраняем энергию и баланс одним server-side update на батч кликов.
+        await update_user(payload.user_id, {
+            "coins": new_coins,
             "energy": new_energy,
             "last_energy_update": now
         })
 
-        # ✅ монеты — через Redis buffer
-        if redis_client:
-            if gained > 0:
-                await redis_client.hincrby(
-                    CLICK_BUFFER_KEY,
-                    str(request.user_id),
-                    gained
-                )
-
-                # турнир (ОДИН раз)
-                await redis_client.zincrby(
-                    TOURNAMENT_KEY,
-                    gained,
-                    str(request.user_id)
-                )
-        else:
-            # fallback
-            await update_user(request.user_id, {
-                "coins": new_coins
-            })
+        conn = await get_redis_or_none()
+        if conn and gained > 0:
+            # Турнир оставляем в Redis как быстрый leaderboard слой.
+            await conn.zincrby(
+                TOURNAMENT_KEY,
+                gained,
+                str(payload.user_id)
+            )
 
         # ✅ инвалидируем кэш
-        await invalidate_user_cache(request.user_id)
+        await invalidate_user_cache(payload.user_id)
 
         return {
             "success": True,
@@ -1171,8 +1176,9 @@ async def process_clicks_batch(request: ClicksBatchRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/upgrade-prices/{user_id}")
-async def get_upgrade_prices(user_id: int):
+async def get_upgrade_prices(user_id: int, request: Request):
     try:
+        await require_telegram_user(request, user_id)
         user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -1188,38 +1194,25 @@ async def get_upgrade_prices(user_id: int):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/register")
-async def register_user(request: RegisterRequest):
+async def register_user(payload: RegisterRequest, request: Request):
     try:
-        existing = await get_user(request.user_id)
+        telegram_user = await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("register", payload.user_id, ttl=5)
+        existing = await get_user(payload.user_id)
         if existing:
+            username = telegram_user.get("username") or payload.username
+            if username and username != existing.get("username"):
+                await update_user(payload.user_id, {"username": username})
+                await invalidate_user_cache(payload.user_id)
             return {"status": "exists", "user": existing}
 
         await create_user(
-            user_id=request.user_id,
-            username=request.username,
-            referrer_id=request.referrer_id
+            user_id=payload.user_id,
+            username=telegram_user.get("username") or payload.username,
+            referrer_id=payload.referrer_id
         )
 
-        if request.referrer_id and request.referrer_id != request.user_id:
-            referrer = await get_user(request.referrer_id)
-            if referrer:
-                new_coins = referrer.get("coins", 0) + 5000
-                new_count = referrer.get("referral_count", 0) + 1
-                new_earnings = referrer.get("referral_earnings", 0) + 5000
-                
-                await update_user(request.referrer_id, {
-                    "coins": new_coins,
-                    "referral_count": new_count,
-                    "referral_earnings": new_earnings
-                })
-                await invalidate_user_cache(request.referrer_id)
-                
-                # Обновляем кэш
-                
-                
-                logger.info(f"✅ Referral bonus: {request.referrer_id} got +5000 for {request.user_id}")
-
-        created_user = await get_user_cached(request.user_id)
+        created_user = await get_user_cached(payload.user_id)
         return {"status": "created", "user": created_user}
     except Exception as e:
         logger.error(f"Error in register_user: {e}")
@@ -1231,9 +1224,10 @@ async def register_user(request: RegisterRequest):
 # ==================== REFERRALS ====================
 
 @app.get("/api/referral-data/{user_id}")
-async def get_referral_data(user_id: int):
+async def get_referral_data(user_id: int, request: Request):
     """Get referral statistics"""
     try:
+        await require_telegram_user(request, user_id)
         user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -1254,35 +1248,35 @@ async def get_referral_data(user_id: int):
 
 
 @app.post("/api/cpa-status")
-async def cpa_status(request: dict):
+async def cpa_status(payload: dict, request: Request):
     """Проверка статуса CPA-задания"""
     try:
-        user_id = request.get("user_id")
-        offer_id = request.get("offer_id")
-        check_only = request.get("check_only", False)
+        user_id = payload.get("user_id")
+        offer_id = payload.get("offer_id")
+        check_only = payload.get("check_only", False)
 
         if not user_id or not offer_id:
             raise HTTPException(status_code=400, detail="user_id and offer_id required")
 
+        await require_telegram_user(request, user_id)
         await require_redis_rate_limit("cpa_status", user_id, *RATE_LIMITS["cpa_status"])
 
-        if not redis_client:
-            raise HTTPException(status_code=500, detail="Redis is required for CPA")
+        redis_conn = await ensure_redis_available()
 
         cpa_key = f"cpa:{user_id}:{offer_id}"
         now_ts = time.time()
 
-        data = await redis_client.hgetall(cpa_key)
+        data = await redis_conn.hgetall(cpa_key)
 
         if check_only:
             return {"completed": bool(data and data.get("completed") == "1")}
 
         if not data:
-            await redis_client.hset(cpa_key, mapping={
+            await redis_conn.hset(cpa_key, mapping={
                 "start_time": str(now_ts),
                 "completed": "0"
             })
-            await redis_client.expire(cpa_key, 86400)
+            await redis_conn.expire(cpa_key, 86400)
             return {"completed": False}
 
         start_time = float(data.get("start_time", now_ts))
@@ -1295,7 +1289,7 @@ async def cpa_status(request: dict):
         if elapsed < 30:
             return {"completed": False}
 
-        await redis_client.hset(cpa_key, "completed", "1")
+        await redis_conn.hset(cpa_key, "completed", "1")
 
         user = await get_user_cached(user_id)
         if user:
@@ -1320,61 +1314,33 @@ async def cpa_status(request: dict):
         logger.error(f"CPA status error: {e}")
         return {"completed": False}
 
-@app.post("/api/ads/increment")
-async def increment_ads_watched(request: UserIdRequest):
-    try:
-        user = await get_user_cached(request.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        extra = user.get("extra_data", {}) or {}
-        if isinstance(extra, str):
-            try:
-                extra = json.loads(extra)
-            except:
-                extra = {}
-        ads_watched = int(extra.get("ads_watched", 0)) + 1
-        extra["ads_watched"] = ads_watched
-
-        await update_user(request.user_id, {"extra_data": extra})
-        await invalidate_user_cache(request.user_id)
-
-        return {
-            "success": True,
-            "ads_watched": ads_watched
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in increment_ads_watched: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+@app.post("/api/ads/increment-legacy")
+async def increment_ads_watched_legacy(payload: UserIdRequest, request: Request):
+    return await increment_ads_watched(payload, request)
 
 # ==================== МИНИ-ИГРЫ ====================
 
 @app.post("/api/game/coinflip")
-async def play_coinflip(request: GameRequest):
+async def play_coinflip(payload: GameRequest, request: Request):
     try:
-        lock_key = f"lock:game:coinflip:{request.user_id}"
-        locked = await acquire_once_lock(lock_key, ttl=3)
-        if not locked:
-            raise HTTPException(status_code=429, detail="Game request already in progress")
-        await require_redis_rate_limit("game_action", request.user_id, 30, 60)
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("game:coinflip", payload.user_id, ttl=3)
+        await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
         
-        user = await get_user_cached(request.user_id)
-        if not user or user.get("coins", 0) < request.bet:
+        user = await get_user_cached(payload.user_id)
+        if not user or user.get("coins", 0) < payload.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
 
         win = random.choice([True, False])
         if win:
-            user["coins"] += request.bet
-            message = f"🎉 You won +{request.bet} coins!"
+            user["coins"] += payload.bet
+            message = f"🎉 You won +{payload.bet} coins!"
         else:
-            user["coins"] -= request.bet
-            message = f"😞 You lost {request.bet} coins"
+            user["coins"] -= payload.bet
+            message = f"😞 You lost {payload.bet} coins"
 
-        await update_user(request.user_id, {"coins": user["coins"]})
-        await invalidate_user_cache(request.user_id)
+        await update_user(payload.user_id, {"coins": user["coins"]})
+        await invalidate_user_cache(payload.user_id)
 
         return {"success": True, "coins": user["coins"], "message": message}
     except HTTPException:
@@ -1384,16 +1350,14 @@ async def play_coinflip(request: GameRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/game/slots")
-async def play_slots(request: GameRequest):
+async def play_slots(payload: GameRequest, request: Request):
     try:
-        lock_key = f"lock:game:slots:{request.user_id}"
-        locked = await acquire_once_lock(lock_key, ttl=3)
-        if not locked:
-            raise HTTPException(status_code=429, detail="Game request already in progress")
-        await require_redis_rate_limit("game_action", request.user_id, 30, 60)
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("game:slots", payload.user_id, ttl=3)
+        await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
 
-        user = await get_user_cached(request.user_id)
-        if not user or user.get("coins", 0) < request.bet:
+        user = await get_user_cached(payload.user_id)
+        if not user or user.get("coins", 0) < payload.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
 
         symbols = ["🍒", "🍋", "🍊", "7️⃣", "💎"]
@@ -1402,15 +1366,15 @@ async def play_slots(request: GameRequest):
         multiplier = 10 if "7️⃣" in slots and win else 5 if "💎" in slots and win else 3
 
         if win:
-            win_amount = request.bet * multiplier
+            win_amount = payload.bet * multiplier
             user["coins"] += win_amount
             message = f"🎰 JACKPOT! +{win_amount} coins!"
         else:
-            user["coins"] -= request.bet
-            message = f"😞 You lost {request.bet} coins"
+            user["coins"] -= payload.bet
+            message = f"😞 You lost {payload.bet} coins"
 
-        await update_user(request.user_id, {"coins": user["coins"]})
-        await invalidate_user_cache(request.user_id)
+        await update_user(payload.user_id, {"coins": user["coins"]})
+        await invalidate_user_cache(payload.user_id)
 
         return {"success": True, "coins": user["coins"], "slots": slots, "message": message}
     except HTTPException:
@@ -1420,17 +1384,14 @@ async def play_slots(request: GameRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/game/dice")
-async def play_dice(request: GameRequest):
+async def play_dice(payload: GameRequest, request: Request):
     try:
-        lock_key = f"lock:game:dice:{request.user_id}"
-        locked = await acquire_once_lock(lock_key, ttl=3)
-        if not locked:
-            raise HTTPException(status_code=429, detail="Game request already in progress")
-        
-        await require_redis_rate_limit("game_action", request.user_id, 30, 60)
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("game:dice", payload.user_id, ttl=3)
+        await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
 
-        user = await get_user_cached(request.user_id)
-        if not user or user.get("coins", 0) < request.bet:
+        user = await get_user_cached(payload.user_id)
+        if not user or user.get("coins", 0) < payload.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
 
         dice1 = random.randint(1, 6)
@@ -1439,26 +1400,26 @@ async def play_dice(request: GameRequest):
         win = False
         multiplier = 1
 
-        if request.prediction == "7" and total == 7:
+        if payload.prediction == "7" and total == 7:
             win = True
             multiplier = 5
-        elif request.prediction == "even" and total % 2 == 0:
+        elif payload.prediction == "even" and total % 2 == 0:
             win = True
             multiplier = 2
-        elif request.prediction == "odd" and total % 2 == 1:
+        elif payload.prediction == "odd" and total % 2 == 1:
             win = True
             multiplier = 2
 
         if win:
-            win_amount = request.bet * multiplier
+            win_amount = payload.bet * multiplier
             user["coins"] += win_amount
             message = f"🎲 You won +{win_amount} coins!"
         else:
-            user["coins"] -= request.bet
-            message = f"😞 You lost {request.bet} coins"
+            user["coins"] -= payload.bet
+            message = f"😞 You lost {payload.bet} coins"
 
-        await update_user(request.user_id, {"coins": user["coins"]})
-        await invalidate_user_cache(request.user_id)
+        await update_user(payload.user_id, {"coins": user["coins"]})
+        await invalidate_user_cache(payload.user_id)
 
         return {
             "success": True,
@@ -1475,16 +1436,14 @@ async def play_dice(request: GameRequest):
 
 
 @app.post("/api/game/roulette")
-async def play_roulette(request: GameRequest):
+async def play_roulette(payload: GameRequest, request: Request):
     try:
-        lock_key = f"lock:game:roulette:{request.user_id}"
-        locked = await acquire_once_lock(lock_key, ttl=3)
-        if not locked:
-            raise HTTPException(status_code=429, detail="Game request already in progress")
-        await require_redis_rate_limit("game_action", request.user_id, 30, 60)
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("game:roulette", payload.user_id, ttl=3)
+        await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
 
-        user = await get_user_cached(request.user_id)
-        if not user or user.get("coins", 0) < request.bet:
+        user = await get_user_cached(payload.user_id)
+        if not user or user.get("coins", 0) < payload.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
 
         red_numbers = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]
@@ -1503,26 +1462,26 @@ async def play_roulette(request: GameRequest):
         win = False
         multiplier = 0
 
-        if request.bet_type == 'number' and request.bet_value == result:
+        if payload.bet_type == 'number' and payload.bet_value == result:
             win = True
             multiplier = 35
-        elif request.bet_type == 'green' and result_color == 'green':
+        elif payload.bet_type == 'green' and result_color == 'green':
             win = True
             multiplier = 35
-        elif request.bet_type == result_color:
+        elif payload.bet_type == result_color:
             win = True
             multiplier = 2
 
         if win:
-            win_amount = request.bet * multiplier
+            win_amount = payload.bet * multiplier
             user["coins"] += win_amount
             message = f"🎉 {result_symbol} {result} - You won +{win_amount} coins! (x{multiplier})"
         else:
-            user["coins"] -= request.bet
-            message = f"😞 {result_symbol} {result} - You lost {request.bet} coins"
+            user["coins"] -= payload.bet
+            message = f"😞 {result_symbol} {result} - You lost {payload.bet} coins"
 
-        await update_user(request.user_id, {"coins": user["coins"]})
-        await invalidate_user_cache(request.user_id)
+        await update_user(payload.user_id, {"coins": user["coins"]})
+        await invalidate_user_cache(payload.user_id)
 
         return {
             "success": True,
@@ -1540,18 +1499,15 @@ async def play_roulette(request: GameRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 # ==================== TOURNAMENT ENDPOINTS ====================
 
-class TournamentData(BaseModel):
-    user_id: int
-    score: int
-
 @app.get("/api/tournament/leaderboard")
 async def get_tournament_leaderboard():
     """Get top 5 players from Redis leaderboard"""
     try:
         players = []
 
-        if redis_client:
-            top_players = await redis_client.zrevrange(
+        conn = await get_redis_or_none()
+        if conn:
+            top_players = await conn.zrevrange(
                 TOURNAMENT_KEY,
                 0,
                 4,
@@ -1598,9 +1554,10 @@ async def get_tournament_leaderboard():
         raise HTTPException(status_code=500, detail="Internal server error")
     
 @app.get("/api/tournament/player-rank/{user_id}")
-async def get_player_rank(user_id: int):
+async def get_player_rank(user_id: int, request: Request):
     """Get player's rank from Redis leaderboard"""
     try:
+        await require_telegram_user(request, user_id)
         user = await get_user_cached(user_id)
         if not user:
             return {
@@ -1618,25 +1575,17 @@ async def get_player_rank(user_id: int):
             if username else "/imgg/default_avatar.png"
         )
 
-        if not redis_client:
-            return {
-                "success": True,
-                "rank": 0,
-                "score": 0,
-                "next_rank_score": 0,
-                "avatar": avatar_url,
-                "name": mask_username(username)
-            }
+        redis_conn = await ensure_redis_available()
 
-        score = await redis_client.zscore(TOURNAMENT_KEY, str(user_id))
+        score = await redis_conn.zscore(TOURNAMENT_KEY, str(user_id))
         score = int(score) if score is not None else 0
 
-        rev_rank = await redis_client.zrevrank(TOURNAMENT_KEY, str(user_id))
+        rev_rank = await redis_conn.zrevrank(TOURNAMENT_KEY, str(user_id))
         rank = (rev_rank + 1) if rev_rank is not None else 0
 
         next_rank_score = 0
         if rev_rank is not None and rev_rank > 0:
-            higher_player = await redis_client.zrevrange(
+            higher_player = await redis_conn.zrevrange(
                 TOURNAMENT_KEY,
                 rev_rank - 1,
                 rev_rank - 1,
@@ -1664,8 +1613,9 @@ async def get_player_rank(user_id: int):
 _task_completion_store = {}
 
 @app.get("/api/tasks/{user_id}")
-async def get_tasks(user_id: int):
+async def get_tasks(user_id: int, request: Request):
     try:
+        await require_telegram_user(request, user_id)
         user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -1689,42 +1639,45 @@ async def get_tasks(user_id: int):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/complete-task")
-async def complete_task(request: TaskCompleteRequest):
+async def complete_task(payload: TaskCompleteRequest, request: Request):
     try:
-        user = await get_user_cached(request.user_id)
+        await require_telegram_user(request, payload.user_id)
+        await require_redis_rate_limit("complete_task", payload.user_id, *RATE_LIMITS["complete_task"])
+        await require_user_action_lock("complete_task", payload.user_id, ttl=5)
+        user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        task_id = request.task_id
+        task_id = payload.task_id
         
         if task_id == "link_click":
             user["coins"] += 25000
-            await update_user(request.user_id, {"coins": user["coins"]})
-            await invalidate_user_cache(request.user_id)
+            await update_user(payload.user_id, {"coins": user["coins"]})
+            await invalidate_user_cache(payload.user_id)
             
             return {"success": True, "message": "🔗 +25000 coins!", "coins": user["coins"]}
         
-        completed = await get_completed_tasks(request.user_id) or []
+        completed = await get_completed_tasks(payload.user_id) or []
         if task_id in completed:
             raise HTTPException(status_code=400, detail="Task already completed")
         
         if task_id == "daily_bonus":
             user["coins"] += 25000
-            await add_completed_task(request.user_id, task_id)
-            await update_user(request.user_id, {"coins": user["coins"]})
-            await invalidate_user_cache(request.user_id)
+            await add_completed_task(payload.user_id, task_id)
+            await update_user(payload.user_id, {"coins": user["coins"]})
+            await invalidate_user_cache(payload.user_id)
             return {"success": True, "message": "🎁 +25000 coins!", "coins": user["coins"]}
         
         elif task_id == "energy_refill":
-            await add_completed_task(request.user_id, task_id)
+            await add_completed_task(payload.user_id, task_id)
             return {"success": True, "message": "⚡ Energy refill activated!"}
         
         elif task_id == "invite_5_friends":
             if user.get("referral_count", 0) >= 5:
                 user["coins"] += 20000
-                await add_completed_task(request.user_id, task_id)
-                await update_user(request.user_id, {"coins": user["coins"]})
-                await invalidate_user_cache(request.user_id)
+                await add_completed_task(payload.user_id, task_id)
+                await update_user(payload.user_id, {"coins": user["coins"]})
+                await invalidate_user_cache(payload.user_id)
                 return {"success": True, "message": "👥 +20000 coins!", "coins": user["coins"]}
             else:
                 raise HTTPException(status_code=400, detail="Not enough friends")
@@ -1739,9 +1692,11 @@ async def complete_task(request: TaskCompleteRequest):
 # ==================== ПАССИВНЫЙ ДОХОД ====================
 
 @app.post("/api/passive-income")
-async def passive_income(request: PassiveIncomeRequest):
+async def passive_income(payload: PassiveIncomeRequest, request: Request):
     try:
-        user = await get_user(request.user_id)
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("passive_income", payload.user_id, ttl=5)
+        user = await get_user(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -1762,7 +1717,7 @@ async def passive_income(request: PassiveIncomeRequest):
             total_income = hour_value * hours_passed
             
             user["coins"] += total_income
-            await update_user(request.user_id, {
+            await update_user(payload.user_id, {
                 "coins": user["coins"],
                 "last_passive_income": now
             })
@@ -1956,9 +1911,11 @@ async def get_skins_list():
     return {"skins": skins}
 
 @app.post("/api/select-skin")
-async def select_skin(request: SkinRequest):
+async def select_skin(payload: SkinRequest, request: Request):
     try:
-        user = await get_user_cached(request.user_id)
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("select_skin", payload.user_id, ttl=3)
+        user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -1967,15 +1924,15 @@ async def select_skin(request: SkinRequest):
             extra = {}
 
         owned_skins = extra.get("owned_skins", ["default_SP"])
-        if request.skin_id not in owned_skins:
+        if payload.skin_id not in owned_skins:
             raise HTTPException(status_code=400, detail="Skin not owned")
 
-        extra["selected_skin"] = request.skin_id
+        extra["selected_skin"] = payload.skin_id
 
-        await update_user(request.user_id, {"extra_data": extra})
-        await invalidate_user_cache(request.user_id)
+        await update_user(payload.user_id, {"extra_data": extra})
+        await invalidate_user_cache(payload.user_id)
 
-        return {"success": True, "selected_skin": request.skin_id}
+        return {"success": True, "selected_skin": payload.skin_id}
 
     except HTTPException:
         raise
@@ -1984,9 +1941,11 @@ async def select_skin(request: SkinRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/unlock-skin")
-async def unlock_skin(request: SkinRequest):
+async def unlock_skin(payload: SkinRequest, request: Request):
     try:
-        user = await get_user_cached(request.user_id)
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("unlock_skin", payload.user_id, ttl=5)
+        user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -2010,21 +1969,21 @@ async def unlock_skin(request: SkinRequest):
             "skin_video_6": 50,
         }
 
-        if request.skin_id in owned:
+        if payload.skin_id in owned:
             return {"success": True}
 
-        if request.skin_id in SKINS_REQUIREMENTS:
-            required = SKINS_REQUIREMENTS[request.skin_id]
+        if payload.skin_id in SKINS_REQUIREMENTS:
+            required = SKINS_REQUIREMENTS[payload.skin_id]
 
             if ads_watched < required:
                 raise HTTPException(status_code=400, detail="Not enough ads watched")
 
         # ✅ добавляем скин
-        owned.append(request.skin_id)
+        owned.append(payload.skin_id)
         extra["owned_skins"] = owned
 
-        await update_user(request.user_id, {"extra_data": extra})
-        await invalidate_user_cache(request.user_id)
+        await update_user(payload.user_id, {"extra_data": extra})
+        await invalidate_user_cache(payload.user_id)
 
         return {"success": True}
 
@@ -2033,30 +1992,6 @@ async def unlock_skin(request: SkinRequest):
     except Exception as e:
         logger.error(f"Unlock skin error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-
-@app.get("/admin/fix-db")
-async def fix_db():
-    try:
-        from sqlalchemy import text
-        from DATABASE.base import AsyncSessionLocal
-
-        async with AsyncSessionLocal() as session:
-            await session.execute(text("""
-                ALTER TABLE users
-                ADD COLUMN IF NOT EXISTS last_energy_update TIMESTAMP
-            """))
-
-            await session.execute(text("""
-                UPDATE users
-                SET last_energy_update = NOW()
-                WHERE last_energy_update IS NULL
-            """))
-
-            await session.commit()
-
-        return {"status": "ok"}
-    except Exception as e:
-        return {"error": str(e)}
 
 # ==================== ЗАПУСК ====================
 

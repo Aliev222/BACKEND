@@ -1,13 +1,10 @@
-import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy import Column, Integer, String, BigInteger, select, update, DateTime
+from sqlalchemy import Column, Integer, String, BigInteger, select, DateTime, Index, UniqueConstraint
 import json
 from datetime import datetime
 import logging
-
-# Используем переменную окружения или значение по умолчанию
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://...")
+from CONFIG.settings import DATABASE_URL
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -17,6 +14,10 @@ Base = declarative_base()
 # Модель пользователя
 class User(Base):
     __tablename__ = 'users'
+    __table_args__ = (
+        Index("ix_users_referrer_id", "referrer_id"),
+        Index("ix_users_created_at", "created_at"),
+    )
 
     id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, unique=True, index=True)
@@ -51,7 +52,11 @@ class User(Base):
 # ==================== МОДЕЛЬ ЗАДАНИЙ ====================
 class UserTask(Base):
     __tablename__ = 'user_tasks'
-    __table_args__ = {'extend_existing': True}
+    __table_args__ = (
+        UniqueConstraint("user_id", "task_id", name="uq_user_tasks_user_id_task_id"),
+        Index("ix_user_tasks_user_id_completed_at", "user_id", "completed_at"),
+        {'extend_existing': True}
+    )
     
     id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, index=True)
@@ -66,6 +71,38 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
 
+def _serialize_user(user: User) -> dict:
+    extra_data = {}
+    if user.extra_data:
+        try:
+            extra_data = json.loads(user.extra_data)
+        except json.JSONDecodeError:
+            logging.error("Failed to decode extra_data for user_id=%s", user.user_id)
+
+    return {
+        "user_id": user.user_id,
+        "username": user.username,
+        "coins": user.coins,
+        "profit_per_hour": user.profit_per_hour,
+        "profit_per_tap": user.profit_per_tap,
+        "energy": user.energy,
+        "max_energy": user.max_energy,
+        "level": user.level,
+        "multitap_level": user.multitap_level,
+        "profit_level": user.profit_level,
+        "energy_level": user.energy_level,
+        "boost_level": user.boost_level,
+        "last_passive_income": user.last_passive_income,
+        "last_energy_update": user.last_energy_update,
+        "luck_level": user.luck_level,
+        "referrer_id": user.referrer_id,
+        "referral_count": user.referral_count,
+        "referral_earnings": user.referral_earnings,
+        "created_at": user.created_at,
+        "extra_data": extra_data,
+    }
+
+
 async def get_user(user_id: int):
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -74,24 +111,7 @@ async def get_user(user_id: int):
         user = result.scalar_one_or_none()
 
         if user:
-            return {
-                "user_id": user.user_id,
-                "username": user.username,
-                "coins": user.coins,
-                "profit_per_hour": user.profit_per_hour,
-                "energy": user.energy,
-                "max_energy": user.max_energy,
-                "level": user.level,
-                "multitap_level": user.multitap_level,
-                "profit_level": user.profit_level,
-                "energy_level": user.energy_level,
-                "last_passive_income": user.last_passive_income,
-                "last_energy_update": user.last_energy_update,
-                "luck_level": user.luck_level,
-                "referral_count": user.referral_count,
-                "referral_earnings": user.referral_earnings,
-                "extra_data": json.loads(user.extra_data)
-            }
+            return _serialize_user(user)
         return None
 
 
@@ -245,6 +265,16 @@ async def add_user(user_id: int, username: str = None, referrer_id: int = None):
 
 
 async def update_user(user_id: int, data: dict):
+    allowed_fields = {
+        'username', 'coins', 'profit_per_hour', 'profit_per_tap', 'energy',
+        'max_energy', 'level', 'multitap_level', 'profit_level', 'energy_level',
+        'boost_level', 'last_passive_income', 'last_energy_update', 'referrer_id',
+        'referral_count', 'referral_earnings', 'extra_data', 'luck_level'
+    }
+    unknown_fields = set(data) - allowed_fields
+    if unknown_fields:
+        raise ValueError(f"Unsupported update_user fields: {sorted(unknown_fields)}")
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(User).where(User.user_id == user_id)
@@ -256,10 +286,14 @@ async def update_user(user_id: int, data: dict):
 
         if 'coins' in data:
             user.coins = data['coins']
+        if 'username' in data:
+            user.username = data['username']
         if 'energy' in data:
             user.energy = data['energy']
         if 'profit_per_hour' in data:
             user.profit_per_hour = data['profit_per_hour']
+        if 'profit_per_tap' in data:
+            user.profit_per_tap = data['profit_per_tap']
         if 'max_energy' in data:
             user.max_energy = data['max_energy']
         if 'level' in data:
@@ -270,10 +304,20 @@ async def update_user(user_id: int, data: dict):
             user.profit_level = data['profit_level']
         if 'energy_level' in data:
             user.energy_level = data['energy_level']
+        if 'boost_level' in data:
+            user.boost_level = data['boost_level']
         if 'last_passive_income' in data:
             user.last_passive_income = data['last_passive_income']
         if 'last_energy_update' in data:
             user.last_energy_update = data['last_energy_update']
+        if 'referrer_id' in data:
+            user.referrer_id = data['referrer_id']
+        if 'referral_count' in data:
+            user.referral_count = data['referral_count']
+        if 'referral_earnings' in data:
+            user.referral_earnings = data['referral_earnings']
+        if 'luck_level' in data:
+            user.luck_level = data['luck_level']
         if 'extra_data' in data:
             user.extra_data = json.dumps(data['extra_data'])
 

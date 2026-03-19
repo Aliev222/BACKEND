@@ -6,9 +6,9 @@ services:
     autoDeploy: true
 
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    startCommand: python migrate_db.py && uvicorn api:app --host 0.0.0.0 --port $PORT
 
-    healthCheckPath: /docs
+    healthCheckPath: /health
 
     envVars:
       - key: PYTHON_VERSION
@@ -16,4 +16,6 @@ services:
       - key: BOT_TOKEN
         sync: false
       - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
         sync: false
