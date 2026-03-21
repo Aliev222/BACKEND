@@ -24,15 +24,15 @@ export default function () {
   });
   check(userRes, { "user 200": (r) => r.status === 200 });
 
-  // Click batch with minimal payload
-  const clicksRes = http.post(
-    `${BASE_URL}/api/clicks`,
-    JSON.stringify({ user_id: USER_ID, clicks: 10 }),
-    {
-      headers: {
-        "Content-Type": "application/json",
-        "X-Telegram-Init-Data": INIT_DATA,
-      },
+// Click batch with required payload (batch_id)
+const clicksRes = http.post(
+  `${BASE_URL}/api/clicks`,
+  JSON.stringify({ user_id: USER_ID, clicks: 10, batch_id: `${__VU}-${__ITER}-${Date.now()}` }),
+  {
+    headers: {
+      "Content-Type": "application/json",
+      "X-Telegram-Init-Data": INIT_DATA,
+    },
     }
   );
   check(clicksRes, { "clicks <=429": (r) => r.status === 200 || r.status === 429 });
