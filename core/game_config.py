@@ -20,7 +20,6 @@ RATE_LIMITS = {
     "activate_mega_boost": (10, 60),
     "update_energy": (10, 60),
     "complete_task": (20, 60),
-    "cpa_status": (60, 60),
     "game_action": (30, 60),
 }
 

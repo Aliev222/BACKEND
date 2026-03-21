@@ -980,8 +980,6 @@ SKIN_MULTIPLIERS = {
     "skin_friend_4": 1.5,
     "skin_friend_5": 1.75,
     "skin_friend_6": 2.0,
-
-    "skin_cpa_1": 2.5,
 }
 
 
@@ -1042,8 +1040,6 @@ SKIN_REQUIREMENTS = {
     "skin_friend_4": {"type": "friends", "count": 10},
     "skin_friend_5": {"type": "friends", "count": 20},
     "skin_friend_6": {"type": "friends", "count": 50},
-
-    "skin_cpa_1": {"type": "cpa", "offer_id": "cpa_1"},
 }
 
 
@@ -1070,14 +1066,6 @@ async def can_unlock_skin(user: dict, skin_id: str) -> bool:
     if req["type"] == "friends":
         referral_count = int(user.get("referral_count", 0))
         return referral_count >= int(req["count"])
-
-    if req["type"] == "cpa":
-        conn = await get_redis_or_none()
-        if not conn:
-            return False
-        cpa_key = f"cpa:{user['user_id']}:{req['offer_id']}"
-        data = await conn.hgetall(cpa_key)
-        return bool(data and data.get("completed") == "1")
 
     return False
 
@@ -1242,81 +1230,6 @@ async def get_referral_data(user_id: int, request: Request):
     except Exception as e:
         logger.error(f"Error in get_referral_data: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-
-# ==================== CPA ENDPOINTS ====================
-
-
-
-@app.post("/api/cpa-status")
-async def cpa_status(payload: dict, request: Request):
-    """–ü—Ä–æ–≤–µ—Ä–∫–∞ —Å—Ç–∞—Ç—É—Å–∞ CPA-–∑–∞–¥–∞–Ω–∏—è"""
-    try:
-        user_id = payload.get("user_id")
-        offer_id = payload.get("offer_id")
-        check_only = payload.get("check_only", False)
-
-        if not user_id or not offer_id:
-            raise HTTPException(status_code=400, detail="user_id and offer_id required")
-
-        await require_telegram_user(request, user_id)
-        await require_redis_rate_limit("cpa_status", user_id, *RATE_LIMITS["cpa_status"])
-
-        redis_conn = await ensure_redis_available()
-
-        cpa_key = f"cpa:{user_id}:{offer_id}"
-        now_ts = time.time()
-
-        data = await redis_conn.hgetall(cpa_key)
-
-        if check_only:
-            return {"completed": bool(data and data.get("completed") == "1")}
-
-        if not data:
-            await redis_conn.hset(cpa_key, mapping={
-                "start_time": str(now_ts),
-                "completed": "0"
-            })
-            await redis_conn.expire(cpa_key, 86400)
-            return {"completed": False}
-
-        start_time = float(data.get("start_time", now_ts))
-        completed = data.get("completed") == "1"
-
-        if completed:
-            return {"completed": True}
-
-        elapsed = now_ts - start_time
-        if elapsed < 30:
-            return {"completed": False}
-
-        await redis_conn.hset(cpa_key, "completed", "1")
-
-        user = await get_user_cached(user_id)
-        if user:
-            rewards = {
-                "cpa_1": 50000,
-                "cpa_2": 100000,
-                "cpa_3": 25000
-            }
-            reward = rewards.get(offer_id, 50000)
-
-            new_coins = int(user.get("coins", 0)) + reward
-            await update_user(user_id, {"coins": new_coins})
-            await invalidate_user_cache(user_id)
-
-            logger.info(f"CPA completed: user {user_id}, offer {offer_id}, reward {reward}")
-
-        return {"completed": True}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"CPA status error: {e}")
-        return {"completed": False}
-
-@app.post("/api/ads/increment-legacy")
-async def increment_ads_watched_legacy(payload: UserIdRequest, request: Request):
-    return await increment_ads_watched(payload, request)
 
 # ==================== –ú–ò–ù–ò-–ò–ì–†–´ ====================
 
@@ -1738,175 +1651,171 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
 # ==================== –°–ö–ò–ù–´ ====================
 
 @app.get("/api/skins/list")
-async def get_skins_list():
+async def get_skins():
     skins = [
-        # ========== –û–ë–´–ß–ù–´–ï (7 —à—Ç) - –∑–∞ —É—Ä–æ–≤–µ–Ω—å ==========
+        # ========== «¿ ”–Œ¬≈Õ‹ (7 ¯Ú) ==========
         {
-            "id": "skin_lvl_1", 
-            "name": "–ù–∞—á–∏–Ω–∞—é—â–∏–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/default_SP.png", 
-            "rarity": "common", 
-            "bonus": {"type": "multiplier", "value": 1.1}, 
-            "requirement": {"type": "level", "value": 1}
+            "id": "default_SP",
+            "name": "Classic Spirix",
+            "image": "imgg/skins/default_SP.png",
+            "rarity": "common",
+            "bonus": {"type": "multiplier", "value": 1.0},
+            "requirement": None,
         },
         {
-            "id": "skin_lvl_2", 
-            "name": "–û–ø—ã—Ç–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/icon.png", 
-            "rarity": "common", 
-            "bonus": {"type": "multiplier", "value": 1.2}, 
-            "requirement": {"type": "level", "value": 10}
+            "id": "skin_lvl_1",
+            "name": " ÓÒÏË˜ÂÒÍËÈ ÒÔËËÍÒ",
+            "image": "imgg/skins/Techno_SP.png",
+            "rarity": "common",
+            "bonus": {"type": "multiplier", "value": 1.1},
+            "requirement": {"type": "level", "value": 10},
         },
         {
-            "id": "skin_lvl_3", 
-            "name": "–ú–∞—Å—Ç–µ—Ä —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/Galaxy_SP.png", 
-            "rarity": "common", 
-            "bonus": {"type": "multiplier", "value": 1.3}, 
-            "requirement": {"type": "level", "value": 25}
+            "id": "skin_lvl_2",
+            "name": "»ÒÍˇ˘ËÈÒˇ ÒÔËËÍÒ",
+            "image": "imgg/skins/Coin_SP.png",
+            "rarity": "common",
+            "bonus": {"type": "multiplier", "value": 1.2},
+            "requirement": {"type": "level", "value": 20},
         },
         {
-            "id": "skin_lvl_4", 
-            "name": "–≠–ª–∏—Ç–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/Coin_SP.png", 
-            "rarity": "common", 
-            "bonus": {"type": "multiplier", "value": 1.4}, 
-            "requirement": {"type": "level", "value": 50}
+            "id": "skin_lvl_3",
+            "name": "«Î‡ÚÓ„Î‡Á˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/Water_SP.png",
+            "rarity": "common",
+            "bonus": {"type": "multiplier", "value": 1.3},
+            "requirement": {"type": "level", "value": 40},
         },
         {
-            "id": "skin_lvl_5", 
-            "name": "–õ–µ–≥–µ–Ω–¥–∞—Ä–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/Monster_SP.png", 
-            "rarity": "common", 
-            "bonus": {"type": "multiplier", "value": 1.5}, 
-            "requirement": {"type": "level", "value": 75}
+            "id": "skin_lvl_4",
+            "name": "‘ËÎËÌÓ‚˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/King_SP.png",
+            "rarity": "common",
+            "bonus": {"type": "multiplier", "value": 1.4},
+            "requirement": {"type": "level", "value": 60},
         },
         {
-            "id": "skin_lvl_6", 
-            "name": "–ú–∏—Ñ–∏—á–µ—Å–∫–∏–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/Ninja_SP.png", 
-            "rarity": "common", 
-            "bonus": {"type": "multiplier", "value": 1.6}, 
-            "requirement": {"type": "level", "value": 100}
+            "id": "skin_lvl_5",
+            "name": "»ÁÛÏÛ‰Ì˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/Galaxy_SP.png",
+            "rarity": "common",
+            "bonus": {"type": "multiplier", "value": 1.5},
+            "requirement": {"type": "level", "value": 80},
         },
         {
-            "id": "skin_lvl_7", 
-            "name": "–ë–æ–∂–µ—Å—Ç–≤–µ–Ω–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/Shadow_SP.png", 
-            "rarity": "common", 
-            "bonus": {"type": "multiplier", "value": 2.0}, 
-            "requirement": {"type": "level", "value": 150}
-        },
-        
-        # ========== –ó–ê –í–ò–î–ï–û (6 —à—Ç) ==========
-        {
-            "id": "skin_video_1", 
-            "name": "–ó–≤–µ–∑–¥–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/Techno_SP.png", 
-            "rarity": "rare", 
-            "bonus": {"type": "multiplier", "value": 1.2}, 
-            "requirement": {"type": "ads", "count": 1}
+            "id": "skin_lvl_6",
+            "name": "—ËÌ„ÛÎˇÌ˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/Ninja_SP.png",
+            "rarity": "common",
+            "bonus": {"type": "multiplier", "value": 1.6},
+            "requirement": {"type": "level", "value": 100},
         },
         {
-            "id": "skin_video_2", 
-            "name": "–ö–æ—Å–º–∏—á–µ—Å–∫–∏–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/Water_SP.png", 
-            "rarity": "rare", 
-            "bonus": {"type": "multiplier", "value": 1.3}, 
-            "requirement": {"type": "ads", "count": 5}
+            "id": "skin_lvl_7",
+            "name": "¡ÓÊÂÒÚ‚ÂÌÌ˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/Shadow_SP.png",
+            "rarity": "common",
+            "bonus": {"type": "multiplier", "value": 2.0},
+            "requirement": {"type": "level", "value": 150},
+        },
+        # ========== «¿ ¬»ƒ≈Œ (6 ¯Ú) ==========
+        {
+            "id": "skin_video_1",
+            "name": "«‚ÂÁ‰Ì˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/Techno_SP.png",
+            "rarity": "rare",
+            "bonus": {"type": "multiplier", "value": 1.2},
+            "requirement": {"type": "ads", "count": 1},
         },
         {
-            "id": "skin_video_3", 
-            "name": "–ì–∞–ª–∞–∫—Ç–∏—á–µ—Å–∫–∏–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/King_SP.png", 
-            "rarity": "rare", 
-            "bonus": {"type": "multiplier", "value": 1.4}, 
-            "requirement": {"type": "ads", "count": 10}
+            "id": "skin_video_2",
+            "name": " ÓÒÏË˜ÂÒÍËÈ ÒÔËËÍÒ",
+            "image": "imgg/skins/Water_SP.png",
+            "rarity": "rare",
+            "bonus": {"type": "multiplier", "value": 1.3},
+            "requirement": {"type": "ads", "count": 5},
         },
         {
-            "id": "skin_video_4", 
-            "name": "–ù–µ–±–µ—Å–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/King_SP.png", 
-            "rarity": "rare", 
-            "bonus": {"type": "multiplier", "value": 1.5}, 
-            "requirement": {"type": "ads", "count": 20}
+            "id": "skin_video_3",
+            "name": "√‡Î‡ÍÚË˜ÂÒÍËÈ ÒÔËËÍÒ",
+            "image": "imgg/skins/King_SP.png",
+            "rarity": "rare",
+            "bonus": {"type": "multiplier", "value": 1.4},
+            "requirement": {"type": "ads", "count": 10},
         },
         {
-            "id": "skin_video_5", 
-            "name": "–ë–æ–∂–µ—Å—Ç–≤–µ–Ω–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/King_SP.png", 
-            "rarity": "legendary", 
-            "bonus": {"type": "multiplier", "value": 1.75}, 
-            "requirement": {"type": "ads", "count": 50}
+            "id": "skin_video_4",
+            "name": "ÕÂ·ÂÒÌ˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/King_SP.png",
+            "rarity": "rare",
+            "bonus": {"type": "multiplier", "value": 1.5},
+            "requirement": {"type": "ads", "count": 20},
         },
         {
-            "id": "skin_video_6", 
-            "name": "–í—Å–µ–º–æ–≥—É—â–∏–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/King_SP.png", 
-            "rarity": "legendary", 
-            "bonus": {"type": "multiplier", "value": 2.0}, 
-            "requirement": {"type": "ads", "count": 100}
-        },
-        
-        # ========== –ó–ê –î–†–£–ó–ï–ô (6 —à—Ç) ==========
-        {
-            "id": "skin_friend_1", 
-            "name": "–î—Ä—É–∂–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/King_SP.png", 
-            "rarity": "rare", 
-            "bonus": {"type": "multiplier", "value": 1.1}, 
-            "requirement": {"type": "friends", "count": 1}
+            "id": "skin_video_5",
+            "name": "¡ÓÊÂÒÚ‚ÂÌÌ˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/King_SP.png",
+            "rarity": "legendary",
+            "bonus": {"type": "multiplier", "value": 1.75},
+            "requirement": {"type": "ads", "count": 50},
         },
         {
-            "id": "skin_friend_2", 
-            "name": "–ü–æ–ø—É–ª—è—Ä–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/King_SP.png", 
-            "rarity": "rare", 
-            "bonus": {"type": "multiplier", "value": 1.2}, 
-            "requirement": {"type": "friends", "count": 3}
+            "id": "skin_video_6",
+            "name": "¬ÒÂÏÓ„Û˘ËÈ ÒÔËËÍÒ",
+            "image": "imgg/skins/King_SP.png",
+            "rarity": "legendary",
+            "bonus": {"type": "multiplier", "value": 2.0},
+            "requirement": {"type": "ads", "count": 100},
+        },
+        # ========== «¿ ƒ–”«≈… (6 ¯Ú) ==========
+        {
+            "id": "skin_friend_1",
+            "name": "ƒÛÊÌ˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/King_SP.png",
+            "rarity": "rare",
+            "bonus": {"type": "multiplier", "value": 1.1},
+            "requirement": {"type": "friends", "count": 1},
         },
         {
-            "id": "skin_friend_3", 
-            "name": "–ò–∑–≤–µ—Å—Ç–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/King_SP.png", 
-            "rarity": "rare", 
-            "bonus": {"type": "multiplier", "value": 1.3}, 
-            "requirement": {"type": "friends", "count": 5}
+            "id": "skin_friend_2",
+            "name": "œÓÔÛÎˇÌ˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/King_SP.png",
+            "rarity": "rare",
+            "bonus": {"type": "multiplier", "value": 1.2},
+            "requirement": {"type": "friends", "count": 3},
         },
         {
-            "id": "skin_friend_4", 
-            "name": "–ó–≤–µ–∑–¥–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/King_SP.png", 
-            "rarity": "legendary", 
-            "bonus": {"type": "multiplier", "value": 1.5}, 
-            "requirement": {"type": "friends", "count": 10}
+            "id": "skin_friend_3",
+            "name": "»Á‚ÂÒÚÌ˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/King_SP.png",
+            "rarity": "rare",
+            "bonus": {"type": "multiplier", "value": 1.3},
+            "requirement": {"type": "friends", "count": 5},
         },
         {
-            "id": "skin_friend_5", 
-            "name": "–õ–µ–≥–µ–Ω–¥–∞—Ä–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/King_SP.png", 
-            "rarity": "legendary", 
-            "bonus": {"type": "multiplier", "value": 1.75}, 
-            "requirement": {"type": "friends", "count": 20}
+            "id": "skin_friend_4",
+            "name": "«‚ÂÁ‰Ì˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/King_SP.png",
+            "rarity": "legendary",
+            "bonus": {"type": "multiplier", "value": 1.5},
+            "requirement": {"type": "friends", "count": 10},
         },
         {
-            "id": "skin_friend_6", 
-            "name": "–ò–º–ø–µ—Ä–∞—Ç–æ—Ä —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/King_SP.png", 
-            "rarity": "super", 
-            "bonus": {"type": "multiplier", "value": 2.0}, 
-            "requirement": {"type": "friends", "count": 50}
+            "id": "skin_friend_5",
+            "name": "ÀÂ„ÂÌ‰‡Ì˚È ÒÔËËÍÒ",
+            "image": "imgg/skins/King_SP.png",
+            "rarity": "legendary",
+            "bonus": {"type": "multiplier", "value": 1.75},
+            "requirement": {"type": "friends", "count": 20},
         },
-        
-        # ========== –ó–ê –°–°–´–õ–ö–£ (1 —à—Ç) ==========
         {
-            "id": "skin_cpa_1", 
-            "name": "–¢–∞–π–Ω—ã–π —Å–ø–∏—Ä–∏–∫—Å", 
-            "image": "imgg/skins/King_SP.png", 
-            "rarity": "super", 
-            "bonus": {"type": "multiplier", "value": 2.5}, 
-            "requirement": {"type": "cpa", "url": "https://example.com"}
-        }
+            "id": "skin_friend_6",
+            "name": "»ÏÔÂ‡ÚÓ ÒÔËËÍÒ",
+            "image": "imgg/skins/King_SP.png",
+            "rarity": "super",
+            "bonus": {"type": "multiplier", "value": 2.0},
+            "requirement": {"type": "friends", "count": 50},
+        },
     ]
     return {"skins": skins}
 
@@ -1998,3 +1907,4 @@ async def unlock_skin(payload: SkinRequest, request: Request):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False)
+
