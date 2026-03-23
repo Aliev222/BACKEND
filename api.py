@@ -189,6 +189,45 @@ async def invalidate_user_cache(user_id: int):
 
 
 
+async def distribute_tournament_rewards():
+    """Award top players before resetting the leaderboard."""
+    try:
+        redis_conn = await get_redis_or_none()
+        if not redis_conn:
+            return
+
+        top_players = await redis_conn.zrevrange(
+            TOURNAMENT_KEY,
+            0,
+            2,
+            withscores=True
+        )
+        if not top_players:
+            return
+
+        shares = [0.5, 0.3, 0.2]
+
+        for idx, (user_id_str, score) in enumerate(top_players):
+            if idx >= len(shares):
+                break
+            try:
+                user_id = int(user_id_str)
+            except ValueError:
+                continue
+
+            reward = int(TOURNAMENT_PRIZE_POOL * shares[idx])
+            user = await get_user(user_id)
+            if not user:
+                continue
+
+            new_coins = int(user.get("coins", 0)) + reward
+            await update_user(user_id, {"coins": new_coins})
+            await invalidate_user_cache(user_id)
+            logger.info(f"🏆 Tournament reward: user {user_id} place {idx+1} +{reward} coins (score {int(score)})")
+    except Exception as e:
+        logger.error(f"Error distributing tournament rewards: {e}")
+
+
 async def reset_tournament_loop():
     while True:
         now = datetime.utcnow()
@@ -200,10 +239,11 @@ async def reset_tournament_loop():
         await asyncio.sleep(sleep_seconds)
 
         try:
+            await distribute_tournament_rewards()
             redis_conn = await get_redis_or_none()
             if redis_conn:
                 await redis_conn.delete(TOURNAMENT_KEY)
-                logger.info("🏆 Tournament leaderboard reset")
+                logger.info("🏆 Tournament leaderboard reset after rewards")
         except Exception as e:
             logger.error(f"Error resetting tournament leaderboard: {e}")
 
