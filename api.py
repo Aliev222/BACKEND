@@ -64,6 +64,7 @@ from core.game_logic import (
     get_tap_value,
     mask_username,
     normalize_dt,
+    resolve_max_energy,
 )
 from core.telegram_auth import verify_telegram_init_data
 
@@ -516,8 +517,15 @@ async def get_user_data(user_id: int, request: Request):
 
         now = datetime.utcnow()
         current_energy = calculate_current_energy(user, now)
-        max_energy = int(user.get("max_energy", BASE_MAX_ENERGY))
-        
+        max_energy = resolve_max_energy(user)
+
+        if int(user.get("max_energy", max_energy)) != max_energy or int(user.get("energy", current_energy)) > max_energy:
+            await update_user(user_id, {
+                "max_energy": max_energy,
+                "energy": min(current_energy, max_energy),
+            })
+            await invalidate_user_cache(user_id)
+
 
         return {
             "user_id": user["user_id"],
@@ -959,9 +967,10 @@ async def update_energy(payload: dict, request: Request):
             raise HTTPException(status_code=404, detail="User not found")
 
         now = datetime.utcnow()
-        max_energy = int(user.get("max_energy", 500))
+        max_energy = resolve_max_energy(user)
 
         await update_user(user_id, {
+            "max_energy": max_energy,
             "energy": max_energy,
             "last_energy_update": now
         })
@@ -991,7 +1000,7 @@ async def recover_energy_legacy(payload: UserIdRequest, request: Request):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        max_energy = user.get("max_energy", BASE_MAX_ENERGY)
+        max_energy = resolve_max_energy(user)
         current_energy = user.get("energy", 0)
         
        
@@ -1028,12 +1037,14 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
         now = datetime.utcnow()
 
         old_energy = int(user.get("energy", 0))
-        max_energy = int(user.get("max_energy", BASE_MAX_ENERGY))
+        max_energy = resolve_max_energy(user)
         last_update = normalize_dt(user.get("last_energy_update"))
 
         current_energy = calculate_current_energy(user, now)
 
         update_data = {}
+        if int(user.get("max_energy", max_energy)) != max_energy:
+            update_data["max_energy"] = max_energy
 
         # Обновляем baseline только если энергия реально выросла
         if current_energy != old_energy:
@@ -1209,7 +1220,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
 
         now = datetime.utcnow()
 
-        max_energy = int(user.get("max_energy", BASE_MAX_ENERGY))
+        max_energy = resolve_max_energy(user)
         current_energy = calculate_current_energy(user, now)
 
         multitap_level = int(user.get("multitap_level", 0))
@@ -1245,6 +1256,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         # Сохраняем энергию и баланс одним server-side update на батч кликов.
         await update_user(payload.user_id, {
             "coins": new_coins,
+            "max_energy": max_energy,
             "energy": new_energy,
             "last_energy_update": now
         })

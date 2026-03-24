@@ -57,14 +57,18 @@ def get_hour_value(level: int) -> int:
 
 def get_max_energy(level: int) -> int:
     level = max(0, int(level))
-    return BASE_MAX_ENERGY + level * 20
+    return min(1000, BASE_MAX_ENERGY + level * 5)
+
+
+def resolve_max_energy(user: dict) -> int:
+    return get_max_energy(int(user.get("energy_level", 0)))
 
 
 def calculate_current_energy(user: dict, now: datetime | None = None) -> int:
     now = now or datetime.utcnow()
 
     stored_energy = int(user.get("energy", 0))
-    max_energy = int(user.get("max_energy", 500))
+    max_energy = resolve_max_energy(user)
     last_update = normalize_dt(user.get("last_energy_update"))
 
     if stored_energy >= max_energy:
@@ -81,7 +85,7 @@ def calculate_current_energy(user: dict, now: datetime | None = None) -> int:
 
 def build_energy_payload(user: dict, now: datetime | None = None) -> dict:
     now = now or datetime.utcnow()
-    max_energy = int(user.get("max_energy", BASE_MAX_ENERGY))
+    max_energy = resolve_max_energy(user)
     current_energy = calculate_current_energy(user, now)
 
     return {
