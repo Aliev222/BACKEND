@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+﻿from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 import asyncio
@@ -90,7 +90,7 @@ async def try_reconnect_redis() -> None:
     try:
         await client.ping()
         redis_client = client
-        logger.info("✓ Redis reconnected")
+        logger.info("вњ“ Redis reconnected")
     except Exception as e:
         logger.warning(f"Redis reconnect failed: {e}")
         redis_client = None
@@ -153,7 +153,7 @@ async def require_telegram_user(request: Request, expected_user_id: int | None =
 
 
 
-# ==================== ТУРНИРНЫЕ ДАННЫЕ ==================
+# ==================== РўРЈР РќРР РќР«Р• Р”РђРќРќР«Р• ==================
 
 async def get_user_cached(user_id: int) -> dict | None:
     conn = await get_redis_or_none()
@@ -179,7 +179,7 @@ async def get_user_cached(user_id: int) -> dict | None:
 
     return user
 
-# ==================== Вспомогательные функции антиспама ====================
+# ==================== Р’СЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Рµ С„СѓРЅРєС†РёРё Р°РЅС‚РёСЃРїР°РјР° ====================
 
 
 async def invalidate_user_cache(user_id: int):
@@ -224,7 +224,7 @@ async def distribute_tournament_rewards():
             new_coins = int(user.get("coins", 0)) + reward
             await update_user(user_id, {"coins": new_coins})
             await invalidate_user_cache(user_id)
-            logger.info(f"🏆 Tournament reward: user {user_id} place {idx+1} +{reward} coins (score {int(score)})")
+            logger.info(f"рџЏ† Tournament reward: user {user_id} place {idx+1} +{reward} coins (score {int(score)})")
     except Exception as e:
         logger.error(f"Error distributing tournament rewards: {e}")
 
@@ -244,7 +244,7 @@ async def reset_tournament_loop():
             redis_conn = await get_redis_or_none()
             if redis_conn:
                 await redis_conn.delete(TOURNAMENT_KEY)
-                logger.info("🏆 Tournament leaderboard reset after rewards")
+                logger.info("рџЏ† Tournament leaderboard reset after rewards")
         except Exception as e:
             logger.error(f"Error resetting tournament leaderboard: {e}")
 
@@ -256,10 +256,10 @@ async def reset_tournament_loop():
 async def lifespan(app: FastAPI):
     global redis_client
 
-    logger.info("🚀 Starting Ryoho Clicker API")
+    logger.info("рџљЂ Starting Ryoho Clicker API")
 
     await init_db()
-    logger.info("✅ Database initialized")
+    logger.info("вњ… Database initialized")
 
     if REDIS_URL:
         redis_client = redis.from_url(
@@ -272,24 +272,24 @@ async def lifespan(app: FastAPI):
         )
         try:
             await redis_client.ping()
-            logger.info("✅ Redis connected")
+            logger.info("вњ… Redis connected")
         except Exception as e:
-            logger.error(f"❌ Redis connection failed: {e}")
+            logger.error(f"вќЊ Redis connection failed: {e}")
             redis_client = None
     else:
-        logger.warning("⚠️ REDIS_URL is not set")
+        logger.warning("вљ пёЏ REDIS_URL is not set")
 
     if redis_client:
         asyncio.create_task(reset_tournament_loop())
         asyncio.create_task(flush_click_buffer_loop())
 
-    logger.info("✅ Background tasks started")
+    logger.info("вњ… Background tasks started")
     yield
 
     if redis_client:
         await redis_client.close()
 
-    logger.info("🛑 Shutting down")
+    logger.info("рџ›‘ Shutting down")
 
 # ==================== CORS ====================
 app = FastAPI(title="Ryoho Clicker API", lifespan=lifespan)
@@ -329,9 +329,9 @@ async def metrics_middleware(request: Request, call_next):
 async def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-# ==================== МОДЕЛИ ====================
+# ==================== РњРћР”Р•Р›Р ====================
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== Р’РЎРџРћРњРћР“РђРўР•Р›Р¬РќР«Р• Р¤РЈРќРљР¦РР ====================
 async def acquire_once_lock(key: str, ttl: int = 10) -> bool:
     conn = await get_redis_or_none()
     if conn:
@@ -380,7 +380,7 @@ async def ensure_redis_available() -> redis.Redis:
     """
     return await redis_or_503()
 
-# ==================== ЭНДПОИНТЫ ====================
+# ==================== Р­РќР”РџРћРРќРўР« ====================
 
 def _local_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
     now = time.monotonic()
@@ -398,8 +398,8 @@ def _local_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
 
 async def redis_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
     """
-    True = можно пропустить
-    False = лимит превышен
+    True = РјРѕР¶РЅРѕ РїСЂРѕРїСѓСЃС‚РёС‚СЊ
+    False = Р»РёРјРёС‚ РїСЂРµРІС‹С€РµРЅ
     """
     global redis_client
 
@@ -615,7 +615,7 @@ async def activate_mega_boost(payload: BoostActivateRequest, request: Request):
         active_boosts = extra.get("active_boosts", {})
         now = datetime.utcnow()
         
-        # Проверяем, не активен ли уже буст
+        # РџСЂРѕРІРµСЂСЏРµРј, РЅРµ Р°РєС‚РёРІРµРЅ Р»Рё СѓР¶Рµ Р±СѓСЃС‚
         if "mega_boost" in active_boosts:
             try:
                 expires = datetime.fromisoformat(active_boosts["mega_boost"]["expires_at"])
@@ -630,7 +630,7 @@ async def activate_mega_boost(payload: BoostActivateRequest, request: Request):
             except:
                 del active_boosts["mega_boost"]
         
-        # Активируем на 5 минут
+        # РђРєС‚РёРІРёСЂСѓРµРј РЅР° 5 РјРёРЅСѓС‚
         expires_at = (now + timedelta(minutes=5)).isoformat()
         active_boosts["mega_boost"] = {"active": True, "expires_at": expires_at}
         extra["active_boosts"] = active_boosts
@@ -639,7 +639,7 @@ async def activate_mega_boost(payload: BoostActivateRequest, request: Request):
         
         return {
             "success": True,
-            "message": "🔥⚡ MEGA BOOST activated for 5 minutes! x2 coins + infinite energy",
+            "message": "рџ”ҐвљЎ MEGA BOOST activated for 5 minutes! x2 coins + infinite energy",
             "expires_at": expires_at
         }
     except Exception as e:
@@ -763,7 +763,7 @@ async def ad_watched(payload: dict, request: Request):
             except:
                 extra = {}
         
-        # Сохраняем статистику
+        # РЎРѕС…СЂР°РЅСЏРµРј СЃС‚Р°С‚РёСЃС‚РёРєСѓ
         ads_history = extra.get("ads_history", [])
         ads_history.append({
             "type": reward_type,
@@ -864,7 +864,7 @@ async def process_upgrade(payload: UpgradeRequest, request: Request):
         await update_user(payload.user_id, updates)
         await invalidate_user_cache(payload.user_id)
         
-        # Обновляем кэш
+        # РћР±РЅРѕРІР»СЏРµРј РєСЌС€
         
         return {
             "success": True,
@@ -992,7 +992,7 @@ async def update_energy(payload: dict, request: Request):
 
 @app.post("/api/recover-energy")
 async def recover_energy_legacy(payload: UserIdRequest, request: Request):
-    """Старый эндпоинт для обратной совместимости"""
+    """РЎС‚Р°СЂС‹Р№ СЌРЅРґРїРѕРёРЅС‚ РґР»СЏ РѕР±СЂР°С‚РЅРѕР№ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё"""
     try:
         await require_telegram_user(request, payload.user_id)
         await require_user_action_lock("recover_energy", payload.user_id, ttl=3)
@@ -1026,7 +1026,7 @@ async def recover_energy_legacy(payload: UserIdRequest, request: Request):
 
 @app.post("/api/sync-energy")
 async def sync_energy(payload: EnergySyncRequest, request: Request):
-    """Серверный sync энергии без сброса таймера регена."""
+    """РЎРµСЂРІРµСЂРЅС‹Р№ sync СЌРЅРµСЂРіРёРё Р±РµР· СЃР±СЂРѕСЃР° С‚Р°Р№РјРµСЂР° СЂРµРіРµРЅР°."""
     try:
         await require_telegram_user(request, payload.user_id)
         user = await get_user_cached(payload.user_id)
@@ -1046,7 +1046,7 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
         if int(user.get("max_energy", max_energy)) != max_energy:
             update_data["max_energy"] = max_energy
 
-        # Обновляем baseline только если энергия реально выросла
+        # РћР±РЅРѕРІР»СЏРµРј baseline С‚РѕР»СЊРєРѕ РµСЃР»Рё СЌРЅРµСЂРіРёСЏ СЂРµР°Р»СЊРЅРѕ РІС‹СЂРѕСЃР»Р°
         if current_energy != old_energy:
             update_data["energy"] = current_energy
 
@@ -1061,7 +1061,7 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
             else:
                 update_data["last_energy_update"] = now
 
-        # Если энергия уже полная, держим baseline консистентным
+        # Р•СЃР»Рё СЌРЅРµСЂРіРёСЏ СѓР¶Рµ РїРѕР»РЅР°СЏ, РґРµСЂР¶РёРј baseline РєРѕРЅСЃРёСЃС‚РµРЅС‚РЅС‹Рј
         if current_energy >= max_energy and not update_data.get("last_energy_update"):
             update_data["last_energy_update"] = now
             update_data["energy"] = max_energy
@@ -1242,18 +1242,18 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         if mega_boost_active:
             coin_per_tap *= 2
 
-        # защита
+        # Р·Р°С‰РёС‚Р°
         safe_requested_clicks = min(payload.clicks, MAX_CLICK_BATCH_SIZE)
         allowed_clicks = get_allowed_clicks(user, now, safe_requested_clicks)
 
         effective_clicks = min(allowed_clicks, current_energy)
         gained = effective_clicks * coin_per_tap
 
-        # новые значения
+        # РЅРѕРІС‹Рµ Р·РЅР°С‡РµРЅРёСЏ
         new_energy = max(0, current_energy - effective_clicks)
         new_coins = int(user.get("coins", 0)) + gained
 
-        # Сохраняем энергию и баланс одним server-side update на батч кликов.
+        # РЎРѕС…СЂР°РЅСЏРµРј СЌРЅРµСЂРіРёСЋ Рё Р±Р°Р»Р°РЅСЃ РѕРґРЅРёРј server-side update РЅР° Р±Р°С‚С‡ РєР»РёРєРѕРІ.
         await update_user(payload.user_id, {
             "coins": new_coins,
             "max_energy": max_energy,
@@ -1263,14 +1263,14 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
 
         conn = await get_redis_or_none()
         if conn and gained > 0:
-            # Турнир оставляем в Redis как быстрый leaderboard слой.
+            # РўСѓСЂРЅРёСЂ РѕСЃС‚Р°РІР»СЏРµРј РІ Redis РєР°Рє Р±С‹СЃС‚СЂС‹Р№ leaderboard СЃР»РѕР№.
             await conn.zincrby(
                 TOURNAMENT_KEY,
                 gained,
                 str(payload.user_id)
             )
 
-        # ✅ инвалидируем кэш
+        # вњ… РёРЅРІР°Р»РёРґРёСЂСѓРµРј РєСЌС€
         await invalidate_user_cache(payload.user_id)
 
         return {
@@ -1362,7 +1362,7 @@ async def get_referral_data(user_id: int, request: Request):
         logger.error(f"Error in get_referral_data: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# ==================== МИНИ-ИГРЫ ====================
+# ==================== РњРРќР-РР“Р Р« ====================
 
 @app.post("/api/game/coinflip")
 async def play_coinflip(payload: GameRequest, request: Request):
@@ -1378,10 +1378,10 @@ async def play_coinflip(payload: GameRequest, request: Request):
         win = random.choice([True, False])
         if win:
             user["coins"] += payload.bet
-            message = f"🎉 You won +{payload.bet} coins!"
+            message = f"You won +{payload.bet} coins!"
         else:
             user["coins"] -= payload.bet
-            message = f"😞 You lost {payload.bet} coins"
+            message = f"You lost {payload.bet} coins"
 
         await update_user(payload.user_id, {"coins": user["coins"]})
         await invalidate_user_cache(payload.user_id)
@@ -1390,7 +1390,7 @@ async def play_coinflip(payload: GameRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in dice: {e}")
+        logger.error(f"Error in coinflip: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/game/slots")
@@ -1404,18 +1404,18 @@ async def play_slots(payload: GameRequest, request: Request):
         if not user or user.get("coins", 0) < payload.bet:
             raise HTTPException(status_code=400, detail="Not enough coins")
 
-        symbols = ["🍒", "🍋", "🍊", "7️⃣", "💎"]
+        symbols = ["CH", "LM", "OR", "77", "DM", "ST"]
         slots = [random.choice(symbols) for _ in range(3)]
         win = len(set(slots)) == 1
-        multiplier = 10 if "7️⃣" in slots and win else 5 if "💎" in slots and win else 3
+        multiplier = 10 if "77" in slots and win else 5 if "DM" in slots and win else 3
 
         if win:
             win_amount = payload.bet * multiplier
             user["coins"] += win_amount
-            message = f"🎰 JACKPOT! +{win_amount} coins!"
+            message = f"JACKPOT! +{win_amount} coins!"
         else:
             user["coins"] -= payload.bet
-            message = f"😞 You lost {payload.bet} coins"
+            message = f"You lost {payload.bet} coins"
 
         await update_user(payload.user_id, {"coins": user["coins"]})
         await invalidate_user_cache(payload.user_id)
@@ -1424,7 +1424,7 @@ async def play_slots(payload: GameRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in dice: {e}")
+        logger.error(f"Error in slots: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/game/dice")
@@ -1457,10 +1457,10 @@ async def play_dice(payload: GameRequest, request: Request):
         if win:
             win_amount = payload.bet * multiplier
             user["coins"] += win_amount
-            message = f"🎲 You won +{win_amount} coins!"
+            message = f"You won +{win_amount} coins!"
         else:
             user["coins"] -= payload.bet
-            message = f"😞 You lost {payload.bet} coins"
+            message = f"You lost {payload.bet} coins"
 
         await update_user(payload.user_id, {"coins": user["coins"]})
         await invalidate_user_cache(payload.user_id)
@@ -1494,22 +1494,22 @@ async def play_roulette(payload: GameRequest, request: Request):
         result = random.randint(0, 36)
 
         if result == 0:
-            result_color = 'green'
-            result_symbol = '🟢'
+            result_color = "green"
+            result_symbol = "GREEN"
         elif result in red_numbers:
-            result_color = 'red'
-            result_symbol = '🔴'
+            result_color = "red"
+            result_symbol = "RED"
         else:
-            result_color = 'black'
-            result_symbol = '⚫'
+            result_color = "black"
+            result_symbol = "BLACK"
 
         win = False
         multiplier = 0
 
-        if payload.bet_type == 'number' and payload.bet_value == result:
+        if payload.bet_type == "number" and payload.bet_value == result:
             win = True
             multiplier = 35
-        elif payload.bet_type == 'green' and result_color == 'green':
+        elif payload.bet_type == "green" and result_color == "green":
             win = True
             multiplier = 35
         elif payload.bet_type == result_color:
@@ -1519,10 +1519,10 @@ async def play_roulette(payload: GameRequest, request: Request):
         if win:
             win_amount = payload.bet * multiplier
             user["coins"] += win_amount
-            message = f"🎉 {result_symbol} {result} - You won +{win_amount} coins! (x{multiplier})"
+            message = f"{result_symbol} {result} - You won +{win_amount} coins! (x{multiplier})"
         else:
             user["coins"] -= payload.bet
-            message = f"😞 {result_symbol} {result} - You lost {payload.bet} coins"
+            message = f"{result_symbol} {result} - You lost {payload.bet} coins"
 
         await update_user(payload.user_id, {"coins": user["coins"]})
         await invalidate_user_cache(payload.user_id)
@@ -1539,7 +1539,7 @@ async def play_roulette(payload: GameRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in dice: {e}")
+        logger.error(f"Error in roulette: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 # ==================== TOURNAMENT ENDPOINTS ====================
 
@@ -1652,7 +1652,7 @@ async def get_player_rank(user_id: int, request: Request):
         logger.error(f"Error getting player rank: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# ==================== ЗАДАЧИ ====================
+# ==================== Р—РђР”РђР§Р ====================
 
 _task_completion_store = {}
 
@@ -1667,14 +1667,14 @@ async def get_tasks(user_id: int, request: Request):
         completed_tasks = await get_completed_tasks(user_id) or []
         
         tasks = [
-            {"id": "daily_bonus", "title": "📅 Daily Bonus", "description": "Come back every day", 
-             "reward": "25000 coins", "icon": "📅", "completed": "daily_bonus" in completed_tasks},
-            {"id": "energy_refill", "title": "⚡ Infinite Energy", "description": "5 minutes of unlimited energy", 
-             "reward": "⚡ 5 minutes", "icon": "⚡", "completed": "energy_refill" in completed_tasks},
-            {"id": "link_click", "title": "🔗 Follow Link", "description": "Click the link and get reward", 
-             "reward": "25000 coins", "icon": "🔗", "completed": False},
-            {"id": "invite_5_friends", "title": "👥 Invite 5 Friends", "description": "Invite 5 friends", 
-             "reward": "20000 coins", "icon": "👥", "completed": "invite_5_friends" in completed_tasks, 
+            {"id": "daily_bonus", "title": "рџ“… Daily Bonus", "description": "Come back every day", 
+             "reward": "25000 coins", "icon": "рџ“…", "completed": "daily_bonus" in completed_tasks},
+            {"id": "energy_refill", "title": "вљЎ Infinite Energy", "description": "5 minutes of unlimited energy", 
+             "reward": "вљЎ 5 minutes", "icon": "вљЎ", "completed": "energy_refill" in completed_tasks},
+            {"id": "link_click", "title": "рџ”— Follow Link", "description": "Click the link and get reward", 
+             "reward": "25000 coins", "icon": "рџ”—", "completed": False},
+            {"id": "invite_5_friends", "title": "рџ‘Ґ Invite 5 Friends", "description": "Invite 5 friends", 
+             "reward": "20000 coins", "icon": "рџ‘Ґ", "completed": "invite_5_friends" in completed_tasks, 
              "progress": min(user.get("referral_count", 0), 5), "total": 5}
         ]
         return tasks
@@ -1699,7 +1699,7 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
             await update_user(payload.user_id, {"coins": user["coins"]})
             await invalidate_user_cache(payload.user_id)
             
-            return {"success": True, "message": "🔗 +25000 coins!", "coins": user["coins"]}
+            return {"success": True, "message": "рџ”— +25000 coins!", "coins": user["coins"]}
         
         completed = await get_completed_tasks(payload.user_id) or []
         if task_id in completed:
@@ -1710,11 +1710,11 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
             await add_completed_task(payload.user_id, task_id)
             await update_user(payload.user_id, {"coins": user["coins"]})
             await invalidate_user_cache(payload.user_id)
-            return {"success": True, "message": "🎁 +25000 coins!", "coins": user["coins"]}
+            return {"success": True, "message": "рџЋЃ +25000 coins!", "coins": user["coins"]}
         
         elif task_id == "energy_refill":
             await add_completed_task(payload.user_id, task_id)
-            return {"success": True, "message": "⚡ Energy refill activated!"}
+            return {"success": True, "message": "вљЎ Energy refill activated!"}
         
         elif task_id == "invite_5_friends":
             if user.get("referral_count", 0) >= 5:
@@ -1722,7 +1722,7 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
                 await add_completed_task(payload.user_id, task_id)
                 await update_user(payload.user_id, {"coins": user["coins"]})
                 await invalidate_user_cache(payload.user_id)
-                return {"success": True, "message": "👥 +20000 coins!", "coins": user["coins"]}
+                return {"success": True, "message": "рџ‘Ґ +20000 coins!", "coins": user["coins"]}
             else:
                 raise HTTPException(status_code=400, detail="Not enough friends")
         
@@ -1733,7 +1733,7 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
         logger.error(f"Error in complete_task: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# ==================== ПАССИВНЫЙ ДОХОД ====================
+# ==================== РџРђРЎРЎРР’РќР«Р™ Р”РћРҐРћР” ====================
 
 @app.post("/api/passive-income")
 async def passive_income(payload: PassiveIncomeRequest, request: Request):
@@ -1747,13 +1747,13 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
         last_income = user.get('last_passive_income')
         now = datetime.utcnow()
         
-        # Считаем часы с последнего сбора
+        # РЎС‡РёС‚Р°РµРј С‡Р°СЃС‹ СЃ РїРѕСЃР»РµРґРЅРµРіРѕ СЃР±РѕСЂР°
         if last_income:
             hours_passed = int((now - last_income).total_seconds() / 3600)
         else:
             hours_passed = 1
         
-        # Ограничиваем максимум 24 часа, чтобы не начислить слишком много
+        # РћРіСЂР°РЅРёС‡РёРІР°РµРј РјР°РєСЃРёРјСѓРј 24 С‡Р°СЃР°, С‡С‚РѕР±С‹ РЅРµ РЅР°С‡РёСЃР»РёС‚СЊ СЃР»РёС€РєРѕРј РјРЅРѕРіРѕ
         hours_passed = min(hours_passed, 24)
         
         if hours_passed >= 1:
@@ -1771,7 +1771,7 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
                 "success": True, 
                 "coins": user["coins"], 
                 "income": total_income, 
-                "message": f"💰 +{total_income} coins за {hours_passed}ч"
+                "message": f"рџ’° +{total_income} coins Р·Р° {hours_passed}С‡"
             }
         
         return {"success": True, "coins": user["coins"], "income": 0}
@@ -1779,7 +1779,7 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
         logger.error(f"Error in passive_income: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# ==================== СКИНЫ ====================
+# ==================== РЎРљРРќР« ====================
 
 
 
@@ -1832,7 +1832,7 @@ async def unlock_skin(payload: SkinRequest, request: Request):
         owned = extra.get("owned_skins", ["default_SP"])
         ads_watched = int(extra.get("ads_watched", 0))
 
-        # 🔥 проверка скинов
+        # рџ”Ґ РїСЂРѕРІРµСЂРєР° СЃРєРёРЅРѕРІ
         SKINS_REQUIREMENTS = {
             "skin_video_1": 5,
             "skin_video_2": 10,
@@ -1851,7 +1851,7 @@ async def unlock_skin(payload: SkinRequest, request: Request):
             if ads_watched < required:
                 raise HTTPException(status_code=400, detail="Not enough ads watched")
 
-        # ✅ добавляем скин
+        # вњ… РґРѕР±Р°РІР»СЏРµРј СЃРєРёРЅ
         owned.append(payload.skin_id)
         extra["owned_skins"] = owned
 
@@ -1866,9 +1866,10 @@ async def unlock_skin(payload: SkinRequest, request: Request):
         logger.error(f"Unlock skin error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# ==================== ЗАПУСК ====================
+# ==================== Р—РђРџРЈРЎРљ ====================
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False)
+
 
