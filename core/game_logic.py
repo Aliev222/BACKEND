@@ -4,7 +4,6 @@ from core.game_config import (
     BASE_MAX_ENERGY,
     CLICK_BURST_ALLOWANCE,
     ENERGY_REGEN_SECONDS,
-    HOUR_VALUES,
     MAX_CLICK_BATCH_SIZE,
     MAX_REAL_CLICKS_PER_SECOND,
 )
@@ -52,11 +51,13 @@ def get_tap_value(level: int) -> int:
 
 
 def get_hour_value(level: int) -> int:
-    return HOUR_VALUES[min(level, len(HOUR_VALUES) - 1)]
+    level = max(0, int(level))
+    return 100 + (level * 35) + (level * level * 7)
 
 
 def get_max_energy(level: int) -> int:
-    return min(1000, BASE_MAX_ENERGY + level * 5)
+    level = max(0, int(level))
+    return BASE_MAX_ENERGY + level * 20
 
 
 def calculate_current_energy(user: dict, now: datetime | None = None) -> int:

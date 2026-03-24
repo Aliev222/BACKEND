@@ -5,6 +5,8 @@ import json
 from datetime import datetime
 import logging
 from CONFIG.settings import DATABASE_URL
+from core.game_config import BASE_MAX_ENERGY
+from core.game_logic import get_hour_value, get_max_energy, get_tap_value
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -26,8 +28,8 @@ class User(Base):
 
     profit_per_hour = Column(BigInteger, default=100)
     profit_per_tap = Column(Integer, default=1)
-    energy = Column(Integer, default=1000)
-    max_energy = Column(Integer, default=1000)
+    energy = Column(Integer, default=BASE_MAX_ENERGY)
+    max_energy = Column(Integer, default=BASE_MAX_ENERGY)
     level = Column(Integer, default=0)
 
     multitap_level = Column(Integer, default=0)
@@ -236,10 +238,10 @@ async def add_user(user_id: int, username: str = None, referrer_id: int = None):
             user_id=user_id,
             username=username or f"user_{user_id}",
             coins=0,
-            profit_per_hour=100,
-            profit_per_tap=1,
-            energy=1000,
-            max_energy=1000,
+            profit_per_hour=get_hour_value(0),
+            profit_per_tap=get_tap_value(0),
+            energy=get_max_energy(0),
+            max_energy=get_max_energy(0),
             level=0,
             multitap_level=0,
             profit_level=0,

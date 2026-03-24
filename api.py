@@ -42,9 +42,9 @@ from core.game_config import (
     CLICK_BUFFER_KEY,
     CLICK_FLUSH_INTERVAL,
     ENERGY_REGEN_SECONDS,
-    HOUR_VALUES,
     MAX_BET,
     MAX_CLICK_BATCH_SIZE,
+    MAX_UPGRADE_LEVEL,
     MAX_REAL_CLICKS_PER_SECOND,
     MAX_REWARD_PER_VIDEO,
     MIN_BET,
@@ -525,8 +525,8 @@ async def get_user_data(user_id: int, request: Request):
             "coins": user.get("coins", 0),
             "energy": current_energy,
             "max_energy": max_energy,
-            "profit_per_tap": user.get("profit_per_tap", 1),
-            "profit_per_hour": user.get("profit_per_hour", 100),
+            "profit_per_tap": user.get("profit_per_tap", get_tap_value(user.get("multitap_level", 0))),
+            "profit_per_hour": user.get("profit_per_hour", get_hour_value(user.get("profit_level", 0))),
             "multitap_level": user.get("multitap_level", 0),
             "profit_level": user.get("profit_level", 0),
             "energy_level": user.get("energy_level", 0),
@@ -833,14 +833,25 @@ async def process_upgrade(payload: UpgradeRequest, request: Request):
         if user.get("coins", 0) < price:
             raise HTTPException(status_code=400, detail="Not enough coins")
 
-        user["coins"] -= price
-        user[f"{boost_type}_level"] = current_level + 1
-        updates = {"coins": user["coins"], f"{boost_type}_level": current_level + 1}
+        new_level = current_level + 1
+        new_multitap_level = new_level if boost_type == "multitap" else int(user.get("multitap_level", 0))
+        new_profit_level = new_level if boost_type == "profit" else int(user.get("profit_level", 0))
+        new_energy_level = new_level if boost_type == "energy" else int(user.get("energy_level", 0))
+        new_profit_per_tap = get_tap_value(new_multitap_level)
+        new_profit_per_hour = get_hour_value(new_profit_level)
+        new_max_energy = get_max_energy(new_energy_level)
+        new_coins = int(user.get("coins", 0)) - price
+
+        updates = {
+            "coins": new_coins,
+            f"{boost_type}_level": new_level,
+            "profit_per_tap": new_profit_per_tap,
+            "profit_per_hour": new_profit_per_hour,
+            "max_energy": new_max_energy,
+        }
 
         if boost_type == "energy":
-            new_max = get_max_energy(current_level + 1)
-            updates["max_energy"] = new_max
-            updates["energy"] = new_max
+            updates["energy"] = new_max_energy
 
         await update_user(payload.user_id, updates)
         await invalidate_user_cache(payload.user_id)
@@ -849,21 +860,89 @@ async def process_upgrade(payload: UpgradeRequest, request: Request):
         
         return {
             "success": True,
-            "coins": user["coins"],
-            "new_level": current_level + 1,
+            "coins": new_coins,
+            "new_level": new_level,
             "next_cost": UPGRADE_PRICES[boost_type][current_level + 1] 
                 if current_level + 1 < len(UPGRADE_PRICES[boost_type]) else 0,
-            "profit_per_tap": get_tap_value(user.get("multitap_level", 0) + 
-                (1 if boost_type == "multitap" else 0)),
-            "profit_per_hour": get_hour_value(user.get("profit_level", 0) + 
-                (1 if boost_type == "profit" else 0)),
-            "max_energy": get_max_energy(user.get("energy_level", 0) + 
-                (1 if boost_type == "energy" else 0))
+            "profit_per_tap": new_profit_per_tap,
+            "profit_per_hour": new_profit_per_hour,
+            "max_energy": new_max_energy
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error in process_upgrade: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/upgrade-all")
+async def process_upgrade_all(payload: UserIdRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("upgrade_all", payload.user_id, ttl=3)
+        user = await get_user_cached(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        sequence = ("multitap", "profit", "energy")
+        current_levels = {boost: int(user.get(f"{boost}_level", 0)) for boost in sequence}
+
+        if any(current_levels[boost] >= MAX_UPGRADE_LEVEL for boost in sequence):
+            raise HTTPException(status_code=400, detail="Max level reached")
+
+        total_cost = sum(UPGRADE_PRICES[boost][current_levels[boost]] for boost in sequence)
+        current_coins = int(user.get("coins", 0))
+        if current_coins < total_cost:
+            raise HTTPException(status_code=400, detail="Not enough coins")
+
+        new_multitap_level = current_levels["multitap"] + 1
+        new_profit_level = current_levels["profit"] + 1
+        new_energy_level = current_levels["energy"] + 1
+        new_profit_per_tap = get_tap_value(new_multitap_level)
+        new_profit_per_hour = get_hour_value(new_profit_level)
+        new_max_energy = get_max_energy(new_energy_level)
+        new_coins = current_coins - total_cost
+
+        updates = {
+            "coins": new_coins,
+            "multitap_level": new_multitap_level,
+            "profit_level": new_profit_level,
+            "energy_level": new_energy_level,
+            "profit_per_tap": new_profit_per_tap,
+            "profit_per_hour": new_profit_per_hour,
+            "max_energy": new_max_energy,
+            "energy": new_max_energy,
+        }
+
+        await update_user(payload.user_id, updates)
+        await invalidate_user_cache(payload.user_id)
+
+        next_prices = {
+            boost: (
+                UPGRADE_PRICES[boost][current_levels[boost] + 1]
+                if current_levels[boost] + 1 < len(UPGRADE_PRICES[boost]) else 0
+            )
+            for boost in sequence
+        }
+
+        return {
+            "success": True,
+            "coins": new_coins,
+            "levels": {
+                "multitap": new_multitap_level,
+                "profit": new_profit_level,
+                "energy": new_energy_level,
+            },
+            "prices": next_prices,
+            "profit_per_tap": new_profit_per_tap,
+            "profit_per_hour": new_profit_per_hour,
+            "max_energy": new_max_energy,
+            "energy": new_max_energy,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in process_upgrade_all: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/update-energy")

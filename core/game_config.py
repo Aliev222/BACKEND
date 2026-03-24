@@ -23,6 +23,8 @@ RATE_LIMITS = {
     "game_action": (30, 60),
 }
 
+MAX_UPGRADE_LEVEL = 100
+
 UPGRADE_PRICES = {
     "multitap": [
         50, 75, 100, 150, 200, 300, 450, 650, 900, 1200,
