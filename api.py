@@ -8,6 +8,7 @@ import time
 import json
 import os
 import logging
+import httpx
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from sqlalchemy import select
@@ -67,6 +68,8 @@ from core.game_logic import (
     resolve_max_energy,
 )
 from core.telegram_auth import verify_telegram_init_data
+from core.stars_skins import get_stars_skin_price
+from CONFIG.settings import BOT_TOKEN
 
 
 REDIS_URL = os.getenv("REDIS_URL")
@@ -74,6 +77,8 @@ redis_client = None
 LOCAL_LOCKS: dict[str, float] = {}
 LOCAL_IDEMPOTENCY_KEYS: dict[str, float] = {}
 LOCAL_RATE_LIMITS_STATE: dict[str, deque[float]] = defaultdict(deque)
+ONLINE_USERS_KEY = "online:users"
+ONLINE_WINDOW_SECONDS = 75
 # Single lightweight reconnect helper to avoid code duplication
 async def try_reconnect_redis() -> None:
     global redis_client
@@ -113,6 +118,70 @@ async def redis_or_503() -> redis.Redis:
     if conn is None:
         raise HTTPException(status_code=503, detail="Redis unavailable")
     return conn
+
+
+async def touch_online_user(user_id: int) -> int:
+    conn = await get_redis_or_none()
+    if conn is None:
+        return 0
+
+    now_ts = int(time.time())
+    cutoff = now_ts - ONLINE_WINDOW_SECONDS
+    try:
+        await conn.zadd(ONLINE_USERS_KEY, {str(user_id): now_ts})
+        await conn.zremrangebyscore(ONLINE_USERS_KEY, 0, cutoff)
+        online_now = await conn.zcount(ONLINE_USERS_KEY, cutoff, "+inf")
+        await conn.expire(ONLINE_USERS_KEY, ONLINE_WINDOW_SECONDS * 2)
+        return int(online_now or 0)
+    except Exception as e:
+        logger.warning(f"Online heartbeat failed: {e}")
+        return 0
+
+
+async def get_online_users_count() -> int:
+    conn = await get_redis_or_none()
+    if conn is None:
+        return 0
+
+    now_ts = int(time.time())
+    cutoff = now_ts - ONLINE_WINDOW_SECONDS
+    try:
+        await conn.zremrangebyscore(ONLINE_USERS_KEY, 0, cutoff)
+        online_now = await conn.zcount(ONLINE_USERS_KEY, cutoff, "+inf")
+        return int(online_now or 0)
+    except Exception as e:
+        logger.warning(f"Online count fetch failed: {e}")
+        return 0
+
+
+async def create_telegram_stars_invoice_link(*, user_id: int, skin_id: str, price: int) -> str:
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=500, detail="Bot token not configured")
+
+    payload = f"stars_skin:{user_id}:{skin_id}"
+    request_body = {
+        "title": f"Skin {skin_id}",
+        "description": f"Unlock premium skin {skin_id}",
+        "payload": payload,
+        "currency": "XTR",
+        "prices": [{"label": skin_id, "amount": price}],
+        "provider_token": ""
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink",
+            json=request_body
+        )
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail="Telegram invoice creation failed")
+
+    data = response.json()
+    if not data.get("ok") or not data.get("result"):
+        raise HTTPException(status_code=502, detail="Telegram invoice creation failed")
+
+    return data["result"]
 
 
 # ==================== METRICS ====================
@@ -1543,6 +1612,72 @@ async def play_roulette(payload: GameRequest, request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 # ==================== TOURNAMENT ENDPOINTS ====================
 
+@app.post("/api/online/heartbeat")
+async def online_heartbeat(payload: UserIdRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        online_now = await touch_online_user(payload.user_id)
+        return {"success": True, "online_now": online_now}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in online heartbeat: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/online/count")
+async def get_online_count():
+    try:
+        online_now = await get_online_users_count()
+        return {"success": True, "online_now": online_now}
+    except Exception as e:
+        logger.error(f"Error getting online count: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/skins/stars-invoice")
+async def create_skin_stars_invoice(payload: SkinRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("stars_skin_invoice", payload.user_id, ttl=3)
+
+        price = get_stars_skin_price(payload.skin_id)
+        if price is None:
+            raise HTTPException(status_code=400, detail="Skin is not sold for Stars")
+
+        user = await get_user_cached(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except Exception:
+                extra = {}
+
+        owned_skins = extra.get("owned_skins", ["default_SP"])
+        if payload.skin_id in owned_skins:
+            raise HTTPException(status_code=400, detail="Skin already owned")
+
+        invoice_link = await create_telegram_stars_invoice_link(
+            user_id=payload.user_id,
+            skin_id=payload.skin_id,
+            price=price
+        )
+
+        return {
+            "success": True,
+            "invoice_link": invoice_link,
+            "price": price,
+            "skin_id": payload.skin_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating Stars invoice: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 @app.get("/api/tournament/leaderboard")
 async def get_tournament_leaderboard():
     """Get top 5 players from Redis leaderboard"""
@@ -1590,7 +1725,8 @@ async def get_tournament_leaderboard():
             "success": True,
             "players": players,
             "prize_pool": TOURNAMENT_PRIZE_POOL,
-            "time_left": time_left
+            "time_left": time_left,
+            "online_now": await get_online_users_count()
         }
 
     except Exception as e:
