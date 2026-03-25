@@ -1309,20 +1309,40 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         safe_requested_clicks = min(payload.clicks, MAX_CLICK_BATCH_SIZE)
         allowed_clicks = get_allowed_clicks(user, now, safe_requested_clicks)
 
-        effective_clicks = min(allowed_clicks, current_energy)
+        effective_clicks = allowed_clicks if mega_boost_active else min(allowed_clicks, current_energy)
         gained = effective_clicks * coin_per_tap
 
         # РЅРѕРІС‹Рµ Р·РЅР°С‡РµРЅРёСЏ
-        new_energy = max(0, current_energy - effective_clicks)
+        new_energy = current_energy if mega_boost_active else max(0, current_energy - effective_clicks)
         new_coins = int(user.get("coins", 0)) + gained
 
-        # РЎРѕС…СЂР°РЅСЏРµРј СЌРЅРµСЂРіРёСЋ Рё Р±Р°Р»Р°РЅСЃ РѕРґРЅРёРј server-side update РЅР° Р±Р°С‚С‡ РєР»РёРєРѕРІ.
-        await update_user(payload.user_id, {
+        update_data = {
             "coins": new_coins,
             "max_energy": max_energy,
-            "energy": new_energy,
-            "last_energy_update": now
-        })
+        }
+
+        if mega_boost_active:
+            stored_energy = int(user.get("energy", 0))
+            last_update = normalize_dt(user.get("last_energy_update"))
+
+            if stored_energy != current_energy:
+                update_data["energy"] = current_energy
+
+            if last_update:
+                seconds_passed = max(0, int((now - last_update).total_seconds()))
+                gained_energy = seconds_passed // ENERGY_REGEN_SECONDS
+                if gained_energy > 0:
+                    update_data["last_energy_update"] = last_update + timedelta(
+                        seconds=gained_energy * ENERGY_REGEN_SECONDS
+                    )
+            elif "energy" in update_data:
+                update_data["last_energy_update"] = now
+        else:
+            update_data["energy"] = new_energy
+            update_data["last_energy_update"] = now
+
+        # РЎРѕС…СЂР°РЅСЏРµРј СЌРЅРµСЂРіРёСЋ Рё Р±Р°Р»Р°РЅСЃ РѕРґРЅРёРј server-side update РЅР° Р±Р°С‚С‡ РєР»РёРєРѕРІ.
+        await update_user(payload.user_id, update_data)
 
         conn = await get_redis_or_none()
         if conn and gained > 0:
