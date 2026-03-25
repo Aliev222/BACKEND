@@ -79,6 +79,9 @@ LOCAL_IDEMPOTENCY_KEYS: dict[str, float] = {}
 LOCAL_RATE_LIMITS_STATE: dict[str, deque[float]] = defaultdict(deque)
 ONLINE_USERS_KEY = "online:users"
 ONLINE_WINDOW_SECONDS = 75
+REFERRAL_SHARE_RATE = 0.05
+REFERRAL_DAILY_SHARE_LIMIT = 50000
+REFERRAL_SPECIAL_SKIN_ID = "referral-special.pngSP"
 # Single lightweight reconnect helper to avoid code duplication
 async def try_reconnect_redis() -> None:
     global redis_client
@@ -255,6 +258,60 @@ async def invalidate_user_cache(user_id: int):
     conn = await get_redis_or_none()
     if conn:
         await conn.delete(f"{USER_CACHE_PREFIX}{user_id}")
+
+
+def parse_extra_data(extra_raw) -> dict:
+    if isinstance(extra_raw, dict):
+        return extra_raw
+    if isinstance(extra_raw, str) and extra_raw:
+        try:
+            return json.loads(extra_raw)
+        except Exception:
+            return {}
+    return {}
+
+
+async def grant_referral_share_bonus(referral_user: dict, source_income: int) -> int:
+    if source_income <= 0:
+        return 0
+
+    referral_user_id = int(referral_user.get("user_id", 0))
+    referrer_id = int(referral_user.get("referrer_id") or 0)
+    if not referrer_id or referrer_id == referral_user_id:
+        return 0
+
+    referrer = await get_user_cached(referrer_id)
+    if not referrer:
+        return 0
+
+    if int(referrer.get("referrer_id") or 0) == referral_user_id:
+        return 0
+
+    bonus = int(source_income * REFERRAL_SHARE_RATE)
+    if bonus <= 0:
+        return 0
+
+    extra = parse_extra_data(referrer.get("extra_data"))
+    today_key = datetime.utcnow().date().isoformat()
+    if extra.get("referral_commission_date") != today_key:
+        extra["referral_commission_date"] = today_key
+        extra["referral_commission_today"] = 0
+
+    today_amount = int(extra.get("referral_commission_today", 0))
+    available = max(0, REFERRAL_DAILY_SHARE_LIMIT - today_amount)
+    bonus = min(bonus, available)
+    if bonus <= 0:
+        return 0
+
+    extra["referral_commission_today"] = today_amount + bonus
+
+    await update_user(referrer_id, {
+        "coins": int(referrer.get("coins", 0)) + bonus,
+        "referral_earnings": int(referrer.get("referral_earnings", 0)) + bonus,
+        "extra_data": extra,
+    })
+    await invalidate_user_cache(referrer_id)
+    return bonus
 
 
 
@@ -1160,6 +1217,7 @@ DEFAULT_SKIN_ID = "default.pngSP"
 
 SKIN_MULTIPLIERS = {
     DEFAULT_SKIN_ID: 1.0,
+    REFERRAL_SPECIAL_SKIN_ID: 1.8,
     "10lvl.pngSP": 1.2,
     "25lvl.pngSP": 1.2,
     "50lvl.pngSP": 1.2,
@@ -1355,6 +1413,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
 
         # вњ… РёРЅРІР°Р»РёРґРёСЂСѓРµРј РєСЌС€
         await invalidate_user_cache(payload.user_id)
+        referral_bonus = await grant_referral_share_bonus(user, gained)
 
         return {
             "success": True,
@@ -1368,7 +1427,8 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             "coin_per_tap": coin_per_tap,
             "profit_per_tap": tap_value,
             "profit_per_hour": get_hour_value(int(user.get("profit_level", 0))),
-            "mega_boost_active": mega_boost_active
+            "mega_boost_active": mega_boost_active,
+            "referral_bonus_paid": referral_bonus
         }
 
     except HTTPException:
@@ -1408,10 +1468,17 @@ async def register_user(payload: RegisterRequest, request: Request):
                 await invalidate_user_cache(payload.user_id)
             return {"status": "exists", "user": existing}
 
+        valid_referrer_id = None
+        requested_referrer_id = int(payload.referrer_id or 0)
+        if requested_referrer_id and requested_referrer_id != payload.user_id:
+            referrer = await get_user_cached(requested_referrer_id)
+            if referrer and int(referrer.get("referrer_id") or 0) != payload.user_id:
+                valid_referrer_id = requested_referrer_id
+
         await create_user(
             user_id=payload.user_id,
             username=telegram_user.get("username") or payload.username,
-            referrer_id=payload.referrer_id
+            referrer_id=valid_referrer_id
         )
 
         created_user = await get_user_cached(payload.user_id)
@@ -1922,11 +1989,13 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
             "last_passive_income": new_last_income
         })
         await invalidate_user_cache(payload.user_id)
+        referral_bonus = await grant_referral_share_bonus(user, total_income)
 
         return {
             "success": True,
             "coins": new_coins,
             "income": total_income,
+            "referral_bonus_paid": referral_bonus,
             "message": f"+{total_income} passive income"
         }
     except Exception as e:

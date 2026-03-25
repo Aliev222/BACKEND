@@ -12,6 +12,9 @@ engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
+REFERRAL_SIGNUP_BONUS = 25000
+REFERRAL_SPECIAL_SKIN_ID = "referral-special.pngSP"
+
 
 # Модель пользователя
 class User(Base):
@@ -129,17 +132,37 @@ async def add_referral_bonus(referrer_id: int, referral_id: int):
             )
             referrer = result.scalar_one_or_none()
             
-            if not referrer:
+            if not referrer or referrer_id == referral_id:
                 logging.error(f"❌ Реферер {referrer_id} не найден при попытке начисления бонуса за реферала {referral_id}")
                 return False
-            
-            # Обновляем поля реферера
-            referrer.coins += 5000  # Бонус за реферала
+
+            referral_result = await session.execute(
+                select(User).where(User.user_id == referral_id)
+            )
+            referral = referral_result.scalar_one_or_none()
+            if referral and referral.referrer_id == referrer_id and referrer.referrer_id == referral_id:
+                logging.error(f"вќЊ РћС‚РєР»РѕРЅРµРЅ РІР·Р°РёРјРЅС‹Р№ СЂРµС„РµСЂР°Р»СЊРЅС‹Р№ С†РёРєР»: {referrer_id} <-> {referral_id}")
+                return False
+
+            extra_data = {}
+            if referrer.extra_data:
+                try:
+                    extra_data = json.loads(referrer.extra_data)
+                except json.JSONDecodeError:
+                    extra_data = {}
+
+            owned_skins = extra_data.get("owned_skins", ["default.pngSP"])
+            if REFERRAL_SPECIAL_SKIN_ID not in owned_skins:
+                owned_skins.append(REFERRAL_SPECIAL_SKIN_ID)
+            extra_data["owned_skins"] = owned_skins
+
+            referrer.coins += REFERRAL_SIGNUP_BONUS
             referrer.referral_count += 1
-            referrer.referral_earnings += 5000
+            referrer.referral_earnings += REFERRAL_SIGNUP_BONUS
+            referrer.extra_data = json.dumps(extra_data)
             
             await session.commit()
-            logging.info(f"✅ Реферер {referrer_id} получил +5000 монет за реферала {referral_id}")
+            logging.info(f"✅ Реферер {referrer_id} получил +{REFERRAL_SIGNUP_BONUS} монет за реферала {referral_id}")
             logging.info(f"📊 Теперь у реферера {referrer_id}: coins={referrer.coins}, count={referrer.referral_count}")
             
             return True
@@ -185,7 +208,7 @@ async def get_referrals_list(user_id: int):
                     "user_id": ref.user_id,
                     "username": ref.username,
                     "joined_at": ref.created_at.isoformat() if ref.created_at else None,
-                    "earned": 5000  # Фиксированный бонус за регистрацию
+                    "earned": REFERRAL_SIGNUP_BONUS
                 }
                 for ref in referrals
             ]
