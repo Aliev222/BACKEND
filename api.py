@@ -607,8 +607,8 @@ async def get_user_data(user_id: int, request: Request):
             "multitap_level": user.get("multitap_level", 0),
             "profit_level": user.get("profit_level", 0),
             "energy_level": user.get("energy_level", 0),
-            "owned_skins": (user.get("extra_data", {}) or {}).get("owned_skins", ["default_SP"]),
-            "selected_skin": (user.get("extra_data", {}) or {}).get("selected_skin", "default_SP"),
+            "owned_skins": (user.get("extra_data", {}) or {}).get("owned_skins", [DEFAULT_SKIN_ID]),
+            "selected_skin": (user.get("extra_data", {}) or {}).get("selected_skin", DEFAULT_SKIN_ID),
             "ads_watched": (user.get("extra_data", {}) or {}).get("ads_watched", 0),
             "regen_seconds": ENERGY_REGEN_SECONDS,
             "server_time": now.isoformat()
@@ -1155,30 +1155,31 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
         logger.error(f"Error in sync_energy: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+DEFAULT_SKIN_ID = "default.pngSP"
+
 SKIN_MULTIPLIERS = {
-    "default_SP": 1.0,
-
-    "skin_lvl_1": 1.1,
-    "skin_lvl_2": 1.2,
-    "skin_lvl_3": 1.3,
-    "skin_lvl_4": 1.4,
-    "skin_lvl_5": 1.5,
-    "skin_lvl_6": 1.6,
-    "skin_lvl_7": 2.0,
-
-    "skin_video_1": 1.2,
-    "skin_video_2": 1.3,
-    "skin_video_3": 1.4,
-    "skin_video_4": 1.5,
-    "skin_video_5": 1.75,
-    "skin_video_6": 2.0,
-
-    "skin_friend_1": 1.1,
-    "skin_friend_2": 1.2,
-    "skin_friend_3": 1.3,
-    "skin_friend_4": 1.5,
-    "skin_friend_5": 1.75,
-    "skin_friend_6": 2.0,
+    DEFAULT_SKIN_ID: 1.0,
+    "10lvl.pngSP": 1.2,
+    "25lvl.pngSP": 1.2,
+    "50lvl.pngSP": 1.2,
+    "75lvl.pngSP": 1.2,
+    "100lvl.pngSP": 1.2,
+    "video.pngSP": 1.5,
+    "video2.pngSP": 1.5,
+    "video3.pngSP": 1.5,
+    "video4.pngSP": 1.5,
+    "video5.pngSP": 1.5,
+    "video6.pngSP": 1.5,
+    "video7.pngSP": 1.5,
+    "video8.pngSP": 1.5,
+    "stars1.pngSP": 2.0,
+    "stars2.pngSP": 2.0,
+    "stars3.pngSP": 2.0,
+    "stars4.pngSP": 2.0,
+    "stars5.pngSP": 2.0,
+    "stars6.pngSP": 2.0,
+    "stars7.pngSP": 2.0,
+    "stars8.pngSP": 2.0,
 }
 
 
@@ -1190,7 +1191,7 @@ def get_selected_skin_multiplier(user: dict) -> float:
         except:
             extra = {}
 
-    selected_skin = extra.get("selected_skin", "default_SP")
+    selected_skin = extra.get("selected_skin", DEFAULT_SKIN_ID)
     return SKIN_MULTIPLIERS.get(selected_skin, 1.0)
 
 
@@ -1218,27 +1219,19 @@ def is_mega_boost_active(user: dict) -> bool:
         return False
 
 SKIN_REQUIREMENTS = {
-    "skin_lvl_1": {"type": "level", "value": 1},
-    "skin_lvl_2": {"type": "level", "value": 10},
-    "skin_lvl_3": {"type": "level", "value": 25},
-    "skin_lvl_4": {"type": "level", "value": 50},
-    "skin_lvl_5": {"type": "level", "value": 75},
-    "skin_lvl_6": {"type": "level", "value": 100},
-    "skin_lvl_7": {"type": "level", "value": 150},
-
-    "skin_video_1": {"type": "ads", "count": 1},
-    "skin_video_2": {"type": "ads", "count": 5},
-    "skin_video_3": {"type": "ads", "count": 10},
-    "skin_video_4": {"type": "ads", "count": 20},
-    "skin_video_5": {"type": "ads", "count": 50},
-    "skin_video_6": {"type": "ads", "count": 100},
-
-    "skin_friend_1": {"type": "friends", "count": 1},
-    "skin_friend_2": {"type": "friends", "count": 3},
-    "skin_friend_3": {"type": "friends", "count": 5},
-    "skin_friend_4": {"type": "friends", "count": 10},
-    "skin_friend_5": {"type": "friends", "count": 20},
-    "skin_friend_6": {"type": "friends", "count": 50},
+    "10lvl.pngSP": {"type": "level", "value": 10},
+    "25lvl.pngSP": {"type": "level", "value": 25},
+    "50lvl.pngSP": {"type": "level", "value": 50},
+    "75lvl.pngSP": {"type": "level", "value": 75},
+    "100lvl.pngSP": {"type": "level", "value": 100},
+    "video.pngSP": {"type": "ads", "count": 10},
+    "video2.pngSP": {"type": "ads", "count": 10},
+    "video3.pngSP": {"type": "ads", "count": 10},
+    "video4.pngSP": {"type": "ads", "count": 10},
+    "video5.pngSP": {"type": "ads", "count": 10},
+    "video6.pngSP": {"type": "ads", "count": 10},
+    "video7.pngSP": {"type": "ads", "count": 10},
+    "video8.pngSP": {"type": "ads", "count": 10},
 }
 
 
@@ -1302,7 +1295,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             except Exception:
                 extra = {}
 
-        selected_skin = extra.get("selected_skin", "default_SP")
+        selected_skin = extra.get("selected_skin", DEFAULT_SKIN_ID)
         skin_multiplier = float(SKIN_MULTIPLIERS.get(selected_skin, 1.0))
 
         mega_boost_active = is_mega_boost_active(user)
@@ -1656,7 +1649,7 @@ async def create_skin_stars_invoice(payload: SkinRequest, request: Request):
             except Exception:
                 extra = {}
 
-        owned_skins = extra.get("owned_skins", ["default_SP"])
+        owned_skins = extra.get("owned_skins", [DEFAULT_SKIN_ID])
         if payload.skin_id in owned_skins:
             raise HTTPException(status_code=400, detail="Skin already owned")
 
@@ -1879,38 +1872,42 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
         user = await get_user(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        last_income = user.get('last_passive_income')
+
+        last_income = normalize_dt(user.get("last_passive_income"))
         now = datetime.utcnow()
-        
-        # РЎС‡РёС‚Р°РµРј С‡Р°СЃС‹ СЃ РїРѕСЃР»РµРґРЅРµРіРѕ СЃР±РѕСЂР°
-        if last_income:
-            hours_passed = int((now - last_income).total_seconds() / 3600)
-        else:
-            hours_passed = 1
-        
-        # РћРіСЂР°РЅРёС‡РёРІР°РµРј РјР°РєСЃРёРјСѓРј 24 С‡Р°СЃР°, С‡С‚РѕР±С‹ РЅРµ РЅР°С‡РёСЃР»РёС‚СЊ СЃР»РёС€РєРѕРј РјРЅРѕРіРѕ
-        hours_passed = min(hours_passed, 24)
-        
-        if hours_passed >= 1:
-            hour_value = get_hour_value(user.get("profit_level", 0))
-            total_income = hour_value * hours_passed
-            
-            user["coins"] += total_income
-            await update_user(payload.user_id, {
-                "coins": user["coins"],
-                "last_passive_income": now
-            })
-            
-            
-            return {
-                "success": True, 
-                "coins": user["coins"], 
-                "income": total_income, 
-                "message": f"рџ’° +{total_income} coins Р·Р° {hours_passed}С‡"
-            }
-        
-        return {"success": True, "coins": user["coins"], "income": 0}
+
+        if not last_income:
+            await update_user(payload.user_id, {"last_passive_income": now})
+            await invalidate_user_cache(payload.user_id)
+            return {"success": True, "coins": user["coins"], "income": 0, "message": ""}
+
+        elapsed_seconds = max(0.0, (now - last_income).total_seconds())
+        elapsed_seconds = min(elapsed_seconds, 24 * 3600)
+
+        hour_value = int(user.get("profit_per_hour", get_hour_value(user.get("profit_level", 0))))
+        if hour_value <= 0 or elapsed_seconds <= 0:
+            return {"success": True, "coins": user["coins"], "income": 0, "message": ""}
+
+        total_income = int((hour_value * elapsed_seconds) // 3600)
+        if total_income <= 0:
+            return {"success": True, "coins": user["coins"], "income": 0, "message": ""}
+
+        consumed_seconds = (total_income * 3600) / hour_value
+        new_last_income = min(now, last_income + timedelta(seconds=consumed_seconds))
+        new_coins = int(user.get("coins", 0)) + total_income
+
+        await update_user(payload.user_id, {
+            "coins": new_coins,
+            "last_passive_income": new_last_income
+        })
+        await invalidate_user_cache(payload.user_id)
+
+        return {
+            "success": True,
+            "coins": new_coins,
+            "income": total_income,
+            "message": f"+{total_income} passive income"
+        }
     except Exception as e:
         logger.error(f"Error in passive_income: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1932,7 +1929,7 @@ async def select_skin(payload: SkinRequest, request: Request):
         if not isinstance(extra, dict):
             extra = {}
 
-        owned_skins = extra.get("owned_skins", ["default_SP"])
+        owned_skins = extra.get("owned_skins", [DEFAULT_SKIN_ID])
         if payload.skin_id not in owned_skins:
             raise HTTPException(status_code=400, detail="Skin not owned")
 
@@ -1965,24 +1962,14 @@ async def unlock_skin(payload: SkinRequest, request: Request):
             except:
                 extra = {}
 
-        owned = extra.get("owned_skins", ["default_SP"])
+        owned = extra.get("owned_skins", [DEFAULT_SKIN_ID])
         ads_watched = int(extra.get("ads_watched", 0))
-
-        # рџ”Ґ РїСЂРѕРІРµСЂРєР° СЃРєРёРЅРѕРІ
-        SKINS_REQUIREMENTS = {
-            "skin_video_1": 5,
-            "skin_video_2": 10,
-            "skin_video_3": 20,
-            "skin_video_4": 25,
-            "skin_video_5": 35,
-            "skin_video_6": 50,
-        }
 
         if payload.skin_id in owned:
             return {"success": True}
 
-        if payload.skin_id in SKINS_REQUIREMENTS:
-            required = SKINS_REQUIREMENTS[payload.skin_id]
+        if payload.skin_id in SKIN_REQUIREMENTS and SKIN_REQUIREMENTS[payload.skin_id]["type"] == "ads":
+            required = int(SKIN_REQUIREMENTS[payload.skin_id]["count"])
 
             if ads_watched < required:
                 raise HTTPException(status_code=400, detail="Not enough ads watched")

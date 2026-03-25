@@ -132,7 +132,7 @@ async def handle_successful_payment(message: types.Message) -> None:
         except Exception:
             extra = {}
 
-    owned_skins = list(extra.get("owned_skins", ["default_SP"]))
+    owned_skins = list(extra.get("owned_skins", ["default.pngSP"]))
     if skin_id not in owned_skins:
         owned_skins.append(skin_id)
         extra["owned_skins"] = owned_skins

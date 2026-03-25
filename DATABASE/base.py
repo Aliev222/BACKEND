@@ -252,7 +252,7 @@ async def add_user(user_id: int, username: str = None, referrer_id: int = None):
             referrer_id=referrer_id,
             referral_count=0,
             referral_earnings=0,
-            extra_data=json.dumps({"owned_skins": ["default_SP"], "ads_watched": 0})  # ✅ ИСПРАВЛЕНО
+            extra_data=json.dumps({"owned_skins": ["default.pngSP"], "selected_skin": "default.pngSP", "ads_watched": 0})
         )
         
         session.add(new_user)
