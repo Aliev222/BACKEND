@@ -401,11 +401,12 @@ async def metrics():
 # ==================== РњРћР”Р•Р›Р ====================
 
 # ==================== Р’РЎРџРћРњРћР“РђРўР•Р›Р¬РќР«Р• Р¤РЈРќРљР¦РР ====================
-async def acquire_once_lock(key: str, ttl: int = 10) -> bool:
+async def acquire_once_lock(key: str, ttl: float = 10) -> bool:
     conn = await get_redis_or_none()
     if conn:
         try:
-            result = await conn.set(key, "1", ex=ttl, nx=True)
+            ttl_ms = max(1, int(float(ttl) * 1000))
+            result = await conn.set(key, "1", px=ttl_ms, nx=True)
             return bool(result)
         except Exception as e:
             logger.warning(f"Redis acquire_once_lock failed, fallback to local: {e}")
@@ -436,7 +437,7 @@ async def acquire_idempotency_key(key: str, ttl: int = 60) -> bool:
     return True
 
 
-async def require_user_action_lock(namespace: str, user_id: int, ttl: int = 5):
+async def require_user_action_lock(namespace: str, user_id: int, ttl: float = 5):
     lock_key = f"lock:{namespace}:{user_id}"
     locked = await acquire_once_lock(lock_key, ttl=ttl)
     if not locked:
@@ -893,7 +894,7 @@ async def increment_ads_watched(payload: UserIdRequest, request: Request):
 async def process_upgrade(payload: UpgradeRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("upgrade", payload.user_id, ttl=3)
+        await require_user_action_lock("upgrade", payload.user_id, ttl=0.35)
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -956,7 +957,7 @@ async def process_upgrade(payload: UpgradeRequest, request: Request):
 async def process_upgrade_all(payload: UserIdRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("upgrade_all", payload.user_id, ttl=3)
+        await require_user_action_lock("upgrade_all", payload.user_id, ttl=0.35)
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
