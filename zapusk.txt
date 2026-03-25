@@ -1,0 +1,3 @@
+del database.db
+python api.py
+cd C:\Users\User\Desktop\BACKEND

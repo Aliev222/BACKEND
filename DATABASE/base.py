@@ -1,0 +1,351 @@
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import Column, Integer, String, BigInteger, select, DateTime, Index, UniqueConstraint
+import json
+from datetime import datetime
+import logging
+from CONFIG.settings import DATABASE_URL
+from core.game_config import BASE_MAX_ENERGY
+from core.game_logic import get_hour_value, get_max_energy, get_tap_value
+
+engine = create_async_engine(DATABASE_URL, echo=False)
+AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+Base = declarative_base()
+
+REFERRAL_SIGNUP_BONUS = 25000
+REFERRAL_SPECIAL_SKIN_ID = "referral-special.pngSP"
+
+
+# Модель пользователя
+class User(Base):
+    __tablename__ = 'users'
+    __table_args__ = (
+        Index("ix_users_referrer_id", "referrer_id"),
+        Index("ix_users_created_at", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, unique=True, index=True)
+    username = Column(String, nullable=True)
+    coins = Column(BigInteger, default=0)
+
+    profit_per_hour = Column(BigInteger, default=100)
+    profit_per_tap = Column(Integer, default=1)
+    energy = Column(Integer, default=BASE_MAX_ENERGY)
+    max_energy = Column(Integer, default=BASE_MAX_ENERGY)
+    level = Column(Integer, default=0)
+
+    multitap_level = Column(Integer, default=0)
+    profit_level = Column(Integer, default=0)
+    energy_level = Column(Integer, default=0)
+    boost_level = Column(Integer, default=0)
+
+    last_passive_income = Column(DateTime, default=datetime.utcnow)
+    last_energy_update = Column(DateTime, default=datetime.utcnow)
+
+    referrer_id = Column(BigInteger, nullable=True)
+    referral_count = Column(Integer, default=0)
+    referral_earnings = Column(BigInteger, default=0)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    extra_data = Column(String, default="{}")
+    
+    luck_level = Column(Integer, default=0)
+
+
+# ==================== МОДЕЛЬ ЗАДАНИЙ ====================
+class UserTask(Base):
+    __tablename__ = 'user_tasks'
+    __table_args__ = (
+        UniqueConstraint("user_id", "task_id", name="uq_user_tasks_user_id_task_id"),
+        Index("ix_user_tasks_user_id_completed_at", "user_id", "completed_at"),
+        {'extend_existing': True}
+    )
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, index=True)
+    task_id = Column(String)
+    completed_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ==================== ФУНКЦИИ ====================
+
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+def _serialize_user(user: User) -> dict:
+    extra_data = {}
+    if user.extra_data:
+        try:
+            extra_data = json.loads(user.extra_data)
+        except json.JSONDecodeError:
+            logging.error("Failed to decode extra_data for user_id=%s", user.user_id)
+
+    return {
+        "user_id": user.user_id,
+        "username": user.username,
+        "coins": user.coins,
+        "profit_per_hour": user.profit_per_hour,
+        "profit_per_tap": user.profit_per_tap,
+        "energy": user.energy,
+        "max_energy": user.max_energy,
+        "level": user.level,
+        "multitap_level": user.multitap_level,
+        "profit_level": user.profit_level,
+        "energy_level": user.energy_level,
+        "boost_level": user.boost_level,
+        "last_passive_income": user.last_passive_income,
+        "last_energy_update": user.last_energy_update,
+        "luck_level": user.luck_level,
+        "referrer_id": user.referrer_id,
+        "referral_count": user.referral_count,
+        "referral_earnings": user.referral_earnings,
+        "created_at": user.created_at,
+        "extra_data": extra_data,
+    }
+
+
+async def get_user(user_id: int):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.user_id == user_id)
+        )
+        user = result.scalar_one_or_none()
+
+        if user:
+            return _serialize_user(user)
+        return None
+
+
+# ==================== РЕФЕРАЛЬНАЯ СИСТЕМА ====================
+
+async def add_referral_bonus(referrer_id: int, referral_id: int):
+    """Начисление бонуса рефереру за нового реферала"""
+    try:
+        async with AsyncSessionLocal() as session:
+            # Получаем реферера
+            result = await session.execute(
+                select(User).where(User.user_id == referrer_id)
+            )
+            referrer = result.scalar_one_or_none()
+            
+            if not referrer or referrer_id == referral_id:
+                logging.error(f"❌ Реферер {referrer_id} не найден при попытке начисления бонуса за реферала {referral_id}")
+                return False
+
+            referral_result = await session.execute(
+                select(User).where(User.user_id == referral_id)
+            )
+            referral = referral_result.scalar_one_or_none()
+            if referral and referral.referrer_id == referrer_id and referrer.referrer_id == referral_id:
+                logging.error(f"вќЊ РћС‚РєР»РѕРЅРµРЅ РІР·Р°РёРјРЅС‹Р№ СЂРµС„РµСЂР°Р»СЊРЅС‹Р№ С†РёРєР»: {referrer_id} <-> {referral_id}")
+                return False
+
+            extra_data = {}
+            if referrer.extra_data:
+                try:
+                    extra_data = json.loads(referrer.extra_data)
+                except json.JSONDecodeError:
+                    extra_data = {}
+
+            owned_skins = extra_data.get("owned_skins", ["default.pngSP"])
+            if REFERRAL_SPECIAL_SKIN_ID not in owned_skins:
+                owned_skins.append(REFERRAL_SPECIAL_SKIN_ID)
+            extra_data["owned_skins"] = owned_skins
+
+            referrer.coins += REFERRAL_SIGNUP_BONUS
+            referrer.referral_count += 1
+            referrer.referral_earnings += REFERRAL_SIGNUP_BONUS
+            referrer.extra_data = json.dumps(extra_data)
+            
+            await session.commit()
+            logging.info(f"✅ Реферер {referrer_id} получил +{REFERRAL_SIGNUP_BONUS} монет за реферала {referral_id}")
+            logging.info(f"📊 Теперь у реферера {referrer_id}: coins={referrer.coins}, count={referrer.referral_count}")
+            
+            return True
+            
+    except Exception as e:
+        logging.error(f"❌ Ошибка начисления бонуса рефереру {referrer_id} за реферала {referral_id}: {e}")
+        return False
+
+
+async def get_referral_stats(user_id: int):
+    """Получение реферальной статистики пользователя"""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(User).where(User.user_id == user_id)
+            )
+            user = result.scalar_one_or_none()
+            
+            if not user:
+                return {"count": 0, "earnings": 0}
+            
+            return {
+                "count": user.referral_count or 0,
+                "earnings": user.referral_earnings or 0
+            }
+            
+    except Exception as e:
+        logging.error(f"❌ Ошибка получения реферальной статистики для {user_id}: {e}")
+        return {"count": 0, "earnings": 0}
+
+
+async def get_referrals_list(user_id: int):
+    """Получение списка рефералов пользователя"""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(User).where(User.referrer_id == user_id)
+            )
+            referrals = result.scalars().all()
+            
+            return [
+                {
+                    "user_id": ref.user_id,
+                    "username": ref.username,
+                    "joined_at": ref.created_at.isoformat() if ref.created_at else None,
+                    "earned": REFERRAL_SIGNUP_BONUS
+                }
+                for ref in referrals
+            ]
+            
+    except Exception as e:
+        logging.error(f"❌ Ошибка получения списка рефералов для {user_id}: {e}")
+        return []
+
+
+async def get_completed_tasks(user_id: int):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(UserTask).where(UserTask.user_id == user_id)
+        )
+        tasks = result.scalars().all()
+        return [task.task_id for task in tasks]
+
+
+async def add_completed_task(user_id: int, task_id: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(UserTask).where(
+                UserTask.user_id == user_id,
+                UserTask.task_id == task_id
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            return False
+        
+        new_task = UserTask(
+            user_id=user_id,
+            task_id=task_id
+        )
+        session.add(new_task)
+        await session.commit()
+        return True
+
+
+async def add_user(user_id: int, username: str = None, referrer_id: int = None):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.user_id == user_id)
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            return existing
+        
+        new_user = User(
+            user_id=user_id,
+            username=username or f"user_{user_id}",
+            coins=0,
+            profit_per_hour=get_hour_value(0),
+            profit_per_tap=get_tap_value(0),
+            energy=get_max_energy(0),
+            max_energy=get_max_energy(0),
+            level=0,
+            multitap_level=0,
+            profit_level=0,
+            energy_level=0,
+            luck_level=0,
+            last_passive_income=datetime.utcnow(),
+            last_energy_update=datetime.utcnow(),
+            referrer_id=referrer_id,
+            referral_count=0,
+            referral_earnings=0,
+            extra_data=json.dumps({"owned_skins": ["default.pngSP"], "selected_skin": "default.pngSP", "ads_watched": 0})
+        )
+        
+        session.add(new_user)
+        await session.commit()
+        logging.info(f"✅ Пользователь {user_id} создан, referrer_id={referrer_id}")
+        
+        if referrer_id:
+            logging.info(f"🎯 Попытка начисления бонуса: реферер {referrer_id} за реферала {user_id}")
+            await add_referral_bonus(referrer_id, user_id)
+        
+        return new_user
+
+
+async def update_user(user_id: int, data: dict):
+    allowed_fields = {
+        'username', 'coins', 'profit_per_hour', 'profit_per_tap', 'energy',
+        'max_energy', 'level', 'multitap_level', 'profit_level', 'energy_level',
+        'boost_level', 'last_passive_income', 'last_energy_update', 'referrer_id',
+        'referral_count', 'referral_earnings', 'extra_data', 'luck_level'
+    }
+    unknown_fields = set(data) - allowed_fields
+    if unknown_fields:
+        raise ValueError(f"Unsupported update_user fields: {sorted(unknown_fields)}")
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.user_id == user_id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            return None
+
+        if 'coins' in data:
+            user.coins = data['coins']
+        if 'username' in data:
+            user.username = data['username']
+        if 'energy' in data:
+            user.energy = data['energy']
+        if 'profit_per_hour' in data:
+            user.profit_per_hour = data['profit_per_hour']
+        if 'profit_per_tap' in data:
+            user.profit_per_tap = data['profit_per_tap']
+        if 'max_energy' in data:
+            user.max_energy = data['max_energy']
+        if 'level' in data:
+            user.level = data['level']
+        if 'multitap_level' in data:
+            user.multitap_level = data['multitap_level']
+        if 'profit_level' in data:
+            user.profit_level = data['profit_level']
+        if 'energy_level' in data:
+            user.energy_level = data['energy_level']
+        if 'boost_level' in data:
+            user.boost_level = data['boost_level']
+        if 'last_passive_income' in data:
+            user.last_passive_income = data['last_passive_income']
+        if 'last_energy_update' in data:
+            user.last_energy_update = data['last_energy_update']
+        if 'referrer_id' in data:
+            user.referrer_id = data['referrer_id']
+        if 'referral_count' in data:
+            user.referral_count = data['referral_count']
+        if 'referral_earnings' in data:
+            user.referral_earnings = data['referral_earnings']
+        if 'luck_level' in data:
+            user.luck_level = data['luck_level']
+        if 'extra_data' in data:
+            user.extra_data = json.dumps(data['extra_data'])
+
+        await session.commit()
+
+        return await get_user(user_id)
