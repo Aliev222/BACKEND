@@ -89,6 +89,7 @@ DAILY_REWARD_MAX_DAYS = 30
 DAILY_REWARD_BASE_COINS = 500
 DAILY_REWARD_INFINITE_ENERGY_MINUTES = 10
 DAILY_REWARD_SKIN_ID = "retro.pngSP"
+MEGA_BOOST_MINUTES = 1
 GHOST_BOOST_MULTIPLIER = 5
 GHOST_BOOST_MINUTES = 1
 # Single lightweight reconnect helper to avoid code duplication
@@ -822,7 +823,7 @@ async def get_mega_boost_status(user_id: int, request: Request):
 
 @app.post("/api/activate-mega-boost")
 async def activate_mega_boost(payload: BoostActivateRequest, request: Request):
-    """Activate mega boost (x2 coins + infinite energy for 5 minutes)"""
+    """Activate mega boost (x2 coins + infinite energy for 1 minute)"""
     try:
         await require_telegram_user(request, payload.user_id)
         user = await get_user_cached(payload.user_id)
@@ -856,8 +857,7 @@ async def activate_mega_boost(payload: BoostActivateRequest, request: Request):
             except:
                 del active_boosts["mega_boost"]
         
-        # РђРєС‚РёРІРёСЂСѓРµРј РЅР° 5 РјРёРЅСѓС‚
-        expires_at = (now + timedelta(minutes=5)).isoformat()
+        expires_at = (now + timedelta(minutes=MEGA_BOOST_MINUTES)).isoformat()
         active_boosts["mega_boost"] = {"active": True, "expires_at": expires_at}
         extra["active_boosts"] = active_boosts
         await update_user(payload.user_id, {"extra_data": extra})
@@ -865,7 +865,7 @@ async def activate_mega_boost(payload: BoostActivateRequest, request: Request):
         
         return {
             "success": True,
-            "message": "рџ”ҐвљЎ MEGA BOOST activated for 5 minutes! x2 coins + infinite energy",
+            "message": "рџ”ҐвљЎ MEGA BOOST activated for 1 minute! x2 coins + infinite energy",
             "expires_at": expires_at
         }
     except Exception as e:
