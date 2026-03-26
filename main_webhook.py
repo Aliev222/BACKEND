@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import asyncio
 
 import redis.asyncio as redis
 from aiohttp import web
@@ -12,6 +13,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from CONFIG.settings import BOT_TOKEN
 from DATABASE.base import add_user, get_user, init_db, update_user
 from core.game_config import USER_CACHE_PREFIX
+from core.reengagement import reengagement_loop
 from core.stars_skins import get_stars_skin_price
 
 logging.basicConfig(level=logging.INFO)
@@ -20,6 +22,7 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 REDIS_URL = os.getenv("REDIS_URL")
+reengagement_task = None
 
 
 async def invalidate_user_cache(user_id: int) -> None:
@@ -150,6 +153,7 @@ async def handle_successful_payment(message: types.Message) -> None:
 
 
 async def on_startup(bot_instance: Bot) -> None:
+    global reengagement_task
     await init_db()
     await bot_instance.delete_webhook(drop_pending_updates=True)
 
@@ -161,10 +165,19 @@ async def on_startup(bot_instance: Bot) -> None:
     webhook_url = f"https://{render_url}/webhook"
     await bot_instance.set_webhook(webhook_url)
     logger.info("Webhook set to %s", webhook_url)
+    reengagement_task = asyncio.create_task(reengagement_loop(bot_instance))
+    logger.info("Re-engagement loop started")
 
 
 async def on_shutdown(bot_instance: Bot) -> None:
+    global reengagement_task
     logger.info("Bot is shutting down")
+    if reengagement_task:
+        reengagement_task.cancel()
+        try:
+            await reengagement_task
+        except asyncio.CancelledError:
+            pass
     await bot_instance.session.close()
 
 

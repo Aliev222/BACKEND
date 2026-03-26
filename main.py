@@ -11,6 +11,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from CONFIG.settings import BOT_TOKEN
 from DATABASE.base import add_user, get_user, init_db, update_user
 from core.game_config import USER_CACHE_PREFIX
+from core.reengagement import reengagement_loop
 from core.stars_skins import get_stars_skin_price
 
 logging.basicConfig(level=logging.INFO)
@@ -144,8 +145,16 @@ async def handle_successful_payment(message: types.Message) -> None:
 
 async def main() -> None:
     await init_db()
+    reengagement_task = asyncio.create_task(reengagement_loop(bot))
     logger.info("Starting bot polling")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        reengagement_task.cancel()
+        try:
+            await reengagement_task
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":

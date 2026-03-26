@@ -87,6 +87,8 @@ DAILY_REWARD_MAX_DAYS = 30
 DAILY_REWARD_BASE_COINS = 500
 DAILY_REWARD_INFINITE_ENERGY_MINUTES = 10
 DAILY_REWARD_SKIN_ID = "retro.pngSP"
+GHOST_BOOST_MULTIPLIER = 5
+GHOST_BOOST_MINUTES = 1
 # Single lightweight reconnect helper to avoid code duplication
 async def try_reconnect_redis() -> None:
     global redis_client
@@ -274,6 +276,33 @@ def parse_extra_data(extra_raw) -> dict:
         except Exception:
             return {}
     return {}
+
+
+async def touch_user_activity(user_id: int, user: dict | None = None) -> None:
+    user_data = user or await get_user_cached(user_id)
+    if not user_data:
+        return
+
+    extra = parse_extra_data(user_data.get("extra_data"))
+    previous_activity = extra.get("last_activity_at")
+    previous_stage = int(extra.get("push_idle_stage", 0) or 0)
+    now = datetime.utcnow()
+
+    if previous_activity:
+        try:
+            prev_dt = datetime.fromisoformat(previous_activity)
+            if (now - prev_dt).total_seconds() < 120 and previous_stage == 0:
+                return
+        except Exception:
+            pass
+    now_iso = now.isoformat()
+
+    extra["last_activity_at"] = now_iso
+    extra["push_idle_stage"] = 0
+    extra["last_push_reason"] = None
+
+    await update_user(user_id, {"extra_data": extra})
+    await invalidate_user_cache(user_id)
 
 
 async def grant_referral_share_bonus(referral_user: dict, source_income: int) -> int:
@@ -646,6 +675,7 @@ async def get_user_data(user_id: int, request: Request):
         user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+        await touch_user_activity(user_id, user)
 
         now = datetime.utcnow()
         current_energy = calculate_current_energy(user, now)
@@ -668,6 +698,8 @@ async def get_user_data(user_id: int, request: Request):
 
         owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
         selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
+        ghost_boost_active, ghost_boost_expires_at = get_ghost_boost_status(user)
+        daily_infinite_energy_active, daily_infinite_energy_expires_at = is_daily_infinite_energy_active(user)
 
         if owned_skins != extra.get("owned_skins") or selected_skin != extra.get("selected_skin", DEFAULT_SKIN_ID):
             extra["owned_skins"] = owned_skins
@@ -689,6 +721,10 @@ async def get_user_data(user_id: int, request: Request):
             "owned_skins": owned_skins,
             "selected_skin": selected_skin,
             "ads_watched": extra.get("ads_watched", 0),
+            "ghost_boost_active": ghost_boost_active,
+            "ghost_boost_expires_at": ghost_boost_expires_at,
+            "daily_infinite_energy_active": daily_infinite_energy_active,
+            "daily_infinite_energy_expires_at": daily_infinite_energy_expires_at,
             "regen_seconds": ENERGY_REGEN_SECONDS,
             "server_time": now.isoformat()
         }
@@ -792,6 +828,94 @@ async def activate_mega_boost(payload: BoostActivateRequest, request: Request):
         }
     except Exception as e:
         logger.error(f"Error in activate_mega_boost: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/ghost-boost-status/{user_id}")
+async def get_ghost_boost_status_endpoint(user_id: int, request: Request):
+    try:
+        await require_telegram_user(request, user_id)
+        user = await get_user_cached(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        active, expires_at = get_ghost_boost_status(user)
+        if not active or not expires_at:
+            return {"active": False}
+
+        remaining = max(0, int((datetime.fromisoformat(expires_at) - datetime.utcnow()).total_seconds()))
+        return {
+            "active": True,
+            "expires_at": expires_at,
+            "remaining_seconds": remaining,
+            "multiplier": GHOST_BOOST_MULTIPLIER,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_ghost_boost_status_endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/activate-ghost-boost")
+async def activate_ghost_boost(payload: UserIdRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await require_redis_rate_limit("activate_ghost_boost", payload.user_id, 10, 60)
+        user = await get_user_cached(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except Exception:
+                extra = {}
+
+        active_boosts = extra.get("active_boosts", {})
+        if not isinstance(active_boosts, dict):
+            active_boosts = {}
+
+        now = datetime.utcnow()
+        ghost_boost = active_boosts.get("ghost_boost")
+        if ghost_boost and ghost_boost.get("expires_at"):
+            try:
+                expires = datetime.fromisoformat(ghost_boost["expires_at"])
+                if now < expires:
+                    remaining = max(0, int((expires - now).total_seconds()))
+                    return {
+                        "success": False,
+                        "already_active": True,
+                        "expires_at": ghost_boost["expires_at"],
+                        "remaining_seconds": remaining,
+                        "multiplier": GHOST_BOOST_MULTIPLIER,
+                    }
+            except Exception:
+                pass
+
+        expires_at = (now + timedelta(minutes=GHOST_BOOST_MINUTES)).isoformat()
+        active_boosts["ghost_boost"] = {
+            "active": True,
+            "expires_at": expires_at,
+            "multiplier": GHOST_BOOST_MULTIPLIER,
+        }
+        extra["active_boosts"] = active_boosts
+
+        await update_user(payload.user_id, {"extra_data": extra})
+        await invalidate_user_cache(payload.user_id)
+
+        return {
+            "success": True,
+            "expires_at": expires_at,
+            "remaining_seconds": GHOST_BOOST_MINUTES * 60,
+            "multiplier": GHOST_BOOST_MULTIPLIER,
+            "message": "Ghost boost activated",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in activate_ghost_boost: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/reward-video")
@@ -1347,6 +1471,34 @@ def is_mega_boost_active(user: dict) -> bool:
         return False
 
 
+def get_ghost_boost_status(user: dict) -> tuple[bool, str | None]:
+    extra = user.get("extra_data", {}) or {}
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except Exception:
+            extra = {}
+
+    active_boosts = extra.get("active_boosts", {})
+    boost = active_boosts.get("ghost_boost")
+    if not boost:
+        return False, None
+
+    expires_at = boost.get("expires_at")
+    if not expires_at:
+        return False, None
+
+    try:
+        expires_dt = datetime.fromisoformat(expires_at)
+    except Exception:
+        return False, None
+
+    if datetime.utcnow() >= expires_dt:
+        return False, None
+
+    return True, expires_at
+
+
 def get_daily_reward_progress(extra: dict) -> tuple[int, str | None]:
     claimed_days = int(extra.get("daily_reward_claimed_days", 0) or 0)
     claimed_days = max(0, min(DAILY_REWARD_MAX_DAYS, claimed_days))
@@ -1444,6 +1596,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
 
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+        await touch_user_activity(payload.user_id, user)
 
         now = datetime.utcnow()
 
@@ -1465,12 +1618,15 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         skin_multiplier = float(SKIN_MULTIPLIERS.get(selected_skin, 1.0))
 
         mega_boost_active = is_mega_boost_active(user)
+        ghost_boost_active, ghost_boost_expires_at = get_ghost_boost_status(user)
         daily_infinite_energy_active, _ = is_daily_infinite_energy_active(user)
-        free_energy_clicks = mega_boost_active or daily_infinite_energy_active
+        free_energy_clicks = mega_boost_active or daily_infinite_energy_active or ghost_boost_active
 
         coin_per_tap = max(1, int(tap_value * skin_multiplier))
         if mega_boost_active:
             coin_per_tap *= 2
+        if ghost_boost_active:
+            coin_per_tap *= GHOST_BOOST_MULTIPLIER
 
         # Р·Р°С‰РёС‚Р°
         safe_requested_clicks = min(payload.clicks, MAX_CLICK_BATCH_SIZE)
@@ -1537,6 +1693,8 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             "profit_per_tap": tap_value,
             "profit_per_hour": get_hour_value(int(user.get("profit_level", 0))),
             "mega_boost_active": mega_boost_active,
+            "ghost_boost_active": ghost_boost_active,
+            "ghost_boost_expires_at": ghost_boost_expires_at,
             "daily_infinite_energy_active": daily_infinite_energy_active,
             "referral_bonus_paid": referral_bonus
         }
