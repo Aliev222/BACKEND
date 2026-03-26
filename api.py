@@ -83,6 +83,8 @@ ONLINE_WINDOW_SECONDS = 75
 REFERRAL_SHARE_RATE = 0.05
 REFERRAL_DAILY_SHARE_LIMIT = 50000
 REFERRAL_SPECIAL_SKIN_ID = "refferal.pngSP"
+TELEGRAM_VERIFY_CHANNEL = os.getenv("TELEGRAM_VERIFY_CHANNEL", "@Spirit_cliker")
+TELEGRAM_MEMBER_STATUSES = {"member", "administrator", "creator", "restricted"}
 DAILY_REWARD_MAX_DAYS = 30
 DAILY_REWARD_BASE_COINS = 500
 DAILY_REWARD_INFINITE_ENERGY_MINUTES = 10
@@ -192,6 +194,46 @@ async def create_telegram_stars_invoice_link(*, user_id: int, skin_id: str, pric
         raise HTTPException(status_code=502, detail="Telegram invoice creation failed")
 
     return data["result"]
+
+
+async def verify_telegram_channel_subscription(user_id: int) -> bool:
+    if not BOT_TOKEN or not TELEGRAM_VERIFY_CHANNEL:
+        logger.warning("Telegram subscription verification is not configured")
+        return False
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember",
+                params={
+                    "chat_id": TELEGRAM_VERIFY_CHANNEL,
+                    "user_id": user_id,
+                },
+            )
+    except Exception as exc:
+        logger.warning("Telegram subscription verification request failed for %s: %s", user_id, exc)
+        return False
+
+    if response.status_code != 200:
+        logger.warning(
+            "Telegram subscription verification HTTP error for %s: %s",
+            user_id,
+            response.status_code,
+        )
+        return False
+
+    try:
+        payload = response.json()
+    except Exception:
+        logger.warning("Telegram subscription verification returned invalid JSON for %s", user_id)
+        return False
+
+    if not payload.get("ok"):
+        logger.warning("Telegram subscription verification failed for %s: %s", user_id, payload)
+        return False
+
+    status = ((payload.get("result") or {}).get("status") or "").lower()
+    return status in TELEGRAM_MEMBER_STATUSES
 
 
 # ==================== METRICS ====================
@@ -2228,6 +2270,14 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
             owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
             social_skin_id = SOCIAL_SUB_TASK_SKINS[task_id]
 
+            if task_id == "telegram_sub":
+                is_verified = await verify_telegram_channel_subscription(payload.user_id)
+                if not is_verified:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Telegram subscription was not verified yet"
+                    )
+
             if social_skin_id not in owned_skins:
                 owned_skins.append(social_skin_id)
 
@@ -2245,6 +2295,7 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
                 "message": "✅ +20000 coins + skin!",
                 "coins": user["coins"],
                 "skin_id": social_skin_id,
+                "verified": task_id == "telegram_sub",
             }
         
         raise HTTPException(status_code=400, detail="Unknown task")

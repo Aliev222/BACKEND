@@ -23,6 +23,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 REDIS_URL = os.getenv("REDIS_URL")
 reengagement_task = None
+REENGAGEMENT_RUNTIME = (os.getenv("REENGAGEMENT_RUNTIME", "webhook") or "webhook").strip().lower()
 
 
 async def invalidate_user_cache(user_id: int) -> None:
@@ -165,8 +166,9 @@ async def on_startup(bot_instance: Bot) -> None:
     webhook_url = f"https://{render_url}/webhook"
     await bot_instance.set_webhook(webhook_url)
     logger.info("Webhook set to %s", webhook_url)
-    reengagement_task = asyncio.create_task(reengagement_loop(bot_instance))
-    logger.info("Re-engagement loop started")
+    if REENGAGEMENT_RUNTIME == "webhook":
+        reengagement_task = asyncio.create_task(reengagement_loop(bot_instance))
+        logger.info("Re-engagement loop started in webhook runtime")
 
 
 async def on_shutdown(bot_instance: Bot) -> None:

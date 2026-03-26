@@ -13,7 +13,7 @@ AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=F
 Base = declarative_base()
 
 REFERRAL_SIGNUP_BONUS = 25000
-REFERRAL_SPECIAL_SKIN_ID = "referral-special.pngSP"
+REFERRAL_SPECIAL_SKIN_ID = "refferal.pngSP"
 
 
 # Модель пользователя
@@ -152,6 +152,12 @@ async def add_referral_bonus(referrer_id: int, referral_id: int):
                     extra_data = {}
 
             owned_skins = extra_data.get("owned_skins", ["default.pngSP"])
+            if not isinstance(owned_skins, list):
+                owned_skins = ["default.pngSP"]
+            owned_skins = [
+                "refferal.pngSP" if skin_id == "referral-special.pngSP" else skin_id
+                for skin_id in owned_skins
+            ]
             if REFERRAL_SPECIAL_SKIN_ID not in owned_skins:
                 owned_skins.append(REFERRAL_SPECIAL_SKIN_ID)
             extra_data["owned_skins"] = owned_skins

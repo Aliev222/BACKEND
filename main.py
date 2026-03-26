@@ -11,7 +11,6 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from CONFIG.settings import BOT_TOKEN
 from DATABASE.base import add_user, get_user, init_db, update_user
 from core.game_config import USER_CACHE_PREFIX
-from core.reengagement import reengagement_loop
 from core.stars_skins import get_stars_skin_price
 
 logging.basicConfig(level=logging.INFO)
@@ -20,6 +19,7 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 REDIS_URL = os.getenv("REDIS_URL")
+REENGAGEMENT_RUNTIME = (os.getenv("REENGAGEMENT_RUNTIME", "webhook") or "webhook").strip().lower()
 
 
 async def invalidate_user_cache(user_id: int) -> None:
@@ -145,16 +145,21 @@ async def handle_successful_payment(message: types.Message) -> None:
 
 async def main() -> None:
     await init_db()
-    reengagement_task = asyncio.create_task(reengagement_loop(bot))
+    reengagement_task = None
+    if REENGAGEMENT_RUNTIME == "polling":
+        from core.reengagement import reengagement_loop
+        reengagement_task = asyncio.create_task(reengagement_loop(bot))
+        logger.info("Re-engagement loop started in polling runtime")
     logger.info("Starting bot polling")
     try:
         await dp.start_polling(bot)
     finally:
-        reengagement_task.cancel()
-        try:
-            await reengagement_task
-        except asyncio.CancelledError:
-            pass
+        if reengagement_task:
+            reengagement_task.cancel()
+            try:
+                await reengagement_task
+            except asyncio.CancelledError:
+                pass
 
 
 if __name__ == "__main__":
