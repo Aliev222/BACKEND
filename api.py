@@ -1,5 +1,6 @@
 ﻿from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+# Sync marker for VS Code source control
 from fastapi.responses import JSONResponse, Response
 import asyncio
 import uvicorn
@@ -81,7 +82,11 @@ ONLINE_USERS_KEY = "online:users"
 ONLINE_WINDOW_SECONDS = 75
 REFERRAL_SHARE_RATE = 0.05
 REFERRAL_DAILY_SHARE_LIMIT = 50000
-REFERRAL_SPECIAL_SKIN_ID = "referral-special.pngSP"
+REFERRAL_SPECIAL_SKIN_ID = "refferal.pngSP"
+DAILY_REWARD_MAX_DAYS = 30
+DAILY_REWARD_BASE_COINS = 500
+DAILY_REWARD_INFINITE_ENERGY_MINUTES = 10
+DAILY_REWARD_SKIN_ID = "retro.pngSP"
 # Single lightweight reconnect helper to avoid code duplication
 async def try_reconnect_redis() -> None:
     global redis_client
@@ -654,6 +659,22 @@ async def get_user_data(user_id: int, request: Request):
             await invalidate_user_cache(user_id)
 
 
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except Exception:
+                extra = {}
+
+        owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
+        selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
+
+        if owned_skins != extra.get("owned_skins") or selected_skin != extra.get("selected_skin", DEFAULT_SKIN_ID):
+            extra["owned_skins"] = owned_skins
+            extra["selected_skin"] = selected_skin
+            await update_user(user_id, {"extra_data": extra})
+            await invalidate_user_cache(user_id)
+
         return {
             "user_id": user["user_id"],
             "username": user.get("username"),
@@ -665,9 +686,9 @@ async def get_user_data(user_id: int, request: Request):
             "multitap_level": user.get("multitap_level", 0),
             "profit_level": user.get("profit_level", 0),
             "energy_level": user.get("energy_level", 0),
-            "owned_skins": (user.get("extra_data", {}) or {}).get("owned_skins", [DEFAULT_SKIN_ID]),
-            "selected_skin": (user.get("extra_data", {}) or {}).get("selected_skin", DEFAULT_SKIN_ID),
-            "ads_watched": (user.get("extra_data", {}) or {}).get("ads_watched", 0),
+            "owned_skins": owned_skins,
+            "selected_skin": selected_skin,
+            "ads_watched": extra.get("ads_watched", 0),
             "regen_seconds": ENERGY_REGEN_SECONDS,
             "server_time": now.isoformat()
         }
@@ -1218,6 +1239,7 @@ DEFAULT_SKIN_ID = "default.pngSP"
 SKIN_MULTIPLIERS = {
     DEFAULT_SKIN_ID: 1.0,
     REFERRAL_SPECIAL_SKIN_ID: 1.8,
+    DAILY_REWARD_SKIN_ID: 1.8,
     "10lvl.pngSP": 1.2,
     "25lvl.pngSP": 1.2,
     "50lvl.pngSP": 1.2,
@@ -1239,7 +1261,53 @@ SKIN_MULTIPLIERS = {
     "stars6.pngSP": 2.0,
     "stars7.pngSP": 2.0,
     "stars8.pngSP": 2.0,
+    "telega.pngSP": 1.5,
+    "tiktok.pngSP": 1.5,
+    "insta.pngSP": 1.5,
 }
+
+LEGACY_SKIN_ID_MAP = {
+    "referral-special.pngSP": REFERRAL_SPECIAL_SKIN_ID,
+    "daily30.pngSP": DAILY_REWARD_SKIN_ID,
+    "telegram-social.pngSP": "telega.pngSP",
+    "tiktok-social.pngSP": "tiktok.pngSP",
+    "instagram-social.pngSP": "insta.pngSP",
+}
+
+SOCIAL_SUB_TASK_SKINS = {
+    "telegram_sub": "telega.pngSP",
+    "tiktok_sub": "tiktok.pngSP",
+    "instagram_sub": "insta.pngSP",
+}
+
+VALID_SKIN_IDS = set(SKIN_MULTIPLIERS.keys())
+
+
+def normalize_owned_skins(raw_owned) -> list[str]:
+    if isinstance(raw_owned, list):
+        owned = [str(item) for item in raw_owned]
+    else:
+        owned = []
+
+    normalized = []
+    seen = set()
+    for skin_id in owned:
+        skin_id = LEGACY_SKIN_ID_MAP.get(skin_id, skin_id)
+        if skin_id in VALID_SKIN_IDS and skin_id not in seen:
+            seen.add(skin_id)
+            normalized.append(skin_id)
+
+    if DEFAULT_SKIN_ID not in seen:
+        normalized.insert(0, DEFAULT_SKIN_ID)
+
+    return normalized
+
+
+def normalize_selected_skin(selected_skin: str | None, owned_skins: list[str]) -> str:
+    selected_skin = LEGACY_SKIN_ID_MAP.get(selected_skin, selected_skin)
+    if selected_skin in owned_skins:
+        return selected_skin
+    return DEFAULT_SKIN_ID
 
 
 def get_selected_skin_multiplier(user: dict) -> float:
@@ -1250,7 +1318,8 @@ def get_selected_skin_multiplier(user: dict) -> float:
         except:
             extra = {}
 
-    selected_skin = extra.get("selected_skin", DEFAULT_SKIN_ID)
+    owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
+    selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
     return SKIN_MULTIPLIERS.get(selected_skin, 1.0)
 
 
@@ -1276,6 +1345,43 @@ def is_mega_boost_active(user: dict) -> bool:
         return datetime.utcnow() < expires_dt
     except Exception:
         return False
+
+
+def get_daily_reward_progress(extra: dict) -> tuple[int, str | None]:
+    claimed_days = int(extra.get("daily_reward_claimed_days", 0) or 0)
+    claimed_days = max(0, min(DAILY_REWARD_MAX_DAYS, claimed_days))
+    last_claim_date = extra.get("daily_reward_last_claim_date")
+    if not isinstance(last_claim_date, str):
+        last_claim_date = None
+    return claimed_days, last_claim_date
+
+
+def is_daily_infinite_energy_active(user: dict) -> tuple[bool, str | None]:
+    extra = user.get("extra_data", {}) or {}
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except Exception:
+            extra = {}
+
+    active_boosts = extra.get("active_boosts", {})
+    boost = active_boosts.get("daily_infinite_energy")
+    if not boost:
+        return False, None
+
+    expires_at = boost.get("expires_at")
+    if not expires_at:
+        return False, None
+
+    try:
+        expires_dt = datetime.fromisoformat(expires_at)
+    except Exception:
+        return False, None
+
+    if datetime.utcnow() >= expires_dt:
+        return False, None
+
+    return True, expires_at
 
 SKIN_REQUIREMENTS = {
     "10lvl.pngSP": {"type": "level", "value": 10},
@@ -1354,10 +1460,13 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             except Exception:
                 extra = {}
 
-        selected_skin = extra.get("selected_skin", DEFAULT_SKIN_ID)
+        owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
+        selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
         skin_multiplier = float(SKIN_MULTIPLIERS.get(selected_skin, 1.0))
 
         mega_boost_active = is_mega_boost_active(user)
+        daily_infinite_energy_active, _ = is_daily_infinite_energy_active(user)
+        free_energy_clicks = mega_boost_active or daily_infinite_energy_active
 
         coin_per_tap = max(1, int(tap_value * skin_multiplier))
         if mega_boost_active:
@@ -1367,11 +1476,11 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         safe_requested_clicks = min(payload.clicks, MAX_CLICK_BATCH_SIZE)
         allowed_clicks = get_allowed_clicks(user, now, safe_requested_clicks)
 
-        effective_clicks = allowed_clicks if mega_boost_active else min(allowed_clicks, current_energy)
+        effective_clicks = allowed_clicks if free_energy_clicks else min(allowed_clicks, current_energy)
         gained = effective_clicks * coin_per_tap
 
         # РЅРѕРІС‹Рµ Р·РЅР°С‡РµРЅРёСЏ
-        new_energy = current_energy if mega_boost_active else max(0, current_energy - effective_clicks)
+        new_energy = current_energy if free_energy_clicks else max(0, current_energy - effective_clicks)
         new_coins = int(user.get("coins", 0)) + gained
 
         update_data = {
@@ -1379,7 +1488,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             "max_energy": max_energy,
         }
 
-        if mega_boost_active:
+        if free_energy_clicks:
             stored_energy = int(user.get("energy", 0))
             last_update = normalize_dt(user.get("last_energy_update"))
 
@@ -1428,6 +1537,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             "profit_per_tap": tap_value,
             "profit_per_hour": get_hour_value(int(user.get("profit_level", 0))),
             "mega_boost_active": mega_boost_active,
+            "daily_infinite_energy_active": daily_infinite_energy_active,
             "referral_bonus_paid": referral_bonus
         }
 
@@ -1890,6 +2000,12 @@ async def get_tasks(user_id: int, request: Request):
              "reward": "вљЎ 5 minutes", "icon": "вљЎ", "completed": "energy_refill" in completed_tasks},
             {"id": "link_click", "title": "рџ”— Follow Link", "description": "Click the link and get reward", 
              "reward": "25000 coins", "icon": "рџ”—", "completed": False},
+            {"id": "telegram_sub", "title": "Telegram Channel", "description": "Subscribe to Telegram channel",
+             "reward": "20000 coins + skin", "icon": "📣", "completed": "telegram_sub" in completed_tasks},
+            {"id": "tiktok_sub", "title": "TikTok", "description": "Subscribe to TikTok",
+             "reward": "20000 coins + skin", "icon": "🎵", "completed": "tiktok_sub" in completed_tasks},
+            {"id": "instagram_sub", "title": "Instagram", "description": "Subscribe to Instagram",
+             "reward": "20000 coins + skin", "icon": "📸", "completed": "instagram_sub" in completed_tasks},
             {"id": "invite_5_friends", "title": "рџ‘Ґ Invite 5 Friends", "description": "Invite 5 friends", 
              "reward": "20000 coins", "icon": "рџ‘Ґ", "completed": "invite_5_friends" in completed_tasks, 
              "progress": min(user.get("referral_count", 0), 5), "total": 5}
@@ -1942,6 +2058,36 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
                 return {"success": True, "message": "рџ‘Ґ +20000 coins!", "coins": user["coins"]}
             else:
                 raise HTTPException(status_code=400, detail="Not enough friends")
+
+        elif task_id in SOCIAL_SUB_TASK_SKINS:
+            extra = user.get("extra_data", {}) or {}
+            if isinstance(extra, str):
+                try:
+                    extra = json.loads(extra)
+                except Exception:
+                    extra = {}
+
+            owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
+            social_skin_id = SOCIAL_SUB_TASK_SKINS[task_id]
+
+            if social_skin_id not in owned_skins:
+                owned_skins.append(social_skin_id)
+
+            extra["owned_skins"] = normalize_owned_skins(owned_skins)
+            user["coins"] += 20000
+
+            await add_completed_task(payload.user_id, task_id)
+            await update_user(payload.user_id, {
+                "coins": user["coins"],
+                "extra_data": extra,
+            })
+            await invalidate_user_cache(payload.user_id)
+            return {
+                "success": True,
+                "message": "✅ +20000 coins + skin!",
+                "coins": user["coins"],
+                "skin_id": social_skin_id,
+            }
         
         raise HTTPException(status_code=400, detail="Unknown task")
     except HTTPException:
@@ -2002,6 +2148,117 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
         logger.error(f"Error in passive_income: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+# ==================== DAILY REWARDS ====================
+
+@app.get("/api/daily-reward/status/{user_id}")
+async def get_daily_reward_status(user_id: int, request: Request):
+    try:
+        await require_telegram_user(request, user_id)
+        user = await get_user_cached(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except Exception:
+                extra = {}
+
+        claimed_days, last_claim_date = get_daily_reward_progress(extra)
+        today = datetime.utcnow().date().isoformat()
+        claim_available = claimed_days < DAILY_REWARD_MAX_DAYS and last_claim_date != today
+        next_day = min(claimed_days + 1, DAILY_REWARD_MAX_DAYS)
+        infinite_energy_active, infinite_energy_expires_at = is_daily_infinite_energy_active(user)
+
+        return {
+            "success": True,
+            "claimed_days": claimed_days,
+            "claim_available": claim_available,
+            "next_day": next_day,
+            "infinite_energy_active": infinite_energy_active,
+            "infinite_energy_expires_at": infinite_energy_expires_at,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_daily_reward_status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/daily-reward/claim")
+async def claim_daily_reward(payload: UserIdRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await require_redis_rate_limit("claim_daily_reward", payload.user_id, 10, 60)
+        await require_user_action_lock("claim_daily_reward", payload.user_id, ttl=5)
+        user = await get_user_cached(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except Exception:
+                extra = {}
+
+        claimed_days, last_claim_date = get_daily_reward_progress(extra)
+        today = datetime.utcnow().date().isoformat()
+
+        if claimed_days >= DAILY_REWARD_MAX_DAYS:
+            raise HTTPException(status_code=400, detail="Daily rewards completed")
+
+        if last_claim_date == today:
+            raise HTTPException(status_code=400, detail="Reward already claimed today")
+
+        day = claimed_days + 1
+        coins_reward = day * DAILY_REWARD_BASE_COINS
+        new_coins = int(user.get("coins", 0)) + coins_reward
+
+        extra["daily_reward_claimed_days"] = day
+        extra["daily_reward_last_claim_date"] = today
+
+        response_payload = {
+            "success": True,
+            "day": day,
+            "coins_reward": coins_reward,
+            "coins": new_coins,
+            "claim_available": False,
+        }
+
+        if day % 7 == 0 and day < DAILY_REWARD_MAX_DAYS:
+            active_boosts = extra.get("active_boosts", {})
+            if not isinstance(active_boosts, dict):
+                active_boosts = {}
+            expires_at = (datetime.utcnow() + timedelta(minutes=DAILY_REWARD_INFINITE_ENERGY_MINUTES)).isoformat()
+            active_boosts["daily_infinite_energy"] = {
+                "active": True,
+                "expires_at": expires_at
+            }
+            extra["active_boosts"] = active_boosts
+            response_payload["infinite_energy_expires_at"] = expires_at
+
+        if day == DAILY_REWARD_MAX_DAYS:
+            owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
+            if DAILY_REWARD_SKIN_ID not in owned_skins:
+                owned_skins.append(DAILY_REWARD_SKIN_ID)
+            extra["owned_skins"] = normalize_owned_skins(owned_skins)
+            response_payload["skin_id"] = DAILY_REWARD_SKIN_ID
+
+        await update_user(payload.user_id, {
+            "coins": new_coins,
+            "extra_data": extra,
+        })
+        await invalidate_user_cache(payload.user_id)
+
+        return response_payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in claim_daily_reward: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 # ==================== РЎРљРРќР« ====================
 
 
@@ -2016,19 +2273,26 @@ async def select_skin(payload: SkinRequest, request: Request):
             raise HTTPException(status_code=404, detail="User not found")
 
         extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except Exception:
+                extra = {}
         if not isinstance(extra, dict):
             extra = {}
 
-        owned_skins = extra.get("owned_skins", [DEFAULT_SKIN_ID])
-        if payload.skin_id not in owned_skins:
+        owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
+        selected_skin = normalize_selected_skin(payload.skin_id, owned_skins)
+        if selected_skin not in owned_skins:
             raise HTTPException(status_code=400, detail="Skin not owned")
 
-        extra["selected_skin"] = payload.skin_id
+        extra["owned_skins"] = owned_skins
+        extra["selected_skin"] = selected_skin
 
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
 
-        return {"success": True, "selected_skin": payload.skin_id}
+        return {"success": True, "selected_skin": selected_skin}
 
     except HTTPException:
         raise
@@ -2052,21 +2316,25 @@ async def unlock_skin(payload: SkinRequest, request: Request):
             except:
                 extra = {}
 
-        owned = extra.get("owned_skins", [DEFAULT_SKIN_ID])
+        skin_id = LEGACY_SKIN_ID_MAP.get(payload.skin_id, payload.skin_id)
+        if skin_id not in VALID_SKIN_IDS:
+            raise HTTPException(status_code=400, detail="Unknown skin")
+
+        owned = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
         ads_watched = int(extra.get("ads_watched", 0))
 
-        if payload.skin_id in owned:
+        if skin_id in owned:
             return {"success": True}
 
-        if payload.skin_id in SKIN_REQUIREMENTS and SKIN_REQUIREMENTS[payload.skin_id]["type"] == "ads":
-            required = int(SKIN_REQUIREMENTS[payload.skin_id]["count"])
+        if skin_id in SKIN_REQUIREMENTS and SKIN_REQUIREMENTS[skin_id]["type"] == "ads":
+            required = int(SKIN_REQUIREMENTS[skin_id]["count"])
 
             if ads_watched < required:
                 raise HTTPException(status_code=400, detail="Not enough ads watched")
 
         # вњ… РґРѕР±Р°РІР»СЏРµРј СЃРєРёРЅ
-        owned.append(payload.skin_id)
-        extra["owned_skins"] = owned
+        owned.append(skin_id)
+        extra["owned_skins"] = normalize_owned_skins(owned)
 
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
