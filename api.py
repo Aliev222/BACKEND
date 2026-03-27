@@ -24,7 +24,8 @@ from DATABASE.base import (
     init_db, get_completed_tasks, add_completed_task
 )
 from schemas import (
-    BoostActivateRequest,
+    AdActionClaimRequest,
+    AdActionStartRequest,
     ClicksBatchRequest,
     EnergySyncRequest,
     GameRequest,
@@ -92,6 +93,9 @@ DAILY_REWARD_SKIN_ID = "retro.pngSP"
 MEGA_BOOST_MINUTES = 1
 GHOST_BOOST_MULTIPLIER = 5
 GHOST_BOOST_MINUTES = 1
+AD_ACTION_SESSION_TTL_SECONDS = 180
+AD_SESSION_MIN_WAIT_SECONDS = 8
+AD_ACTIONS_ALLOWED = {"energy_refill_max", "mega_boost", "ghost_boost", "ads_increment"}
 # Single lightweight reconnect helper to avoid code duplication
 async def try_reconnect_redis() -> None:
     global redis_client
@@ -235,6 +239,57 @@ async def verify_telegram_channel_subscription(user_id: int) -> bool:
 
     status = ((payload.get("result") or {}).get("status") or "").lower()
     return status in TELEGRAM_MEMBER_STATUSES
+
+
+async def create_ad_action_session(user_id: int, action: str) -> str:
+    if action not in AD_ACTIONS_ALLOWED:
+        raise HTTPException(status_code=400, detail="Unknown ad action")
+
+    redis_conn = await ensure_redis_available()
+    ad_session_id = f"{action}:{user_id}:{int(time.time())}:{random.randint(100000, 999999)}"
+    session_key = f"adsession:action:{ad_session_id}"
+
+    await redis_conn.setex(
+        session_key,
+        AD_ACTION_SESSION_TTL_SECONDS,
+        json.dumps({
+            "user_id": user_id,
+            "action": action,
+            "claimed": False,
+            "created_at": time.time(),
+        })
+    )
+    return ad_session_id
+
+
+async def consume_ad_action_session(user_id: int, ad_session_id: str, expected_action: str) -> dict:
+    redis_conn = await ensure_redis_available()
+    session_key = f"adsession:action:{ad_session_id}"
+    raw = await redis_conn.get(session_key)
+    if not raw:
+        raise HTTPException(status_code=400, detail="Invalid or expired ad session")
+
+    try:
+        session = json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid ad session payload")
+
+    if int(session.get("user_id", 0)) != int(user_id):
+        raise HTTPException(status_code=400, detail="Ad session does not belong to user")
+
+    if session.get("action") != expected_action:
+        raise HTTPException(status_code=400, detail="Ad session action mismatch")
+
+    if session.get("claimed") is True:
+        raise HTTPException(status_code=409, detail="Reward already claimed")
+
+    created_at = float(session.get("created_at") or 0)
+    if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
+        raise HTTPException(status_code=400, detail="Ad watch is not completed yet")
+
+    session["claimed"] = True
+    await redis_conn.setex(session_key, 60, json.dumps(session))
+    return session
 
 
 # ==================== METRICS ====================
@@ -822,10 +877,11 @@ async def get_mega_boost_status(user_id: int, request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/activate-mega-boost")
-async def activate_mega_boost(payload: BoostActivateRequest, request: Request):
+async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
     """Activate mega boost (x2 coins + infinite energy for 1 minute)"""
     try:
         await require_telegram_user(request, payload.user_id)
+        await consume_ad_action_session(payload.user_id, payload.ad_session_id, "mega_boost")
         user = await get_user_cached(payload.user_id)
         await require_redis_rate_limit("activate_mega_boost", payload.user_id, 10, 60)
         if not user:
@@ -900,9 +956,10 @@ async def get_ghost_boost_status_endpoint(user_id: int, request: Request):
 
 
 @app.post("/api/activate-ghost-boost")
-async def activate_ghost_boost(payload: UserIdRequest, request: Request):
+async def activate_ghost_boost(payload: AdActionClaimRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
+        await consume_ad_action_session(payload.user_id, payload.ad_session_id, "ghost_boost")
         await require_redis_rate_limit("activate_ghost_boost", payload.user_id, 10, 60)
         user = await get_user_cached(payload.user_id)
         if not user:
@@ -986,6 +1043,10 @@ async def reward_video(payload: RewardVideoClaimRequest, request: Request):
         if session.get("claimed") is True:
             raise HTTPException(status_code=409, detail="Reward already claimed")
 
+        created_at = float(session.get("created_at") or 0)
+        if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
+            raise HTTPException(status_code=400, detail="Ad watch is not completed yet")
+
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -1057,6 +1118,29 @@ async def reward_video_start(payload: RewardVideoStartRequest, request: Request)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@app.post("/api/ad-action/start")
+async def ad_action_start(payload: AdActionStartRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await require_redis_rate_limit("ad_action_start", payload.user_id, 20, 60)
+
+        user = await get_user_cached(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        ad_session_id = await create_ad_action_session(payload.user_id, payload.action)
+        return {
+            "success": True,
+            "ad_session_id": ad_session_id,
+            "action": payload.action,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in ad_action_start: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @app.post("/api/ad-watched")
 async def ad_watched(payload: dict, request: Request):
     """Track ad watch statistics"""
@@ -1095,9 +1179,10 @@ async def ad_watched(payload: dict, request: Request):
         return {"success": False}
 
 @app.post("/api/ads/increment")
-async def increment_ads_watched(payload: UserIdRequest, request: Request):
+async def increment_ads_watched(payload: AdActionClaimRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
+        await consume_ad_action_session(payload.user_id, payload.ad_session_id, "ads_increment")
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -1268,10 +1353,11 @@ async def process_upgrade_all(payload: UserIdRequest, request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/update-energy")
-async def update_energy(payload: dict, request: Request):
+async def update_energy(payload: AdActionClaimRequest, request: Request):
     try:
-        user_id = payload.get("user_id")
+        user_id = payload.user_id
         await require_telegram_user(request, user_id)
+        await consume_ad_action_session(user_id, payload.ad_session_id, "energy_refill_max")
         await require_redis_rate_limit("update_energy", user_id, 10, 60)
         await require_user_action_lock("update_energy", user_id, ttl=3)
         if not user_id:
@@ -1306,37 +1392,7 @@ async def update_energy(payload: dict, request: Request):
 
 @app.post("/api/recover-energy")
 async def recover_energy_legacy(payload: UserIdRequest, request: Request):
-    """РЎС‚Р°СЂС‹Р№ СЌРЅРґРїРѕРёРЅС‚ РґР»СЏ РѕР±СЂР°С‚РЅРѕР№ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё"""
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("recover_energy", payload.user_id, ttl=3)
-        user = await get_user_cached(payload.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        max_energy = resolve_max_energy(user)
-        current_energy = user.get("energy", 0)
-        
-       
-        
-        if current_energy < max_energy:
-            new_energy = min(max_energy, current_energy + 3)
-            
-            await update_user(payload.user_id, {
-                "energy": new_energy,
-                "last_energy_update": datetime.utcnow()
-            })
-            await invalidate_user_cache(payload.user_id)
-            
-            
-            
-            
-            return {"energy": new_energy}
-        
-        return {"energy": current_energy}
-    except Exception as e:
-       
-        raise HTTPException(status_code=500, detail="Internal server error")
+    raise HTTPException(status_code=410, detail="Legacy endpoint disabled")
 
 @app.post("/api/sync-energy")
 async def sync_energy(payload: EnergySyncRequest, request: Request):
@@ -1828,7 +1884,7 @@ async def get_referral_data(user_id: int, request: Request):
 async def play_coinflip(payload: GameRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("game:coinflip", payload.user_id, ttl=3)
+        await require_user_action_lock("game:coinflip", payload.user_id, ttl=0.75)
         await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
         
         user = await get_user_cached(payload.user_id)
@@ -1857,7 +1913,7 @@ async def play_coinflip(payload: GameRequest, request: Request):
 async def play_slots(payload: GameRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("game:slots", payload.user_id, ttl=3)
+        await require_user_action_lock("game:slots", payload.user_id, ttl=0.75)
         await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
 
         user = await get_user_cached(payload.user_id)
@@ -1891,7 +1947,7 @@ async def play_slots(payload: GameRequest, request: Request):
 async def play_dice(payload: GameRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("game:dice", payload.user_id, ttl=3)
+        await require_user_action_lock("game:dice", payload.user_id, ttl=0.75)
         await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
 
         user = await get_user_cached(payload.user_id)
@@ -1943,7 +1999,7 @@ async def play_dice(payload: GameRequest, request: Request):
 async def play_roulette(payload: GameRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("game:roulette", payload.user_id, ttl=3)
+        await require_user_action_lock("game:roulette", payload.user_id, ttl=0.75)
         await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
 
         user = await get_user_cached(payload.user_id)
