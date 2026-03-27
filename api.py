@@ -12,8 +12,8 @@ import logging
 import httpx
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
-from sqlalchemy import select
-from DATABASE.base import User, AsyncSessionLocal
+from sqlalchemy import select, func
+from DATABASE.base import User, AsyncSessionLocal, WeeklyTournamentEntry
 from collections import defaultdict, deque
 from dataclasses import dataclass
 import redis.asyncio as redis
@@ -21,7 +21,12 @@ from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_
 
 from DATABASE.base import (
     get_user, add_user as create_user, update_user,
-    init_db, get_completed_tasks, add_completed_task
+    init_db, get_completed_tasks, add_completed_task,
+    add_weekly_tournament_score, get_weekly_tournament_leaderboard,
+    get_weekly_tournament_player_entry, get_weekly_tournament_season_key,
+    get_weekly_tournament_season_window, get_weekly_tournament_league,
+    list_weekly_tournament_seasons, get_weekly_tournament_winners,
+    finalize_weekly_tournament_season, ensure_weekly_tournament_season,
 )
 from schemas import (
     AdActionClaimRequest,
@@ -42,6 +47,7 @@ from schemas import (
     UpgradeRequest,
     UserIdRequest,
     VideoTaskClaimRequest,
+    WeeklyTournamentFundRequest,
 )
 from core.game_config import (
     BASE_MAX_ENERGY,
@@ -91,6 +97,12 @@ REFERRAL_DAILY_SHARE_LIMIT = 50000
 REFERRAL_SPECIAL_SKIN_ID = "refferal.pngSP"
 TELEGRAM_VERIFY_CHANNEL = os.getenv("TELEGRAM_VERIFY_CHANNEL", "@Spirit_cliker")
 TELEGRAM_MEMBER_STATUSES = {"member", "administrator", "creator", "restricted"}
+ADMIN_DASHBOARD_TOKEN = (os.getenv("ADMIN_DASHBOARD_TOKEN", "") or "").strip()
+ADMIN_TELEGRAM_IDS = {
+    int(item.strip())
+    for item in (os.getenv("ADMIN_TELEGRAM_IDS", "1507124181") or "1507124181").split(",")
+    if item.strip().isdigit()
+}
 MONETAG_POSTBACK_SECRET = (os.getenv("MONETAG_POSTBACK_SECRET", "") or "").strip()
 MONETAG_POSTBACK_ENFORCED = (os.getenv("MONETAG_POSTBACK_ENFORCED", "1" if MONETAG_POSTBACK_SECRET else "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 DAILY_REWARD_MAX_DAYS = 30
@@ -131,6 +143,24 @@ VIDEO_TASK_DEFINITIONS = {
         "type": "coin_drop",
         "cooldown_minutes": 60,
     },
+}
+WEEKLY_LEAGUE_ORDER = ("diamond", "gold", "silver", "bronze")
+WEEKLY_LEAGUE_LEVEL_RANGES = {
+    "bronze": {"min_level": 1, "max_level": 32},
+    "silver": {"min_level": 33, "max_level": 65},
+    "gold": {"min_level": 66, "max_level": 99},
+    "diamond": {"min_level": 100, "max_level": None},
+}
+WEEKLY_LEAGUE_FUND_SPLITS = {
+    "diamond": 0.50,
+    "gold": 0.30,
+    "silver": 0.15,
+    "bronze": 0.05,
+}
+WEEKLY_TOP3_PAYOUT_SPLITS = {
+    1: 0.30,
+    2: 0.20,
+    3: 0.15,
 }
 # Single lightweight reconnect helper to avoid code duplication
 async def try_reconnect_redis() -> None:
@@ -439,6 +469,20 @@ async def require_telegram_user(request: Request, expected_user_id: int | None =
     return telegram_user
 
 
+async def require_admin_access(request: Request) -> dict:
+    admin_token = (request.headers.get("X-Admin-Token", "") or "").strip()
+    if ADMIN_DASHBOARD_TOKEN and admin_token == ADMIN_DASHBOARD_TOKEN:
+        return {"auth": "token"}
+
+    telegram_user = verify_telegram_init_data(
+        request.headers.get("X-Telegram-Init-Data", "")
+    )
+    telegram_user_id = int(telegram_user.get("id", 0))
+    if telegram_user_id not in ADMIN_TELEGRAM_IDS:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return telegram_user
+
+
 
 
 # ==================== РўРЈР РќРР РќР«Р• Р”РђРќРќР«Р• ==================
@@ -663,6 +707,23 @@ async def reset_tournament_loop():
             logger.error(f"Error resetting tournament leaderboard: {e}")
 
 
+async def weekly_tournament_rollover_loop():
+    while True:
+        now = datetime.utcnow()
+        current_start, current_end = get_weekly_tournament_season_window(now)
+        sleep_seconds = max(1, int((current_end - now).total_seconds()))
+
+        await asyncio.sleep(sleep_seconds)
+
+        try:
+            previous_season_key = current_start.strftime("%Y-%m-%d")
+            finalized = await finalize_weekly_tournament_season(previous_season_key)
+            if finalized:
+                logger.info("Weekly tournament season finalized: %s", previous_season_key)
+        except Exception as e:
+            logger.error(f"Error finalizing weekly tournament season: {e}")
+
+
 
 # ==================== LIFESPAN ====================
 
@@ -696,6 +757,7 @@ async def lifespan(app: FastAPI):
     if redis_client:
         asyncio.create_task(reset_tournament_loop())
         asyncio.create_task(flush_click_buffer_loop())
+        asyncio.create_task(weekly_tournament_rollover_loop())
 
     logger.info("вњ… Background tasks started")
     yield
@@ -1919,6 +1981,18 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
                 gained,
                 str(payload.user_id)
             )
+        if gained > 0:
+            current_display_level = max(
+                int(user.get("multitap_level", 0)),
+                int(user.get("profit_level", 0)),
+                int(user.get("energy_level", 0)),
+            ) + 1
+            await add_weekly_tournament_score(
+                payload.user_id,
+                user.get("username"),
+                current_display_level,
+                gained,
+            )
 
         # вњ… РёРЅРІР°Р»РёРґРёСЂСѓРµРј РєСЌС€
         await invalidate_user_cache(payload.user_id)
@@ -2415,6 +2489,218 @@ async def get_online_count():
         return {"success": True, "online_now": online_now}
     except Exception as e:
         logger.error(f"Error getting online count: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/weekly-tournament/overview/{user_id}")
+async def get_weekly_tournament_overview(user_id: int, request: Request):
+    try:
+        await require_telegram_user(request, user_id)
+        now = datetime.utcnow()
+        starts_at, ends_at = get_weekly_tournament_season_window(now)
+        season_key = get_weekly_tournament_season_key(now)
+        player = await get_weekly_tournament_player_entry(user_id, season_key)
+
+        return {
+            "success": True,
+            "season_key": season_key,
+            "starts_at": starts_at.isoformat(),
+            "ends_at": ends_at.isoformat(),
+            "time_left_seconds": max(0, int((ends_at - now).total_seconds())),
+            "leagues": WEEKLY_LEAGUE_LEVEL_RANGES,
+            "fund_splits": WEEKLY_LEAGUE_FUND_SPLITS,
+            "top3_splits": WEEKLY_TOP3_PAYOUT_SPLITS,
+            "rest_split": max(0.0, 1.0 - sum(WEEKLY_TOP3_PAYOUT_SPLITS.values())),
+            "player": player,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_weekly_tournament_overview: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/weekly-tournament/leaderboard/{league}")
+async def get_weekly_tournament_leaderboard_endpoint(league: str, season_key: str | None = None, limit: int = 50):
+    try:
+        league = (league or "").strip().lower()
+        if league not in WEEKLY_LEAGUE_ORDER:
+            raise HTTPException(status_code=400, detail="Unknown league")
+
+        effective_season_key = season_key or get_weekly_tournament_season_key()
+        rows = await get_weekly_tournament_leaderboard(
+            season_key=effective_season_key,
+            league=league,
+            limit=limit,
+        )
+        return {
+            "success": True,
+            "season_key": effective_season_key,
+            "league": league,
+            "players": rows,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_weekly_tournament_leaderboard_endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/weekly-tournament/player/{user_id}")
+async def get_weekly_tournament_player_endpoint(user_id: int, request: Request, season_key: str | None = None):
+    try:
+        await require_telegram_user(request, user_id)
+        effective_season_key = season_key or get_weekly_tournament_season_key()
+        player = await get_weekly_tournament_player_entry(user_id, effective_season_key)
+        return {
+            "success": True,
+            "season_key": effective_season_key,
+            "player": player,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_weekly_tournament_player_endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/admin/weekly-tournament/seasons")
+async def admin_weekly_tournament_seasons(request: Request, limit: int = 12):
+    try:
+        await require_admin_access(request)
+        seasons = await list_weekly_tournament_seasons(limit=limit)
+        return {
+            "success": True,
+            "seasons": seasons,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_weekly_tournament_seasons: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/admin/overview")
+async def admin_overview(request: Request):
+    try:
+        await require_admin_access(request)
+        now = datetime.utcnow()
+        starts_at, ends_at = get_weekly_tournament_season_window(now)
+        season_key = get_weekly_tournament_season_key(now)
+        online_now = await get_online_users_count()
+        season_rows = await list_weekly_tournament_seasons(limit=12)
+        active_season = next((item for item in season_rows if item["season_key"] == season_key), None)
+
+        async with AsyncSessionLocal() as session:
+            total_users_result = await session.execute(select(func.count(User.id)))
+            total_users = int(total_users_result.scalar() or 0)
+
+            league_counts_result = await session.execute(
+                select(
+                    WeeklyTournamentEntry.league,
+                    func.count(WeeklyTournamentEntry.id)
+                ).where(
+                    WeeklyTournamentEntry.season_key == season_key
+                ).group_by(WeeklyTournamentEntry.league)
+            )
+            league_counts = {league: 0 for league in WEEKLY_LEAGUE_ORDER}
+            for league, count in league_counts_result.all():
+                if league in league_counts:
+                    league_counts[league] = int(count or 0)
+
+        top_preview = {}
+        for league in WEEKLY_LEAGUE_ORDER:
+            players = await get_weekly_tournament_leaderboard(season_key=season_key, league=league, limit=3)
+            top_preview[league] = players
+
+        return {
+            "success": True,
+            "generated_at": now.isoformat(),
+            "online_now": online_now,
+            "total_users": total_users,
+            "season_key": season_key,
+            "starts_at": starts_at.isoformat(),
+            "ends_at": ends_at.isoformat(),
+            "time_left_seconds": max(0, int((ends_at - now).total_seconds())),
+            "active_season": active_season,
+            "league_counts": league_counts,
+            "top_preview": top_preview,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_overview: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/admin/weekly-tournament/season/{season_key}")
+async def admin_weekly_tournament_season_detail(season_key: str, request: Request):
+    try:
+        await require_admin_access(request)
+        season_rows = await list_weekly_tournament_seasons(limit=52)
+        season = next((item for item in season_rows if item["season_key"] == season_key), None)
+        winners = await get_weekly_tournament_winners(season_key)
+
+        leagues = {}
+        for league in WEEKLY_LEAGUE_ORDER:
+            leagues[league] = {
+                "range": WEEKLY_LEAGUE_LEVEL_RANGES[league],
+                "fund_split": WEEKLY_LEAGUE_FUND_SPLITS[league],
+                "top50": await get_weekly_tournament_leaderboard(season_key=season_key, league=league, limit=50),
+                "winners": [winner for winner in winners if winner["league"] == league],
+            }
+
+        return {
+            "success": True,
+            "season": season,
+            "season_key": season_key,
+            "leagues": leagues,
+            "top3_splits": WEEKLY_TOP3_PAYOUT_SPLITS,
+            "rest_split": max(0.0, 1.0 - sum(WEEKLY_TOP3_PAYOUT_SPLITS.values())),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_weekly_tournament_season_detail: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/admin/weekly-tournament/season/{season_key}/fund")
+async def admin_set_weekly_tournament_fund(
+    season_key: str,
+    payload: WeeklyTournamentFundRequest,
+    request: Request,
+):
+    try:
+        await require_admin_access(request)
+        starts_at = datetime.strptime(season_key, "%Y-%m-%d")
+        ends_at = starts_at + timedelta(days=7)
+
+        async with AsyncSessionLocal() as session:
+            season = await ensure_weekly_tournament_season(session, season_key, starts_at, ends_at)
+            season.gross_ad_revenue_cents = int(payload.gross_ad_revenue_cents or 0)
+            season.payout_fund_cents = int(payload.payout_fund_cents or 0)
+            await session.commit()
+
+        return {
+            "success": True,
+            "season_key": season_key,
+            "gross_ad_revenue_cents": int(payload.gross_ad_revenue_cents or 0),
+            "payout_fund_cents": int(payload.payout_fund_cents or 0),
+            "league_splits": WEEKLY_LEAGUE_FUND_SPLITS,
+            "rank_splits": {
+                "top1": WEEKLY_TOP3_PAYOUT_SPLITS[1],
+                "top2": WEEKLY_TOP3_PAYOUT_SPLITS[2],
+                "top3": WEEKLY_TOP3_PAYOUT_SPLITS[3],
+                "ranks_4_50": max(0.0, 1.0 - sum(WEEKLY_TOP3_PAYOUT_SPLITS.values())),
+            },
+        }
+    except ValueError:
+        raise HTTPException(status_code=400, detail="season_key must use YYYY-MM-DD format")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_set_weekly_tournament_fund: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

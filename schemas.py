@@ -98,3 +98,8 @@ class VideoTaskClaimRequest(BaseModel):
 class TournamentData(BaseModel):
     user_id: int
     score: int
+
+
+class WeeklyTournamentFundRequest(BaseModel):
+    gross_ad_revenue_cents: int = Field(..., ge=0)
+    payout_fund_cents: int = Field(..., ge=0)
