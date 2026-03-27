@@ -2463,7 +2463,7 @@ async def create_skin_stars_invoice(payload: SkinRequest, request: Request):
 
 @app.get("/api/tournament/leaderboard")
 async def get_tournament_leaderboard():
-    """Get top 5 players from Redis leaderboard"""
+    """Get top 3 players from Redis leaderboard"""
     try:
         players = []
 
@@ -2472,7 +2472,7 @@ async def get_tournament_leaderboard():
             top_players = await conn.zrevrange(
                 TOURNAMENT_KEY,
                 0,
-                4,
+                2,
                 withscores=True
             )
 
