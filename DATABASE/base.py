@@ -90,7 +90,7 @@ class WeeklyTournamentSeason(Base):
     )
 
     id = Column(Integer, primary_key=True)
-    season_key = Column(String, nullable=False, index=True)
+    season_key = Column(String, nullable=False)
     starts_at = Column(DateTime, nullable=False)
     ends_at = Column(DateTime, nullable=False)
     status = Column(String, default="active", nullable=False)
@@ -109,8 +109,8 @@ class WeeklyTournamentEntry(Base):
     )
 
     id = Column(Integer, primary_key=True)
-    season_key = Column(String, nullable=False, index=True)
-    user_id = Column(BigInteger, nullable=False, index=True)
+    season_key = Column(String, nullable=False)
+    user_id = Column(BigInteger, nullable=False)
     username = Column(String, nullable=True)
     display_level = Column(Integer, default=1, nullable=False)
     league = Column(String, default="bronze", nullable=False)
@@ -130,8 +130,8 @@ class WeeklyTournamentWinner(Base):
     )
 
     id = Column(Integer, primary_key=True)
-    season_key = Column(String, nullable=False, index=True)
-    user_id = Column(BigInteger, nullable=False, index=True)
+    season_key = Column(String, nullable=False)
+    user_id = Column(BigInteger, nullable=False)
     username = Column(String, nullable=True)
     league = Column(String, nullable=False)
     rank = Column(Integer, nullable=False)
