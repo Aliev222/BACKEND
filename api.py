@@ -95,6 +95,8 @@ DAILY_REWARD_BASE_COINS = 500
 DAILY_REWARD_INFINITE_ENERGY_MINUTES = 10
 DAILY_REWARD_SKIN_ID = "retro.pngSP"
 MEGA_BOOST_MINUTES = 1
+MEGA_BOOST_COOLDOWN_MIN_MINUTES = 5
+MEGA_BOOST_COOLDOWN_MAX_MINUTES = 10
 GHOST_BOOST_MULTIPLIER = 5
 GHOST_BOOST_MINUTES = 1
 AD_ACTION_SESSION_TTL_SECONDS = 180
@@ -416,6 +418,15 @@ def parse_extra_data(extra_raw) -> dict:
         except Exception:
             return {}
     return {}
+
+
+def parse_iso_datetime(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
 
 
 async def touch_user_activity(user_id: int, user: dict | None = None) -> None:
@@ -840,6 +851,11 @@ async def get_user_data(user_id: int, request: Request):
         selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
         ghost_boost_active, ghost_boost_expires_at = get_ghost_boost_status(user)
         daily_infinite_energy_active, daily_infinite_energy_expires_at = is_daily_infinite_energy_active(user)
+        multitap_level = int(user.get("multitap_level", 0))
+        profit_level = int(user.get("profit_level", 0))
+        energy_level = int(user.get("energy_level", 0))
+        profit_per_tap = get_tap_value(multitap_level)
+        profit_per_hour = get_hour_value(profit_level)
 
         if owned_skins != extra.get("owned_skins") or selected_skin != extra.get("selected_skin", DEFAULT_SKIN_ID):
             extra["owned_skins"] = owned_skins
@@ -853,11 +869,11 @@ async def get_user_data(user_id: int, request: Request):
             "coins": user.get("coins", 0),
             "energy": current_energy,
             "max_energy": max_energy,
-            "profit_per_tap": user.get("profit_per_tap", get_tap_value(user.get("multitap_level", 0))),
-            "profit_per_hour": user.get("profit_per_hour", get_hour_value(user.get("profit_level", 0))),
-            "multitap_level": user.get("multitap_level", 0),
-            "profit_level": user.get("profit_level", 0),
-            "energy_level": user.get("energy_level", 0),
+            "profit_per_tap": profit_per_tap,
+            "profit_per_hour": profit_per_hour,
+            "multitap_level": multitap_level,
+            "profit_level": profit_level,
+            "energy_level": energy_level,
             "owned_skins": owned_skins,
             "selected_skin": selected_skin,
             "ads_watched": extra.get("ads_watched", 0),
@@ -902,7 +918,15 @@ async def get_mega_boost_status(user_id: int, request: Request):
                     extra["active_boosts"] = active_boosts
                     await update_user(user_id, {"extra_data": extra})
                     await invalidate_user_cache(user_id)
-                    return {"active": False}
+                    cooldown_until = parse_iso_datetime(extra.get("mega_boost_cooldown_until"))
+                    if cooldown_until and cooldown_until > now:
+                        return {
+                            "active": False,
+                            "cooldown_active": True,
+                            "cooldown_until": cooldown_until.isoformat(),
+                            "cooldown_remaining_seconds": int((cooldown_until - now).total_seconds())
+                        }
+                    return {"active": False, "cooldown_active": False}
                 else:
                     remaining = int((expires - now).total_seconds())
                     return {
@@ -912,8 +936,21 @@ async def get_mega_boost_status(user_id: int, request: Request):
                     }
             except:
                 pass
-        
-        return {"active": False}
+
+        cooldown_until = parse_iso_datetime(extra.get("mega_boost_cooldown_until"))
+        if cooldown_until and cooldown_until > now:
+            return {
+                "active": False,
+                "cooldown_active": True,
+                "cooldown_until": cooldown_until.isoformat(),
+                "cooldown_remaining_seconds": int((cooldown_until - now).total_seconds())
+            }
+        if cooldown_until and cooldown_until <= now:
+            extra.pop("mega_boost_cooldown_until", None)
+            await update_user(user_id, {"extra_data": extra})
+            await invalidate_user_cache(user_id)
+
+        return {"active": False, "cooldown_active": False}
     except Exception as e:
         logger.error(f"Error in get_mega_boost_status: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -954,9 +991,19 @@ async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
                     }
             except:
                 del active_boosts["mega_boost"]
+
+        cooldown_until = parse_iso_datetime(extra.get("mega_boost_cooldown_until"))
+        if cooldown_until and now < cooldown_until:
+            remaining = int((cooldown_until - now).total_seconds())
+            raise HTTPException(status_code=429, detail=f"Mega boost cooldown {remaining // 60}:{remaining % 60:02d}")
+        if cooldown_until and now >= cooldown_until:
+            extra.pop("mega_boost_cooldown_until", None)
         
         expires_at = (now + timedelta(minutes=MEGA_BOOST_MINUTES)).isoformat()
+        cooldown_minutes = random.randint(MEGA_BOOST_COOLDOWN_MIN_MINUTES, MEGA_BOOST_COOLDOWN_MAX_MINUTES)
+        cooldown_until_value = (now + timedelta(minutes=cooldown_minutes)).isoformat()
         active_boosts["mega_boost"] = {"active": True, "expires_at": expires_at}
+        extra["mega_boost_cooldown_until"] = cooldown_until_value
         extra["active_boosts"] = active_boosts
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
@@ -964,7 +1011,9 @@ async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
         return {
             "success": True,
             "message": "рџ”ҐвљЎ MEGA BOOST activated for 1 minute! x2 coins + infinite energy",
-            "expires_at": expires_at
+            "expires_at": expires_at,
+            "cooldown_until": cooldown_until_value,
+            "cooldown_minutes": cooldown_minutes
         }
     except Exception as e:
         logger.error(f"Error in activate_mega_boost: {e}")
@@ -1662,8 +1711,8 @@ async def can_unlock_skin(user: dict, skin_id: str) -> bool:
             extra = {}
 
     if req["type"] == "level":
-        level = int(user.get("multitap_level", 0))
-        return level >= int(req["value"])
+        display_level = int(user.get("multitap_level", 0)) + 1
+        return display_level >= int(req["value"])
 
     if req["type"] == "ads":
         ads_watched = int(extra.get("ads_watched", 0))
