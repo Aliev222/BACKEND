@@ -89,6 +89,12 @@ class AdActionClaimRequest(BaseModel):
     ad_session_id: str
 
 
+class VideoTaskClaimRequest(BaseModel):
+    user_id: int
+    ad_session_id: str
+    task_id: str
+
+
 class TournamentData(BaseModel):
     user_id: int
     score: int

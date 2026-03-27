@@ -41,6 +41,7 @@ from schemas import (
     TournamentData,
     UpgradeRequest,
     UserIdRequest,
+    VideoTaskClaimRequest,
 )
 from core.game_config import (
     BASE_MAX_ENERGY,
@@ -101,9 +102,27 @@ GHOST_BOOST_MULTIPLIER = 5
 GHOST_BOOST_MINUTES = 1
 AD_ACTION_SESSION_TTL_SECONDS = 180
 AD_SESSION_MIN_WAIT_SECONDS = 8
-AD_ACTIONS_ALLOWED = {"energy_refill_max", "mega_boost", "ghost_boost", "ads_increment"}
+AD_ACTIONS_ALLOWED = {"energy_refill_max", "mega_boost", "ghost_boost", "ads_increment", "video_task"}
 CRASH_GHOST_SESSION_TTL_SECONDS = 90
 CRASH_GHOST_MULTIPLIER_SPEED = 0.68
+VIDEO_TASK_DEFINITIONS = {
+    "tap_surge": {
+        "type": "tap_boost",
+        "cooldown_minutes": 75,
+        "duration_minutes": 5,
+        "multiplier": 2,
+    },
+    "passive_hour": {
+        "type": "passive_boost",
+        "cooldown_minutes": 240,
+        "duration_minutes": 60,
+        "multiplier": 2,
+    },
+    "coin_drop": {
+        "type": "coin_drop",
+        "cooldown_minutes": 60,
+    },
+}
 # Single lightweight reconnect helper to avoid code duplication
 async def try_reconnect_redis() -> None:
     global redis_client
@@ -427,6 +446,42 @@ def parse_iso_datetime(value) -> datetime | None:
         return datetime.fromisoformat(value)
     except Exception:
         return None
+
+
+def resolve_video_task_coin_drop() -> int:
+    roll = random.random()
+    if roll < 0.55:
+        return random.randint(200, 1000)
+    if roll < 0.80:
+        return random.randint(1000, 5000)
+    if roll < 0.92:
+        return random.randint(5000, 12000)
+    if roll < 0.98:
+        return random.randint(12000, 20000)
+    return random.randint(20000, 30000)
+
+
+def get_video_task_last_claims(extra: dict) -> dict:
+    claims = extra.get("video_task_last_claims", {})
+    return claims if isinstance(claims, dict) else {}
+
+
+def get_video_task_boosts(extra: dict) -> dict:
+    boosts = extra.get("video_task_boosts", {})
+    return boosts if isinstance(boosts, dict) else {}
+
+
+def get_active_video_task_boost(extra: dict, boost_key: str) -> tuple[bool, str | None, int]:
+    boosts = get_video_task_boosts(extra)
+    boost = boosts.get(boost_key)
+    if not isinstance(boost, dict):
+        return False, None, 1
+
+    expires_at = parse_iso_datetime(boost.get("expires_at"))
+    if not expires_at or expires_at <= datetime.utcnow():
+        return False, None, 1
+
+    return True, expires_at.isoformat(), int(boost.get("multiplier", 1) or 1)
 
 
 async def touch_user_activity(user_id: int, user: dict | None = None) -> None:
@@ -851,6 +906,8 @@ async def get_user_data(user_id: int, request: Request):
         selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
         ghost_boost_active, ghost_boost_expires_at = get_ghost_boost_status(user)
         daily_infinite_energy_active, daily_infinite_energy_expires_at = is_daily_infinite_energy_active(user)
+        task_tap_boost_active, task_tap_boost_expires_at, task_tap_boost_multiplier = get_active_video_task_boost(extra, "tap_boost")
+        task_passive_boost_active, task_passive_boost_expires_at, task_passive_boost_multiplier = get_active_video_task_boost(extra, "passive_boost")
         multitap_level = int(user.get("multitap_level", 0))
         profit_level = int(user.get("profit_level", 0))
         energy_level = int(user.get("energy_level", 0))
@@ -879,6 +936,12 @@ async def get_user_data(user_id: int, request: Request):
             "ads_watched": extra.get("ads_watched", 0),
             "ghost_boost_active": ghost_boost_active,
             "ghost_boost_expires_at": ghost_boost_expires_at,
+            "task_tap_boost_active": task_tap_boost_active,
+            "task_tap_boost_expires_at": task_tap_boost_expires_at,
+            "task_tap_boost_multiplier": task_tap_boost_multiplier,
+            "task_passive_boost_active": task_passive_boost_active,
+            "task_passive_boost_expires_at": task_passive_boost_expires_at,
+            "task_passive_boost_multiplier": task_passive_boost_multiplier,
             "daily_infinite_energy_active": daily_infinite_energy_active,
             "daily_infinite_energy_expires_at": daily_infinite_energy_expires_at,
             "regen_seconds": ENERGY_REGEN_SECONDS,
@@ -1765,6 +1828,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
 
         mega_boost_active = is_mega_boost_active(user)
         ghost_boost_active, ghost_boost_expires_at = get_ghost_boost_status(user)
+        task_tap_boost_active, _, task_tap_boost_multiplier = get_active_video_task_boost(extra, "tap_boost")
         daily_infinite_energy_active, _ = is_daily_infinite_energy_active(user)
         free_energy_clicks = mega_boost_active or daily_infinite_energy_active or ghost_boost_active
 
@@ -1773,6 +1837,8 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             coin_per_tap *= 2
         if ghost_boost_active:
             coin_per_tap *= GHOST_BOOST_MULTIPLIER
+        if task_tap_boost_active:
+            coin_per_tap *= max(1, task_tap_boost_multiplier)
 
         # Р·Р°С‰РёС‚Р°
         safe_requested_clicks = min(payload.clicks, MAX_CLICK_BATCH_SIZE)
@@ -2599,6 +2665,121 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
         logger.error(f"Error in complete_task: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@app.get("/api/video-tasks/status/{user_id}")
+async def get_video_tasks_status(user_id: int, request: Request):
+    try:
+        await require_telegram_user(request, user_id)
+        user = await get_user_cached(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = parse_extra_data(user.get("extra_data"))
+        last_claims = get_video_task_last_claims(extra)
+        now = datetime.utcnow()
+        tasks = []
+
+        for task_id, config in VIDEO_TASK_DEFINITIONS.items():
+            claimed_at = parse_iso_datetime(last_claims.get(task_id))
+            cooldown_seconds = int(config["cooldown_minutes"] * 60)
+            remaining_seconds = 0
+            available = True
+
+            if claimed_at:
+                elapsed = (now - claimed_at).total_seconds()
+                remaining_seconds = max(0, cooldown_seconds - int(elapsed))
+                available = remaining_seconds <= 0
+
+            tasks.append({
+                "task_id": task_id,
+                "available": available,
+                "remaining_seconds": remaining_seconds,
+                "cooldown_minutes": config["cooldown_minutes"],
+            })
+
+        return {"success": True, "tasks": tasks}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_video_tasks_status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/video-tasks/claim")
+async def claim_video_task(payload: VideoTaskClaimRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await consume_ad_action_session(payload.user_id, payload.ad_session_id, "video_task")
+        await require_redis_rate_limit("video_task_claim", payload.user_id, 20, 60)
+        await require_user_action_lock(f"video_task:{payload.task_id}", payload.user_id, ttl=3)
+
+        config = VIDEO_TASK_DEFINITIONS.get(payload.task_id)
+        if not config:
+            raise HTTPException(status_code=400, detail="Unknown video task")
+
+        user = await get_user_cached(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = parse_extra_data(user.get("extra_data"))
+        last_claims = get_video_task_last_claims(extra)
+        boosts = get_video_task_boosts(extra)
+        now = datetime.utcnow()
+        claimed_at = parse_iso_datetime(last_claims.get(payload.task_id))
+        cooldown_seconds = int(config["cooldown_minutes"] * 60)
+
+        if claimed_at and (now - claimed_at).total_seconds() < cooldown_seconds:
+            remaining = cooldown_seconds - int((now - claimed_at).total_seconds())
+            raise HTTPException(status_code=429, detail=f"Task cooldown {remaining // 60}:{remaining % 60:02d}")
+
+        response = {
+            "success": True,
+            "task_id": payload.task_id,
+            "coins": int(user.get("coins", 0)),
+        }
+        updates = {}
+
+        if config["type"] == "coin_drop":
+            reward = resolve_video_task_coin_drop()
+            response["coins_reward"] = reward
+            response["coins"] = int(user.get("coins", 0)) + reward
+            response["message"] = f"+{reward} coins"
+            updates["coins"] = response["coins"]
+        elif config["type"] == "tap_boost":
+            expires_at = (now + timedelta(minutes=config["duration_minutes"])).isoformat()
+            boosts["tap_boost"] = {
+                "expires_at": expires_at,
+                "multiplier": int(config["multiplier"]),
+            }
+            response["message"] = f"x{config['multiplier']} tap boost for {config['duration_minutes']} min"
+            response["task_tap_boost_active"] = True
+            response["task_tap_boost_expires_at"] = expires_at
+            response["task_tap_boost_multiplier"] = int(config["multiplier"])
+        elif config["type"] == "passive_boost":
+            expires_at = (now + timedelta(minutes=config["duration_minutes"])).isoformat()
+            boosts["passive_boost"] = {
+                "expires_at": expires_at,
+                "multiplier": int(config["multiplier"]),
+            }
+            response["message"] = f"x{config['multiplier']} passive income for {config['duration_minutes']} min"
+            response["task_passive_boost_active"] = True
+            response["task_passive_boost_expires_at"] = expires_at
+            response["task_passive_boost_multiplier"] = int(config["multiplier"])
+
+        last_claims[payload.task_id] = now.isoformat()
+        extra["video_task_last_claims"] = last_claims
+        extra["video_task_boosts"] = boosts
+        updates["extra_data"] = extra
+
+        await update_user(payload.user_id, updates)
+        await invalidate_user_cache(payload.user_id)
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in claim_video_task: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 # ==================== РџРђРЎРЎРР’РќР«Р™ Р”РћРҐРћР” ====================
 
 @app.post("/api/passive-income")
@@ -2621,7 +2802,16 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
         elapsed_seconds = max(0.0, (now - last_income).total_seconds())
         elapsed_seconds = min(elapsed_seconds, 24 * 3600)
 
-        hour_value = int(user.get("profit_per_hour", get_hour_value(user.get("profit_level", 0))))
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except Exception:
+                extra = {}
+
+        passive_boost_active, _, passive_boost_multiplier = get_active_video_task_boost(extra, "passive_boost")
+        base_hour_value = int(user.get("profit_per_hour", get_hour_value(user.get("profit_level", 0))))
+        hour_value = base_hour_value * max(1, passive_boost_multiplier) if passive_boost_active else base_hour_value
         if hour_value <= 0 or elapsed_seconds <= 0:
             return {"success": True, "coins": user["coins"], "income": 0, "message": ""}
 
