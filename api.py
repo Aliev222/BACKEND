@@ -1126,6 +1126,8 @@ async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
             "cooldown_until": cooldown_until_value,
             "cooldown_minutes": cooldown_minutes
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in activate_mega_boost: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1221,103 +1223,11 @@ async def activate_ghost_boost(payload: AdActionClaimRequest, request: Request):
 
 @app.post("/api/reward-video")
 async def reward_video(payload: RewardVideoClaimRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_redis_rate_limit("reward_video", payload.user_id, 5, 60)
-
-        redis_conn = await ensure_redis_available()
-
-        lock_key = f"lock:reward_video:{payload.user_id}"
-        locked = await acquire_once_lock(lock_key, ttl=15)
-        if not locked:
-            raise HTTPException(status_code=429, detail="Reward already being processed")
-
-        session_key = f"adsession:reward:{payload.ad_session_id}"
-        raw = await redis_conn.get(session_key)
-        if not raw:
-            raise HTTPException(status_code=400, detail="Invalid or expired ad session")
-
-        session = json.loads(raw)
-
-        if int(session.get("user_id")) != payload.user_id:
-            raise HTTPException(status_code=400, detail="Ad session does not belong to user")
-
-        if session.get("claimed") is True:
-            raise HTTPException(status_code=409, detail="Reward already claimed")
-
-        created_at = float(session.get("created_at") or 0)
-        if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
-            raise HTTPException(status_code=400, detail="Ad watch is not completed yet")
-
-        user = await get_user_cached(payload.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        reward = 5000
-        new_coins = int(user.get("coins", 0)) + reward
-
-        extra = user.get("extra_data", {}) or {}
-        if not isinstance(extra, dict):
-            extra = {}
-
-        extra["ads_watched"] = int(extra.get("ads_watched", 0)) + 1
-
-        await update_user(payload.user_id, {
-            "coins": new_coins,
-            "extra_data": extra
-        })
-        await invalidate_user_cache(payload.user_id)
-
-        session["claimed"] = True
-        await redis_conn.setex(session_key, 120, json.dumps(session))
-
-        return {
-            "success": True,
-            "coins": new_coins,
-            "ads_watched": extra["ads_watched"]
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in reward_video: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    raise HTTPException(status_code=410, detail="Deprecated reward flow")
 
 @app.post("/api/reward-video/start")
 async def reward_video_start(payload: RewardVideoStartRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_redis_rate_limit("reward_video_start", payload.user_id, 10, 60)
-
-        redis_conn = await ensure_redis_available()
-
-        user = await get_user_cached(payload.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        ad_session_id = f"{payload.user_id}:{int(time.time())}:{random.randint(100000, 999999)}"
-        key = f"adsession:reward:{ad_session_id}"
-
-        await redis_conn.setex(
-            key,
-            120,
-            json.dumps({
-                "user_id": payload.user_id,
-                "claimed": False,
-                "created_at": time.time()
-            })
-        )
-
-        return {
-            "success": True,
-            "ad_session_id": ad_session_id
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in reward_video_start: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    raise HTTPException(status_code=410, detail="Deprecated reward flow")
 
 
 @app.post("/api/ad-action/start")
@@ -1366,10 +1276,6 @@ async def monetag_postback(request: Request):
                 logger.warning("Monetag postback rejected: invalid secret")
                 raise HTTPException(status_code=403, detail="Invalid postback secret")
 
-        ad_session_id = extract_first_value(params, MONETAG_POSTBACK_ID_KEYS)
-        if not ad_session_id:
-            raise HTTPException(status_code=400, detail="ad_session_id is required")
-
         status_hints = [
             params.get("status"),
             params.get("state"),
@@ -1383,7 +1289,12 @@ async def monetag_postback(request: Request):
             for hint in status_hints
         )
         if negative_status:
-            logger.info("Monetag postback ignored as incomplete for session %s: %s", ad_session_id, params)
+            logger.info("Monetag postback ignored as incomplete: %s", params)
+            return Response(content="IGNORED", media_type="text/plain", status_code=200)
+
+        ad_session_id = extract_first_value(params, MONETAG_POSTBACK_ID_KEYS)
+        if not ad_session_id:
+            logger.info("Monetag postback without session id ignored: %s", params)
             return Response(content="IGNORED", media_type="text/plain", status_code=200)
 
         verified = await mark_ad_action_session_verified(ad_session_id, params)
