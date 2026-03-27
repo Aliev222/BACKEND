@@ -91,6 +91,8 @@ REFERRAL_DAILY_SHARE_LIMIT = 50000
 REFERRAL_SPECIAL_SKIN_ID = "refferal.pngSP"
 TELEGRAM_VERIFY_CHANNEL = os.getenv("TELEGRAM_VERIFY_CHANNEL", "@Spirit_cliker")
 TELEGRAM_MEMBER_STATUSES = {"member", "administrator", "creator", "restricted"}
+MONETAG_POSTBACK_SECRET = (os.getenv("MONETAG_POSTBACK_SECRET", "") or "").strip()
+MONETAG_POSTBACK_ENFORCED = (os.getenv("MONETAG_POSTBACK_ENFORCED", "1" if MONETAG_POSTBACK_SECRET else "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 DAILY_REWARD_MAX_DAYS = 30
 DAILY_REWARD_BASE_COINS = 500
 DAILY_REWARD_INFINITE_ENERGY_MINUTES = 10
@@ -102,9 +104,16 @@ GHOST_BOOST_MULTIPLIER = 5
 GHOST_BOOST_MINUTES = 1
 AD_ACTION_SESSION_TTL_SECONDS = 180
 AD_SESSION_MIN_WAIT_SECONDS = 8
-AD_ACTIONS_ALLOWED = {"energy_refill_max", "mega_boost", "ghost_boost", "ads_increment", "video_task"}
+AD_ACTIONS_ALLOWED = {"energy_refill_max", "mega_boost", "ghost_boost", "ads_increment", "video_task", "autoclicker"}
 CRASH_GHOST_SESSION_TTL_SECONDS = 90
 CRASH_GHOST_MULTIPLIER_SPEED = 0.68
+MONETAG_POSTBACK_ID_KEYS = (
+    "ad_session_id", "subid", "sub_id", "click_id", "clickid", "cid",
+    "transaction_id", "txid", "tid", "session_id", "s1", "s2", "s3",
+    "ymid", "request_var"
+)
+MONETAG_POSTBACK_SECRET_KEYS = ("token", "secret", "key")
+MONETAG_POSTBACK_NEGATIVE_VALUES = {"0", "false", "failed", "cancelled", "canceled", "rejected", "deny", "denied"}
 VIDEO_TASK_DEFINITIONS = {
     "tap_surge": {
         "type": "tap_boost",
@@ -283,10 +292,45 @@ async def create_ad_action_session(user_id: int, action: str) -> str:
             "user_id": user_id,
             "action": action,
             "claimed": False,
+            "verified": False,
+            "verified_at": None,
             "created_at": time.time(),
         })
     )
     return ad_session_id
+
+
+def extract_first_value(source: dict, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = source.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+async def mark_ad_action_session_verified(ad_session_id: str, postback_payload: dict) -> bool:
+    redis_conn = await ensure_redis_available()
+    session_key = f"adsession:action:{ad_session_id}"
+    raw = await redis_conn.get(session_key)
+    if not raw:
+        return False
+
+    try:
+        session = json.loads(raw)
+    except Exception:
+        return False
+
+    session["verified"] = True
+    session["verified_at"] = time.time()
+    session["postback_payload"] = postback_payload
+
+    ttl = await redis_conn.ttl(session_key)
+    ttl = max(int(ttl or 0), 300)
+    await redis_conn.setex(session_key, ttl, json.dumps(session))
+    return True
 
 
 async def consume_ad_action_session(user_id: int, ad_session_id: str, expected_action: str) -> dict:
@@ -310,9 +354,13 @@ async def consume_ad_action_session(user_id: int, ad_session_id: str, expected_a
     if session.get("claimed") is True:
         raise HTTPException(status_code=409, detail="Reward already claimed")
 
-    created_at = float(session.get("created_at") or 0)
-    if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
-        raise HTTPException(status_code=400, detail="Ad watch is not completed yet")
+    if MONETAG_POSTBACK_ENFORCED:
+        if session.get("verified") is not True:
+            raise HTTPException(status_code=400, detail="Ad completion was not confirmed yet")
+    else:
+        created_at = float(session.get("created_at") or 0)
+        if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
+            raise HTTPException(status_code=400, detail="Ad watch is not completed yet")
 
     session["claimed"] = True
     await redis_conn.setex(session_key, 60, json.dumps(session))
@@ -1295,6 +1343,62 @@ async def ad_action_start(payload: AdActionStartRequest, request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@app.api_route("/api/ads/monetag/postback", methods=["GET", "POST"])
+async def monetag_postback(request: Request):
+    try:
+        params = {str(k): str(v) for k, v in request.query_params.items()}
+
+        if request.method == "POST":
+            content_type = (request.headers.get("content-type") or "").lower()
+            if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+                form = await request.form()
+                for key, value in form.items():
+                    params[str(key)] = str(value)
+            elif "application/json" in content_type:
+                payload = await request.json()
+                if isinstance(payload, dict):
+                    for key, value in payload.items():
+                        params[str(key)] = str(value)
+
+        if MONETAG_POSTBACK_SECRET:
+            provided_secret = extract_first_value(params, MONETAG_POSTBACK_SECRET_KEYS)
+            if provided_secret != MONETAG_POSTBACK_SECRET:
+                logger.warning("Monetag postback rejected: invalid secret")
+                raise HTTPException(status_code=403, detail="Invalid postback secret")
+
+        ad_session_id = extract_first_value(params, MONETAG_POSTBACK_ID_KEYS)
+        if not ad_session_id:
+            raise HTTPException(status_code=400, detail="ad_session_id is required")
+
+        status_hints = [
+            params.get("status"),
+            params.get("state"),
+            params.get("event"),
+            params.get("result"),
+            params.get("rewarded"),
+            params.get("completed"),
+        ]
+        negative_status = any(
+            hint is not None and str(hint).strip().lower() in MONETAG_POSTBACK_NEGATIVE_VALUES
+            for hint in status_hints
+        )
+        if negative_status:
+            logger.info("Monetag postback ignored as incomplete for session %s: %s", ad_session_id, params)
+            return Response(content="IGNORED", media_type="text/plain", status_code=200)
+
+        verified = await mark_ad_action_session_verified(ad_session_id, params)
+        if not verified:
+            logger.warning("Monetag postback could not find ad session %s", ad_session_id)
+            return Response(content="SESSION_NOT_FOUND", media_type="text/plain", status_code=404)
+
+        return Response(content="OK", media_type="text/plain", status_code=200)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in monetag_postback: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @app.post("/api/ad-watched")
 async def ad_watched(payload: dict, request: Request):
     """Track ad watch statistics"""
@@ -1499,6 +1603,23 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
         raise
     except Exception as e:
         logger.error(f"Error in update_energy: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/autoclicker/activate")
+async def activate_autoclicker(payload: AdActionClaimRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await consume_ad_action_session(payload.user_id, payload.ad_session_id, "autoclicker")
+        await require_redis_rate_limit("activate_autoclicker", payload.user_id, 10, 60)
+        return {
+            "success": True,
+            "duration_seconds": 60
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in activate_autoclicker: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/recover-energy")
