@@ -47,7 +47,12 @@ def get_allowed_clicks(user: dict, now: datetime, requested_clicks: int) -> int:
 
 
 def get_tap_value(level: int) -> int:
-    return 1 + level
+    level = max(0, int(level))
+    if level <= 10:
+        return 1 + level
+
+    scaled = level - 10
+    return 11 + int(scaled * 0.45) + int((scaled ** 1.12) / 4.2)
 
 
 def get_hour_value(level: int) -> int:

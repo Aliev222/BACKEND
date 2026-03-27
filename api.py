@@ -27,8 +27,11 @@ from schemas import (
     AdActionClaimRequest,
     AdActionStartRequest,
     ClicksBatchRequest,
+    CrashGameCashoutRequest,
+    CrashGameStartRequest,
     EnergySyncRequest,
     GameRequest,
+    LuckyBoxRequest,
     PassiveIncomeRequest,
     RegisterRequest,
     RewardVideoClaimRequest,
@@ -54,6 +57,7 @@ from core.game_config import (
     RATE_LIMITS,
     TOURNAMENT_KEY,
     TOURNAMENT_PRIZE_POOL,
+    GLOBAL_UPGRADE_PRICES,
     UPGRADE_PRICES,
     USER_CACHE_PREFIX,
     USER_CACHE_TTL,
@@ -96,6 +100,8 @@ GHOST_BOOST_MINUTES = 1
 AD_ACTION_SESSION_TTL_SECONDS = 180
 AD_SESSION_MIN_WAIT_SECONDS = 8
 AD_ACTIONS_ALLOWED = {"energy_refill_max", "mega_boost", "ghost_boost", "ads_increment"}
+CRASH_GHOST_SESSION_TTL_SECONDS = 90
+CRASH_GHOST_MULTIPLIER_SPEED = 0.68
 # Single lightweight reconnect helper to avoid code duplication
 async def try_reconnect_redis() -> None:
     global redis_client
@@ -290,6 +296,42 @@ async def consume_ad_action_session(user_id: int, ad_session_id: str, expected_a
     session["claimed"] = True
     await redis_conn.setex(session_key, 60, json.dumps(session))
     return session
+
+
+def build_crash_ghost_session(bet: int, user_id: int) -> dict:
+    crash_at = round(1.85 + random.random() * 4.15, 2)
+    if random.random() < 0.1:
+        crash_at = round(5.8 + random.random() * 2.6, 2)
+
+    now_ts = time.time()
+    crash_after_seconds = max(0.85, (crash_at - 1.0) / CRASH_GHOST_MULTIPLIER_SPEED)
+
+    return {
+        "user_id": user_id,
+        "bet": bet,
+        "started_at": now_ts,
+        "crash_at": crash_at,
+        "crash_after_seconds": crash_after_seconds,
+        "claimed": False,
+    }
+
+
+def get_crash_ghost_runtime(session: dict, now_ts: float | None = None) -> dict:
+    now_ts = now_ts or time.time()
+    started_at = float(session.get("started_at") or now_ts)
+    crash_after_seconds = float(session.get("crash_after_seconds") or 0)
+    crash_at = float(session.get("crash_at") or 1.0)
+    elapsed = max(0.0, now_ts - started_at)
+    crashed = elapsed >= crash_after_seconds
+    multiplier = crash_at if crashed else round(1.0 + elapsed * CRASH_GHOST_MULTIPLIER_SPEED, 2)
+    multiplier = max(1.0, min(multiplier, crash_at))
+
+    return {
+        "elapsed_seconds": elapsed,
+        "crashed": crashed,
+        "multiplier": multiplier,
+        "crash_at": crash_at,
+    }
 
 
 # ==================== METRICS ====================
@@ -1219,6 +1261,65 @@ async def increment_ads_watched(payload: AdActionClaimRequest, request: Request)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+def get_global_upgrade_level(user: dict) -> int:
+    return max(
+        int(user.get("multitap_level", 0)),
+        int(user.get("profit_level", 0)),
+        int(user.get("energy_level", 0)),
+    )
+
+
+async def apply_global_upgrade_for_user(user_id: int, user: dict) -> dict:
+    current_level = get_global_upgrade_level(user)
+    if current_level >= MAX_UPGRADE_LEVEL:
+        raise HTTPException(status_code=400, detail="Max level reached")
+
+    price = GLOBAL_UPGRADE_PRICES[current_level]
+    current_coins = int(user.get("coins", 0))
+    if current_coins < price:
+        raise HTTPException(status_code=400, detail="Not enough coins")
+
+    new_level = current_level + 1
+    new_profit_per_tap = get_tap_value(new_level)
+    new_profit_per_hour = get_hour_value(new_level)
+    new_max_energy = get_max_energy(new_level)
+    new_coins = current_coins - price
+
+    updates = {
+        "coins": new_coins,
+        "multitap_level": new_level,
+        "profit_level": new_level,
+        "energy_level": new_level,
+        "profit_per_tap": new_profit_per_tap,
+        "profit_per_hour": new_profit_per_hour,
+        "max_energy": new_max_energy,
+        "energy": new_max_energy,
+    }
+
+    await update_user(user_id, updates)
+    await invalidate_user_cache(user_id)
+
+    next_cost = GLOBAL_UPGRADE_PRICES[new_level] if new_level < len(GLOBAL_UPGRADE_PRICES) else 0
+    return {
+        "success": True,
+        "coins": new_coins,
+        "new_level": new_level,
+        "levels": {
+            "multitap": new_level,
+            "profit": new_level,
+            "energy": new_level,
+        },
+        "prices": {
+            "global": next_cost,
+        },
+        "next_cost": next_cost,
+        "profit_per_tap": new_profit_per_tap,
+        "profit_per_hour": new_profit_per_hour,
+        "max_energy": new_max_energy,
+        "energy": new_max_energy,
+    }
+
+
 @app.post("/api/upgrade")
 async def process_upgrade(payload: UpgradeRequest, request: Request):
     try:
@@ -1227,54 +1328,7 @@ async def process_upgrade(payload: UpgradeRequest, request: Request):
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        boost_type = payload.boost_type
-        if boost_type not in UPGRADE_PRICES:
-            raise HTTPException(status_code=400, detail="Invalid boost type")
-        current_level = user.get(f"{boost_type}_level", 0)
-        
-        if current_level >= len(UPGRADE_PRICES[boost_type]):
-            raise HTTPException(status_code=400, detail="Max level reached")
-        
-        price = UPGRADE_PRICES[boost_type][current_level]
-        if user.get("coins", 0) < price:
-            raise HTTPException(status_code=400, detail="Not enough coins")
-
-        new_level = current_level + 1
-        new_multitap_level = new_level if boost_type == "multitap" else int(user.get("multitap_level", 0))
-        new_profit_level = new_level if boost_type == "profit" else int(user.get("profit_level", 0))
-        new_energy_level = new_level if boost_type == "energy" else int(user.get("energy_level", 0))
-        new_profit_per_tap = get_tap_value(new_multitap_level)
-        new_profit_per_hour = get_hour_value(new_profit_level)
-        new_max_energy = get_max_energy(new_energy_level)
-        new_coins = int(user.get("coins", 0)) - price
-
-        updates = {
-            "coins": new_coins,
-            f"{boost_type}_level": new_level,
-            "profit_per_tap": new_profit_per_tap,
-            "profit_per_hour": new_profit_per_hour,
-            "max_energy": new_max_energy,
-        }
-
-        if boost_type == "energy":
-            updates["energy"] = new_max_energy
-
-        await update_user(payload.user_id, updates)
-        await invalidate_user_cache(payload.user_id)
-        
-        # РћР±РЅРѕРІР»СЏРµРј РєСЌС€
-        
-        return {
-            "success": True,
-            "coins": new_coins,
-            "new_level": new_level,
-            "next_cost": UPGRADE_PRICES[boost_type][current_level + 1] 
-                if current_level + 1 < len(UPGRADE_PRICES[boost_type]) else 0,
-            "profit_per_tap": new_profit_per_tap,
-            "profit_per_hour": new_profit_per_hour,
-            "max_energy": new_max_energy
-        }
+        return await apply_global_upgrade_for_user(payload.user_id, user)
     except HTTPException:
         raise
     except Exception as e:
@@ -1290,62 +1344,7 @@ async def process_upgrade_all(payload: UserIdRequest, request: Request):
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-
-        sequence = ("multitap", "profit", "energy")
-        current_levels = {boost: int(user.get(f"{boost}_level", 0)) for boost in sequence}
-
-        if any(current_levels[boost] >= MAX_UPGRADE_LEVEL for boost in sequence):
-            raise HTTPException(status_code=400, detail="Max level reached")
-
-        total_cost = sum(UPGRADE_PRICES[boost][current_levels[boost]] for boost in sequence)
-        current_coins = int(user.get("coins", 0))
-        if current_coins < total_cost:
-            raise HTTPException(status_code=400, detail="Not enough coins")
-
-        new_multitap_level = current_levels["multitap"] + 1
-        new_profit_level = current_levels["profit"] + 1
-        new_energy_level = current_levels["energy"] + 1
-        new_profit_per_tap = get_tap_value(new_multitap_level)
-        new_profit_per_hour = get_hour_value(new_profit_level)
-        new_max_energy = get_max_energy(new_energy_level)
-        new_coins = current_coins - total_cost
-
-        updates = {
-            "coins": new_coins,
-            "multitap_level": new_multitap_level,
-            "profit_level": new_profit_level,
-            "energy_level": new_energy_level,
-            "profit_per_tap": new_profit_per_tap,
-            "profit_per_hour": new_profit_per_hour,
-            "max_energy": new_max_energy,
-            "energy": new_max_energy,
-        }
-
-        await update_user(payload.user_id, updates)
-        await invalidate_user_cache(payload.user_id)
-
-        next_prices = {
-            boost: (
-                UPGRADE_PRICES[boost][current_levels[boost] + 1]
-                if current_levels[boost] + 1 < len(UPGRADE_PRICES[boost]) else 0
-            )
-            for boost in sequence
-        }
-
-        return {
-            "success": True,
-            "coins": new_coins,
-            "levels": {
-                "multitap": new_multitap_level,
-                "profit": new_profit_level,
-                "energy": new_energy_level,
-            },
-            "prices": next_prices,
-            "profit_per_tap": new_profit_per_tap,
-            "profit_per_hour": new_profit_per_hour,
-            "max_energy": new_max_energy,
-            "energy": new_max_energy,
-        }
+        return await apply_global_upgrade_for_user(payload.user_id, user)
     except HTTPException:
         raise
     except Exception as e:
@@ -1810,13 +1809,16 @@ async def get_upgrade_prices(user_id: int, request: Request):
         user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        prices = {}
-        for boost in UPGRADE_PRICES:
-            level = user.get(f"{boost}_level", 0)
-            prices[boost] = UPGRADE_PRICES[boost][level] if level < len(UPGRADE_PRICES[boost]) else 0
-        
-        return prices
+
+        global_level = get_global_upgrade_level(user)
+        global_price = GLOBAL_UPGRADE_PRICES[global_level] if global_level < len(GLOBAL_UPGRADE_PRICES) else 0
+
+        return {
+            "global": global_price,
+            "multitap": global_price,
+            "profit": global_price,
+            "energy": global_price,
+        }
     except Exception as e:
         logger.error(f"Error in get_upgrade_prices: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -2056,6 +2058,193 @@ async def play_roulette(payload: GameRequest, request: Request):
         raise
     except Exception as e:
         logger.error(f"Error in roulette: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/game/luckybox")
+async def play_luckybox(payload: LuckyBoxRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("game:luckybox", payload.user_id, ttl=0.75)
+        await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
+
+        user = await get_user_cached(payload.user_id)
+        current_coins = int(user.get("coins", 0)) if user else 0
+        if not user or current_coins < payload.bet:
+            raise HTTPException(status_code=400, detail="Not enough coins")
+
+        outcomes = [0.0, 0.8, 1.6, 3.5]
+        random.shuffle(outcomes)
+        multiplier = float(outcomes[payload.box_index])
+        payout = max(0, int(payload.bet * multiplier))
+        new_coins = current_coins - payload.bet + payout
+
+        if multiplier > 1:
+            message = f"Lucky hit! x{multiplier:g} +{payout - payload.bet}"
+            outcome = "win"
+        elif multiplier == 0.8:
+            message = f"Soft save. You kept {payout} coins."
+            outcome = "refund"
+        else:
+            message = f"Bust. You lost {payload.bet} coins."
+            outcome = "lose"
+
+        await update_user(payload.user_id, {"coins": new_coins})
+        await invalidate_user_cache(payload.user_id)
+
+        return {
+            "success": True,
+            "coins": new_coins,
+            "message": message,
+            "outcome": outcome,
+            "multiplier": multiplier,
+            "payout": payout,
+            "profit": payout - payload.bet,
+            "outcomes": outcomes,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in luckybox: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/game/crash/start")
+async def start_crash_ghost_round(payload: CrashGameStartRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("game:crash_start", payload.user_id, ttl=0.75)
+        await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
+
+        redis_conn = await ensure_redis_available()
+        user = await get_user_cached(payload.user_id)
+        if not user or int(user.get("coins", 0)) < payload.bet:
+            raise HTTPException(status_code=400, detail="Not enough coins")
+
+        session_key = f"game:crash:{payload.user_id}"
+        raw_session = await redis_conn.get(session_key)
+        if raw_session:
+            try:
+                active_session = json.loads(raw_session)
+                runtime = get_crash_ghost_runtime(active_session)
+                if not runtime["crashed"] and not active_session.get("claimed"):
+                    raise HTTPException(status_code=409, detail="Crash round already active")
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+
+        new_coins = int(user.get("coins", 0)) - payload.bet
+        session = build_crash_ghost_session(payload.bet, payload.user_id)
+        session["session_id"] = f"{payload.user_id}:{int(session['started_at'] * 1000)}:{random.randint(100000, 999999)}"
+
+        await update_user(payload.user_id, {"coins": new_coins})
+        await invalidate_user_cache(payload.user_id)
+        await redis_conn.setex(session_key, CRASH_GHOST_SESSION_TTL_SECONDS, json.dumps(session))
+
+        return {
+            "success": True,
+            "session_id": session["session_id"],
+            "coins": new_coins,
+            "multiplier": 1.0,
+            "server_started_at": datetime.utcfromtimestamp(session["started_at"]).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in start_crash_ghost_round: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/game/crash/status/{user_id}/{session_id}")
+async def get_crash_ghost_status(user_id: int, session_id: str, request: Request):
+    try:
+        await require_telegram_user(request, user_id)
+        redis_conn = await ensure_redis_available()
+        session_key = f"game:crash:{user_id}"
+        raw_session = await redis_conn.get(session_key)
+        if not raw_session:
+            return {"active": False}
+
+        session = json.loads(raw_session)
+        if session.get("session_id") != session_id:
+            raise HTTPException(status_code=404, detail="Crash round not found")
+
+        runtime = get_crash_ghost_runtime(session)
+        if runtime["crashed"]:
+            await redis_conn.delete(session_key)
+            return {
+                "active": False,
+                "crashed": True,
+                "multiplier": runtime["crash_at"],
+                "crash_at": runtime["crash_at"],
+            }
+
+        return {
+            "active": True,
+            "crashed": False,
+            "multiplier": runtime["multiplier"],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_crash_ghost_status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/game/crash/cashout")
+async def cashout_crash_ghost_round(payload: CrashGameCashoutRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("game:crash_cashout", payload.user_id, ttl=0.35)
+        await require_redis_rate_limit("game_action", payload.user_id, 40, 60)
+
+        redis_conn = await ensure_redis_available()
+        user = await get_user_cached(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        session_key = f"game:crash:{payload.user_id}"
+        raw_session = await redis_conn.get(session_key)
+        if not raw_session:
+            raise HTTPException(status_code=404, detail="Crash round not found")
+
+        session = json.loads(raw_session)
+        if session.get("session_id") != payload.session_id:
+            raise HTTPException(status_code=404, detail="Crash round not found")
+
+        runtime = get_crash_ghost_runtime(session)
+        if runtime["crashed"]:
+            await redis_conn.delete(session_key)
+            return {
+                "success": False,
+                "crashed": True,
+                "coins": int(user.get("coins", 0)),
+                "crash_at": runtime["crash_at"],
+                "message": f"Ghost crashed. You lost {session.get('bet', 0)} coins.",
+            }
+
+        bet = int(session.get("bet", 0))
+        payout = max(0, int(bet * runtime["multiplier"]))
+        new_coins = int(user.get("coins", 0)) + payout
+
+        await update_user(payload.user_id, {"coins": new_coins})
+        await invalidate_user_cache(payload.user_id)
+        await redis_conn.delete(session_key)
+
+        return {
+            "success": True,
+            "crashed": False,
+            "coins": new_coins,
+            "payout": payout,
+            "profit": payout - bet,
+            "multiplier": runtime["multiplier"],
+            "message": f"Ghost paid {payout} coins. Profit: +{payout - bet}",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in cashout_crash_ghost_round: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 # ==================== TOURNAMENT ENDPOINTS ====================
 
