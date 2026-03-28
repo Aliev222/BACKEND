@@ -57,6 +57,8 @@ from core.game_config import (
     CLICK_BURST_ALLOWANCE,
     CLICK_BUFFER_KEY,
     CLICK_FLUSH_INTERVAL,
+    CLICK_SUSPICIOUS_OVERSHOOT,
+    CLICK_SUSPICION_SOFT_LIMIT,
     ENERGY_REGEN_SECONDS,
     MAX_BET,
     MAX_CLICK_BATCH_SIZE,
@@ -93,6 +95,7 @@ redis_client = None
 LOCAL_LOCKS: dict[str, float] = {}
 LOCAL_IDEMPOTENCY_KEYS: dict[str, float] = {}
 LOCAL_RATE_LIMITS_STATE: dict[str, deque[float]] = defaultdict(deque)
+APP_ENV = (os.getenv("APP_ENV", "production") or "production").strip().lower()
 ONLINE_USERS_KEY = "online:users"
 ONLINE_WINDOW_SECONDS = 75
 REFERRAL_SHARE_RATE = 0.05
@@ -165,6 +168,37 @@ WEEKLY_TOP3_PAYOUT_SPLITS = {
     2: 0.20,
     3: 0.15,
 }
+
+
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    raw = (os.getenv(name, "1" if default else "0") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _parse_csv_env(name: str, default: list[str]) -> list[str]:
+    raw = (os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+PROD_CORS_ORIGINS = [
+    "https://spirix.vercel.app",
+    "https://web.telegram.org",
+    "https://telegram.org",
+]
+DEV_CORS_ORIGINS = PROD_CORS_ORIGINS + [
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+]
+ALLOWED_CORS_ORIGINS = _parse_csv_env(
+    "CORS_ALLOWED_ORIGINS",
+    DEV_CORS_ORIGINS if APP_ENV != "production" else PROD_CORS_ORIGINS,
+)
+ALLOW_NULL_ORIGIN = _parse_bool_env("CORS_ALLOW_NULL_ORIGIN", APP_ENV != "production")
 # Single lightweight reconnect helper to avoid code duplication
 async def try_reconnect_redis() -> None:
     global redis_client
@@ -555,6 +589,8 @@ async def build_admin_fraud_overview(season_key: str) -> list[dict]:
         account_age_hours = max(0.0, (now - (user.created_at or now)).total_seconds() / 3600)
         review = reviews_map.get(int(entry.user_id), {})
         reasons: list[str] = []
+        extra = parse_extra_data(getattr(user, "extra_data", {}))
+        click_guard = get_click_guard_state(extra)
 
         if review.get("status") == "fraud":
             reasons.append(review.get("reason") or "Manual fraud review")
@@ -574,6 +610,13 @@ async def build_admin_fraud_overview(season_key: str) -> list[dict]:
         score_per_hour = int((entry.score or 0) / max(account_age_hours, 1))
         if score_per_hour >= 500000:
             reasons.append(f"Unusually fast click income velocity ({format_int(score_per_hour)} per hour)")
+
+        click_suspicion_score = int(click_guard.get("suspicion_score", 0) or 0)
+        hard_rejections = int(click_guard.get("hard_rejections", 0) or 0)
+        if click_suspicion_score >= CLICK_SUSPICION_SOFT_LIMIT:
+            reasons.append(f"Suspicious click batches detected (score {click_suspicion_score})")
+        if hard_rejections > 0:
+            reasons.append(f"Server rejected suspicious click bursts ({hard_rejections})")
 
         referrer_id = getattr(user, "referrer_id", None)
         if referrer_id and referrer_cluster_counts.get(int(referrer_id), 0) >= 5 and account_age_hours <= 72:
@@ -659,6 +702,18 @@ def parse_iso_datetime(value) -> datetime | None:
         return datetime.fromisoformat(value)
     except Exception:
         return None
+
+
+def get_click_guard_state(extra: dict) -> dict:
+    click_guard = extra.get("click_guard", {})
+    if not isinstance(click_guard, dict):
+        click_guard = {}
+    return click_guard
+
+
+def write_click_guard_state(extra: dict, click_guard: dict) -> dict:
+    extra["click_guard"] = click_guard
+    return extra
 
 
 def resolve_video_task_coin_drop() -> int:
@@ -894,17 +949,7 @@ app = FastAPI(title="Ryoho Clicker API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://spirix.vercel.app",
-        "https://web.telegram.org",
-        "https://telegram.org",
-        "http://localhost:3000",
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://localhost:5500",
-        "http://127.0.0.1:5500",
-        "null",
-    ],
+    allow_origins=ALLOWED_CORS_ORIGINS + (["null"] if ALLOW_NULL_ORIGIN else []),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -918,8 +963,27 @@ async def metrics_middleware(request: Request, call_next):
     method = request.method
     status_code = 500
     try:
+        if path.startswith("/api/") and path not in {"/api/ads/monetag/postback"}:
+            request_ip = get_request_ip(request)
+            ip_allowed = await redis_rate_limit(f"rl:global_api:ip:{request_ip}", 240, 60)
+            if not ip_allowed:
+                RATE_LIMIT_REJECTS.labels(namespace="global_api_ip").inc()
+                status_code = 429
+                return JSONResponse(status_code=429, content={"detail": "Too many requests from this IP"})
+
         response = await call_next(request)
         status_code = response.status_code
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'none'; "
+            "form-action 'none'; "
+            "object-src 'none'"
+        )
         return response
     finally:
         duration = time.perf_counter() - start
@@ -1030,6 +1094,39 @@ async def require_redis_rate_limit(namespace: str, user_id: int, limit: int, win
         raise HTTPException(status_code=429, detail="Too many requests")
 
 
+def get_request_ip(request: Request) -> str:
+    forwarded_ip = (request.headers.get("cf-connecting-ip") or "").strip()
+    if forwarded_ip:
+        return forwarded_ip
+
+    x_forwarded_for = (request.headers.get("x-forwarded-for") or "").strip()
+    if x_forwarded_for:
+        return x_forwarded_for.split(",")[0].strip()
+
+    return (request.client.host if request.client else "") or "unknown"
+
+
+async def require_ip_rate_limit(namespace: str, request: Request, limit: int, window_seconds: int):
+    request_ip = get_request_ip(request)
+    allowed = await redis_rate_limit(f"rl:{namespace}:ip:{request_ip}", limit, window_seconds)
+    if not allowed:
+        RATE_LIMIT_REJECTS.labels(namespace=f"{namespace}_ip").inc()
+        raise HTTPException(status_code=429, detail="Too many requests from this IP")
+
+
+async def require_dual_rate_limit(
+    namespace: str,
+    request: Request,
+    user_id: int,
+    user_limit: int,
+    window_seconds: int,
+    *,
+    ip_limit: int | None = None,
+):
+    await require_redis_rate_limit(namespace, user_id, user_limit, window_seconds)
+    await require_ip_rate_limit(namespace, request, ip_limit or user_limit, window_seconds)
+
+
 async def flush_click_buffer_loop():
     while True:
         try:
@@ -1131,12 +1228,7 @@ async def get_user_data(user_id: int, request: Request):
             await invalidate_user_cache(user_id)
 
 
-        extra = user.get("extra_data", {}) or {}
-        if isinstance(extra, str):
-            try:
-                extra = json.loads(extra)
-            except Exception:
-                extra = {}
+        extra = parse_extra_data(user.get("extra_data"))
 
         owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
         selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
@@ -1259,9 +1351,9 @@ async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
     """Activate mega boost (x2 coins + infinite energy for 1 minute)"""
     try:
         await require_telegram_user(request, payload.user_id)
+        await require_dual_rate_limit("activate_mega_boost", request, payload.user_id, 10, 60, ip_limit=20)
         await consume_ad_action_session(payload.user_id, payload.ad_session_id, "mega_boost")
         user = await get_user_cached(payload.user_id)
-        await require_redis_rate_limit("activate_mega_boost", payload.user_id, 10, 60)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -1352,18 +1444,13 @@ async def get_ghost_boost_status_endpoint(user_id: int, request: Request):
 async def activate_ghost_boost(payload: AdActionClaimRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
+        await require_dual_rate_limit("activate_ghost_boost", request, payload.user_id, 10, 60, ip_limit=20)
         await consume_ad_action_session(payload.user_id, payload.ad_session_id, "ghost_boost")
-        await require_redis_rate_limit("activate_ghost_boost", payload.user_id, 10, 60)
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        extra = user.get("extra_data", {}) or {}
-        if isinstance(extra, str):
-            try:
-                extra = json.loads(extra)
-            except Exception:
-                extra = {}
+        extra = parse_extra_data(user.get("extra_data"))
 
         active_boosts = extra.get("active_boosts", {})
         if not isinstance(active_boosts, dict):
@@ -1424,7 +1511,7 @@ async def reward_video_start(payload: RewardVideoStartRequest, request: Request)
 async def ad_action_start(payload: AdActionStartRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_redis_rate_limit("ad_action_start", payload.user_id, 20, 60)
+        await require_dual_rate_limit("ad_action_start", request, payload.user_id, 20, 60, ip_limit=40)
 
         user = await get_user_cached(payload.user_id)
         if not user:
@@ -1541,12 +1628,11 @@ async def ad_watched(payload: dict, request: Request):
 async def increment_ads_watched(payload: AdActionClaimRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
+        await require_dual_rate_limit("ads_increment", request, payload.user_id, 20, 60, ip_limit=40)
         await consume_ad_action_session(payload.user_id, payload.ad_session_id, "ads_increment")
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-
-        await require_redis_rate_limit("ads_increment", payload.user_id, 20, 60)
 
         lock_key = f"lock:ads_increment:{payload.user_id}"
         locked = await acquire_once_lock(lock_key, ttl=5)
@@ -1642,6 +1728,7 @@ async def apply_global_upgrade_for_user(user_id: int, user: dict) -> dict:
 async def process_upgrade(payload: UpgradeRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
+        await require_dual_rate_limit("upgrade", request, payload.user_id, 25, 60, ip_limit=50)
         await require_user_action_lock("upgrade", payload.user_id, ttl=0.35)
         user = await get_user_cached(payload.user_id)
         if not user:
@@ -1658,6 +1745,7 @@ async def process_upgrade(payload: UpgradeRequest, request: Request):
 async def process_upgrade_all(payload: UserIdRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
+        await require_dual_rate_limit("upgrade_all", request, payload.user_id, 25, 60, ip_limit=50)
         await require_user_action_lock("upgrade_all", payload.user_id, ttl=0.35)
         user = await get_user_cached(payload.user_id)
         if not user:
@@ -1674,8 +1762,8 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
     try:
         user_id = payload.user_id
         await require_telegram_user(request, user_id)
+        await require_dual_rate_limit("update_energy", request, user_id, 10, 60, ip_limit=20)
         await consume_ad_action_session(user_id, payload.ad_session_id, "energy_refill_max")
-        await require_redis_rate_limit("update_energy", user_id, 10, 60)
         await require_user_action_lock("update_energy", user_id, ttl=3)
         if not user_id:
             raise HTTPException(status_code=400, detail="user_id required")
@@ -1713,8 +1801,8 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
 async def activate_autoclicker(payload: AdActionClaimRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
+        await require_dual_rate_limit("activate_autoclicker", request, payload.user_id, 10, 60, ip_limit=20)
         await consume_ad_action_session(payload.user_id, payload.ad_session_id, "autoclicker")
-        await require_redis_rate_limit("activate_autoclicker", payload.user_id, 10, 60)
         await record_rewarded_ad_claim(payload.user_id, "autoclicker", {"source_action": "autoclicker"})
         return {
             "success": True,
@@ -2016,6 +2104,7 @@ async def can_unlock_skin(user: dict, skin_id: str) -> bool:
 async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
+        await require_dual_rate_limit("clicks", request, payload.user_id, 90, 60, ip_limit=180)
         user = await get_user_cached(payload.user_id)
         
         if payload.clicks > MAX_CLICK_BATCH_SIZE:
@@ -2040,12 +2129,9 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         multitap_level = int(user.get("multitap_level", 0))
         tap_value = get_tap_value(multitap_level)
 
-        extra = user.get("extra_data", {}) or {}
-        if isinstance(extra, str):
-            try:
-                extra = json.loads(extra)
-            except Exception:
-                extra = {}
+        extra = parse_extra_data(user.get("extra_data"))
+        click_guard = get_click_guard_state(extra)
+        last_click_at = parse_iso_datetime(click_guard.get("last_click_at"))
 
         owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
         selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
@@ -2065,9 +2151,36 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         if task_tap_boost_active:
             coin_per_tap *= max(1, task_tap_boost_multiplier)
 
-        # Р·Р°С‰РёС‚Р°
+        # Р·Р°С‰РёС‚Р°: режем накопление "законных" кликов и опираемся на server-side last_click_at.
         safe_requested_clicks = min(payload.clicks, MAX_CLICK_BATCH_SIZE)
-        allowed_clicks = get_allowed_clicks(user, now, safe_requested_clicks)
+        allowed_clicks = get_allowed_clicks(
+            user,
+            now,
+            safe_requested_clicks,
+            last_click_at=last_click_at,
+        )
+
+        severe_overshoot = (
+            safe_requested_clicks > allowed_clicks + CLICK_SUSPICIOUS_OVERSHOOT
+            and safe_requested_clicks > max(allowed_clicks * 2, CLICK_BURST_ALLOWANCE * 2)
+        )
+        if severe_overshoot:
+            click_guard["hard_rejections"] = int(click_guard.get("hard_rejections", 0)) + 1
+            click_guard["last_rejection_at"] = now.isoformat()
+            click_guard["last_reason"] = (
+                f"Click batch overshoot: requested={safe_requested_clicks}, allowed={allowed_clicks}"
+            )
+            write_click_guard_state(extra, click_guard)
+            await update_user(payload.user_id, {"extra_data": extra})
+            await invalidate_user_cache(payload.user_id)
+            logger.warning(
+                "Rejected suspicious click batch user=%s ip=%s requested=%s allowed=%s",
+                payload.user_id,
+                get_request_ip(request),
+                safe_requested_clicks,
+                allowed_clicks,
+            )
+            raise HTTPException(status_code=429, detail="Click rate too high")
 
         effective_clicks = allowed_clicks if free_energy_clicks else min(allowed_clicks, current_energy)
         gained = effective_clicks * coin_per_tap
@@ -2080,6 +2193,28 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             "coins": new_coins,
             "max_energy": max_energy,
         }
+
+        suspicion_score = int(click_guard.get("suspicion_score", 0))
+        if safe_requested_clicks > allowed_clicks:
+            suspicion_score += 1
+            click_guard["last_reason"] = (
+                f"Requested {safe_requested_clicks} clicks while server allowed {allowed_clicks}"
+            )
+        elif suspicion_score > 0:
+            suspicion_score -= 1
+            click_guard.pop("last_reason", None)
+
+        click_guard["suspicion_score"] = min(12, max(0, suspicion_score))
+        click_guard["last_click_at"] = now.isoformat()
+        click_guard["last_requested_clicks"] = safe_requested_clicks
+        click_guard["last_allowed_clicks"] = allowed_clicks
+        click_guard["last_effective_clicks"] = effective_clicks
+        click_guard["updated_at"] = now.isoformat()
+        if click_guard["suspicion_score"] >= CLICK_SUSPICION_SOFT_LIMIT:
+            click_guard["flagged_at"] = now.isoformat()
+
+        write_click_guard_state(extra, click_guard)
+        update_data["extra_data"] = extra
 
         if free_energy_clicks:
             stored_energy = int(user.get("energy", 0))
@@ -2145,6 +2280,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             "ghost_boost_active": ghost_boost_active,
             "ghost_boost_expires_at": ghost_boost_expires_at,
             "daily_infinite_energy_active": daily_infinite_energy_active,
+            "click_guard_suspicion_score": click_guard["suspicion_score"],
             "referral_bonus_paid": referral_bonus
         }
 
@@ -2179,6 +2315,7 @@ async def get_upgrade_prices(user_id: int, request: Request):
 async def register_user(payload: RegisterRequest, request: Request):
     try:
         telegram_user = await require_telegram_user(request, payload.user_id)
+        await require_dual_rate_limit("register", request, payload.user_id, 10, 60, ip_limit=20)
         await require_user_action_lock("register", payload.user_id, ttl=5)
         existing = await get_user(payload.user_id)
         valid_referrer_id = None
@@ -3163,7 +3300,7 @@ async def get_tasks(user_id: int, request: Request):
 async def complete_task(payload: TaskCompleteRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_redis_rate_limit("complete_task", payload.user_id, *RATE_LIMITS["complete_task"])
+        await require_dual_rate_limit("complete_task", request, payload.user_id, RATE_LIMITS["complete_task"][0], RATE_LIMITS["complete_task"][1], ip_limit=RATE_LIMITS["complete_task"][0] * 2)
         await require_user_action_lock("complete_task", payload.user_id, ttl=5)
         user = await get_user_cached(payload.user_id)
         if not user:
@@ -3293,8 +3430,8 @@ async def get_video_tasks_status(user_id: int, request: Request):
 async def claim_video_task(payload: VideoTaskClaimRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
+        await require_dual_rate_limit("video_task_claim", request, payload.user_id, 20, 60, ip_limit=40)
         await consume_ad_action_session(payload.user_id, payload.ad_session_id, "video_task")
-        await require_redis_rate_limit("video_task_claim", payload.user_id, 20, 60)
         await require_user_action_lock(f"video_task:{payload.task_id}", payload.user_id, ttl=3)
 
         config = VIDEO_TASK_DEFINITIONS.get(payload.task_id)
@@ -3371,6 +3508,7 @@ async def claim_video_task(payload: VideoTaskClaimRequest, request: Request):
 async def passive_income(payload: PassiveIncomeRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
+        await require_dual_rate_limit("passive_income", request, payload.user_id, 20, 60, ip_limit=40)
         await require_user_action_lock("passive_income", payload.user_id, ttl=5)
         user = await get_user(payload.user_id)
         if not user:
@@ -3387,12 +3525,7 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
         elapsed_seconds = max(0.0, (now - last_income).total_seconds())
         elapsed_seconds = min(elapsed_seconds, 24 * 3600)
 
-        extra = user.get("extra_data", {}) or {}
-        if isinstance(extra, str):
-            try:
-                extra = json.loads(extra)
-            except Exception:
-                extra = {}
+        extra = parse_extra_data(user.get("extra_data"))
 
         passive_boost_active, _, passive_boost_multiplier = get_active_video_task_boost(extra, "passive_boost")
         base_hour_value = int(user.get("profit_per_hour", get_hour_value(user.get("profit_level", 0))))
@@ -3436,12 +3569,7 @@ async def get_daily_reward_status(user_id: int, request: Request):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        extra = user.get("extra_data", {}) or {}
-        if isinstance(extra, str):
-            try:
-                extra = json.loads(extra)
-            except Exception:
-                extra = {}
+        extra = parse_extra_data(user.get("extra_data"))
 
         claimed_days, last_claim_date = get_daily_reward_progress(extra)
         today = datetime.utcnow().date().isoformat()
@@ -3474,12 +3602,7 @@ async def claim_daily_reward(payload: UserIdRequest, request: Request):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        extra = user.get("extra_data", {}) or {}
-        if isinstance(extra, str):
-            try:
-                extra = json.loads(extra)
-            except Exception:
-                extra = {}
+        extra = parse_extra_data(user.get("extra_data"))
 
         claimed_days, last_claim_date = get_daily_reward_progress(extra)
         today = datetime.utcnow().date().isoformat()

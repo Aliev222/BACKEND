@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import os
 import time
 from urllib.parse import parse_qsl
 
@@ -9,7 +10,10 @@ from fastapi import HTTPException
 from CONFIG.settings import BOT_TOKEN
 
 
-TELEGRAM_INIT_DATA_TTL_SECONDS = 24 * 60 * 60
+TELEGRAM_INIT_DATA_TTL_SECONDS = max(
+    60,
+    int((os.getenv("TELEGRAM_INIT_DATA_TTL_SECONDS", "600") or "600").strip())
+)
 
 
 def verify_telegram_init_data(init_data: str) -> dict:

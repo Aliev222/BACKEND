@@ -3,6 +3,8 @@ from datetime import datetime
 from core.game_config import (
     BASE_MAX_ENERGY,
     CLICK_BURST_ALLOWANCE,
+    CLICK_TIME_ACCUMULATION_CAP_SECONDS,
+    INITIAL_CLICK_BATCH_ALLOWANCE,
     ENERGY_REGEN_SECONDS,
     MAX_CLICK_BATCH_SIZE,
     MAX_REAL_CLICKS_PER_SECOND,
@@ -34,13 +36,20 @@ def normalize_dt(value):
         return None
 
 
-def get_allowed_clicks(user: dict, now: datetime, requested_clicks: int) -> int:
-    last_update = normalize_dt(user.get("last_energy_update"))
+def get_allowed_clicks(
+    user: dict,
+    now: datetime,
+    requested_clicks: int,
+    *,
+    last_click_at: datetime | None = None,
+) -> int:
+    baseline = last_click_at or normalize_dt(user.get("last_energy_update"))
 
-    if not last_update:
-        return min(requested_clicks, 60, MAX_CLICK_BATCH_SIZE)
+    if not baseline:
+        return min(requested_clicks, INITIAL_CLICK_BATCH_ALLOWANCE, MAX_CLICK_BATCH_SIZE)
 
-    elapsed = max(0.0, (now - last_update).total_seconds())
+    elapsed = max(0.0, (now - baseline).total_seconds())
+    elapsed = min(elapsed, CLICK_TIME_ACCUMULATION_CAP_SECONDS)
     allowed_by_time = int(elapsed * MAX_REAL_CLICKS_PER_SECOND) + CLICK_BURST_ALLOWANCE
     allowed = max(1, min(allowed_by_time, MAX_CLICK_BATCH_SIZE))
     return min(requested_clicks, allowed)
