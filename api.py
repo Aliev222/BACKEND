@@ -605,22 +605,6 @@ async def require_admin_access(request: Request) -> dict:
     return telegram_user
 
 
-@app.post("/api/auth/session")
-async def create_api_session(request: Request):
-    telegram_user = verify_telegram_init_data(
-        request.headers.get("X-Telegram-Init-Data", "")
-    )
-    token, expires_at = issue_session_token(telegram_user)
-    return {
-        "success": True,
-        "token": token,
-        "token_type": "Bearer",
-        "expires_in": SESSION_TOKEN_TTL_SECONDS,
-        "expires_at": expires_at,
-        "user_id": int(telegram_user.get("id", 0)),
-    }
-
-
 def format_int(value: int) -> str:
     return f"{int(value or 0):,}".replace(",", " ")
 
@@ -1100,6 +1084,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.post("/api/auth/session")
+async def create_api_session(request: Request):
+    telegram_user = verify_telegram_init_data(
+        request.headers.get("X-Telegram-Init-Data", "")
+    )
+    token, expires_at = issue_session_token(telegram_user)
+    return {
+        "success": True,
+        "token": token,
+        "token_type": "Bearer",
+        "expires_in": SESSION_TOKEN_TTL_SECONDS,
+        "expires_at": expires_at,
+        "user_id": int(telegram_user.get("id", 0)),
+    }
 
 
 @app.middleware("http")
