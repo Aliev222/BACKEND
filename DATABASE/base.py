@@ -149,6 +149,31 @@ class WeeklyTournamentWinner(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class WeeklyTournamentTonPayout(Base):
+    __tablename__ = "weekly_tournament_ton_payouts"
+    __table_args__ = (
+        Index("ix_weekly_tournament_ton_payouts_season_key", "season_key"),
+        Index("ix_weekly_tournament_ton_payouts_user_id", "user_id"),
+        UniqueConstraint("season_key", "user_id", name="uq_weekly_tournament_ton_payouts_season_user"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    season_key = Column(String, nullable=False)
+    user_id = Column(BigInteger, nullable=False)
+    username = Column(String, nullable=True)
+    league = Column(String, nullable=False)
+    rank = Column(Integer, nullable=False)
+    wallet_address = Column(String, nullable=False)
+    payout_cents = Column(BigInteger, default=0, nullable=False)
+    ton_amount_nano = Column(BigInteger, default=0, nullable=False)
+    ton_price_usd_micros = Column(BigInteger, default=0, nullable=False)
+    status = Column(String, default="queued", nullable=False)
+    tx_hash = Column(String, nullable=True)
+    note = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 class RewardedAdClaim(Base):
     __tablename__ = "rewarded_ad_claims"
     __table_args__ = (

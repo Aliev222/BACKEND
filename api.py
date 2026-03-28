@@ -17,7 +17,7 @@ import secrets
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from sqlalchemy import select, func, update
-from DATABASE.base import User, AsyncSessionLocal, WeeklyTournamentEntry, WeeklyTournamentWinner, RewardedAdClaim
+from DATABASE.base import User, AsyncSessionLocal, WeeklyTournamentEntry, WeeklyTournamentWinner, WeeklyTournamentTonPayout, RewardedAdClaim
 from collections import defaultdict, deque
 from dataclasses import dataclass
 import redis.asyncio as redis
@@ -54,7 +54,11 @@ from schemas import (
     UserIdRequest,
     VideoTaskClaimRequest,
     AdminFraudUpdateRequest,
+    AdminTonPayoutQueueRequest,
+    AdminTonPayoutStatusUpdateRequest,
     AdminWinnerStarsUpdateRequest,
+    TonWalletConnectRequest,
+    TonWalletDisconnectRequest,
     WeeklyTournamentFundRequest,
 )
 from core.game_config import (
@@ -194,6 +198,39 @@ WEEKLY_RANGE_PAYOUT_SPLITS = [
     {"start": 11, "end": 20, "share": 0.10},
     {"start": 21, "end": 50, "share": 0.05},
 ]
+TON_NANO = 1_000_000_000
+TON_WALLET_ALLOWED_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-:")
+
+
+def is_valid_ton_wallet_address(value: str) -> bool:
+    address = (value or "").strip()
+    if not 32 <= len(address) <= 128:
+        return False
+    return all(char in TON_WALLET_ALLOWED_CHARS for char in address)
+
+
+def mask_ton_wallet(address: str | None) -> str:
+    raw = (address or "").strip()
+    if len(raw) < 12:
+        return raw
+    return f"{raw[:6]}...{raw[-6:]}"
+
+
+def get_ton_wallet_from_user(user: dict | None) -> dict:
+    extra_data = (user or {}).get("extra_data") or {}
+    wallet = extra_data.get("ton_wallet") or {}
+    if not isinstance(wallet, dict):
+        wallet = {}
+    address = (wallet.get("address") or "").strip()
+    connected = bool(address and is_valid_ton_wallet_address(address))
+    return {
+        "connected": connected,
+        "address": address if connected else "",
+        "masked_address": mask_ton_wallet(address) if connected else "",
+        "provider": (wallet.get("provider") or "").strip(),
+        "app_name": (wallet.get("app_name") or "").strip(),
+        "connected_at": wallet.get("connected_at"),
+    }
 
 
 def _parse_bool_env(name: str, default: bool = False) -> bool:
@@ -1424,6 +1461,8 @@ async def get_user_data(user_id: int, request: Request):
             await update_user(user_id, {"extra_data": extra})
             await invalidate_user_cache(user_id)
 
+        ton_wallet = get_ton_wallet_from_user({"extra_data": extra})
+
         return {
             "user_id": user["user_id"],
             "username": user.get("username"),
@@ -1450,6 +1489,7 @@ async def get_user_data(user_id: int, request: Request):
             "daily_infinite_energy_expires_at": daily_infinite_energy_expires_at,
             "skin_ad_progress": get_skin_ad_progress(extra),
             "skin_ad_last_watch": get_skin_ad_last_watch(extra),
+            "ton_wallet": ton_wallet,
             "regen_seconds": ENERGY_REGEN_SECONDS,
             "server_time": now.isoformat()
         }
@@ -1458,6 +1498,84 @@ async def get_user_data(user_id: int, request: Request):
         raise
     except Exception as e:
         logger.error(f"Error in get_user_data: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/ton/wallet/{user_id}")
+async def get_ton_wallet_status(user_id: int, request: Request):
+    try:
+        await require_telegram_user(request, user_id)
+        user = await get_user_cached(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        return {
+            "success": True,
+            "user_id": user_id,
+            "wallet": get_ton_wallet_from_user(user),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_ton_wallet_status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/ton/wallet/connect")
+async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        wallet_address = (payload.wallet_address or "").strip()
+        if not is_valid_ton_wallet_address(wallet_address):
+            raise HTTPException(status_code=400, detail="Invalid TON wallet address")
+
+        user = await get_user(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = parse_extra_data(user.get("extra_data"))
+        extra["ton_wallet"] = {
+            "address": wallet_address,
+            "provider": (payload.wallet_provider or "").strip(),
+            "app_name": (payload.wallet_app_name or "").strip(),
+            "connected_at": datetime.utcnow().isoformat(),
+        }
+        await update_user(payload.user_id, {"extra_data": extra})
+        await invalidate_user_cache(payload.user_id)
+
+        return {
+            "success": True,
+            "user_id": payload.user_id,
+            "wallet": get_ton_wallet_from_user({"extra_data": extra}),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in connect_ton_wallet: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/ton/wallet/disconnect")
+async def disconnect_ton_wallet(payload: TonWalletDisconnectRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        user = await get_user(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = parse_extra_data(user.get("extra_data"))
+        extra.pop("ton_wallet", None)
+        await update_user(payload.user_id, {"extra_data": extra})
+        await invalidate_user_cache(payload.user_id)
+
+        return {
+            "success": True,
+            "user_id": payload.user_id,
+            "wallet": get_ton_wallet_from_user({"extra_data": extra}),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in disconnect_ton_wallet: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3144,11 +3262,31 @@ async def get_weekly_tournament_results_endpoint(league: str, season_key: str | 
             }
 
         winners = await get_weekly_tournament_winners(season["season_key"], league=league)
+        async with AsyncSessionLocal() as session:
+            payouts_result = await session.execute(
+                select(WeeklyTournamentTonPayout).where(
+                    WeeklyTournamentTonPayout.season_key == season["season_key"],
+                    WeeklyTournamentTonPayout.league == league,
+                )
+            )
+            payout_rows = {
+                int(row.user_id): row
+                for row in payouts_result.scalars().all()
+            }
+
+        enriched_winners = []
+        for winner in winners:
+            payout_row = payout_rows.get(int(winner["user_id"]))
+            winner_payload = dict(winner)
+            winner_payload["ton_amount_nano"] = int(getattr(payout_row, "ton_amount_nano", 0) or 0)
+            winner_payload["ton_payout_status"] = getattr(payout_row, "status", None)
+            winner_payload["ton_wallet_address"] = getattr(payout_row, "wallet_address", None)
+            enriched_winners.append(winner_payload)
         return {
             "success": True,
             "league": league,
             "season": season,
-            "players": winners[:max(1, min(50, int(limit or 50)))],
+            "players": enriched_winners[:max(1, min(50, int(limit or 50)))],
         }
     except HTTPException:
         raise
@@ -3375,6 +3513,197 @@ async def admin_weekly_tournament_season_detail(season_key: str, request: Reques
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@app.get("/api/admin/weekly-tournament/season/{season_key}/ton-queue")
+async def admin_get_ton_payout_queue(season_key: str, request: Request):
+    try:
+        await require_admin_access(request)
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(WeeklyTournamentTonPayout).where(
+                    WeeklyTournamentTonPayout.season_key == season_key
+                ).order_by(
+                    WeeklyTournamentTonPayout.league.asc(),
+                    WeeklyTournamentTonPayout.rank.asc(),
+                )
+            )
+            rows = result.scalars().all()
+
+        return {
+            "success": True,
+            "season_key": season_key,
+            "payouts": [
+                {
+                    "user_id": int(row.user_id),
+                    "username": row.username,
+                    "league": row.league,
+                    "rank": int(row.rank or 0),
+                    "wallet_address": row.wallet_address,
+                    "masked_wallet": mask_ton_wallet(row.wallet_address),
+                    "payout_cents": int(row.payout_cents or 0),
+                    "ton_amount_nano": int(row.ton_amount_nano or 0),
+                    "ton_price_usd": (int(row.ton_price_usd_micros or 0) / 1_000_000) if row.ton_price_usd_micros else 0,
+                    "status": row.status,
+                    "tx_hash": row.tx_hash,
+                    "note": row.note,
+                }
+                for row in rows
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_get_ton_payout_queue: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/admin/weekly-tournament/season/{season_key}/ton-queue")
+async def admin_build_ton_payout_queue(season_key: str, payload: AdminTonPayoutQueueRequest, request: Request):
+    try:
+        await require_admin_access(request)
+        ton_price_usd = float(payload.ton_price_usd or 0)
+        if ton_price_usd <= 0:
+            raise HTTPException(status_code=400, detail="ton_price_usd must be greater than zero")
+
+        winners = await get_weekly_tournament_winners(season_key)
+        if not winners:
+            return {
+                "success": True,
+                "season_key": season_key,
+                "created": 0,
+                "queued": 0,
+                "skipped_without_wallet": 0,
+                "skipped_without_payout": 0,
+            }
+
+        user_ids = [int(item["user_id"]) for item in winners]
+        async with AsyncSessionLocal() as session:
+            users_result = await session.execute(select(User).where(User.user_id.in_(user_ids)))
+            user_rows = users_result.scalars().all()
+            wallet_map = {}
+            for row in user_rows:
+                extra_data = {}
+                if row.extra_data:
+                    try:
+                        extra_data = json.loads(row.extra_data)
+                    except json.JSONDecodeError:
+                        extra_data = {}
+                wallet = get_ton_wallet_from_user({"extra_data": extra_data})
+                if wallet["connected"] and wallet["address"]:
+                    wallet_map[int(row.user_id)] = wallet
+
+            existing_result = await session.execute(
+                select(WeeklyTournamentTonPayout).where(
+                    WeeklyTournamentTonPayout.season_key == season_key
+                )
+            )
+            existing_rows = {int(row.user_id): row for row in existing_result.scalars().all()}
+
+            created = 0
+            queued = 0
+            skipped_without_wallet = 0
+            skipped_without_payout = 0
+            ton_price_usd_micros = int(round(ton_price_usd * 1_000_000))
+
+            for winner in winners:
+                user_id = int(winner["user_id"])
+                payout_cents = int(winner.get("payout_cents") or 0)
+                if payout_cents <= 0 or not bool(winner.get("eligible_for_payout", True)) or bool(winner.get("fraud_flag", False)):
+                    skipped_without_payout += 1
+                    continue
+
+                wallet = wallet_map.get(user_id)
+                if not wallet:
+                    skipped_without_wallet += 1
+                    continue
+
+                ton_amount_nano = max(0, int(round(((payout_cents / 100.0) / ton_price_usd) * TON_NANO)))
+                if ton_amount_nano <= 0:
+                    skipped_without_payout += 1
+                    continue
+
+                row = existing_rows.get(user_id)
+                if row is None:
+                    row = WeeklyTournamentTonPayout(
+                        season_key=season_key,
+                        user_id=user_id,
+                        username=winner.get("username"),
+                        league=winner.get("league") or "bronze",
+                        rank=int(winner.get("rank") or 0),
+                        wallet_address=wallet["address"],
+                        payout_cents=payout_cents,
+                        ton_amount_nano=ton_amount_nano,
+                        ton_price_usd_micros=ton_price_usd_micros,
+                        status="queued",
+                    )
+                    session.add(row)
+                    existing_rows[user_id] = row
+                    created += 1
+                else:
+                    row.username = winner.get("username")
+                    row.league = winner.get("league") or row.league
+                    row.rank = int(winner.get("rank") or row.rank or 0)
+                    row.wallet_address = wallet["address"]
+                    row.payout_cents = payout_cents
+                    row.ton_amount_nano = ton_amount_nano
+                    row.ton_price_usd_micros = ton_price_usd_micros
+                    row.updated_at = datetime.utcnow()
+                    if row.status in {"failed", "cancelled"}:
+                        row.status = "queued"
+                queued += 1
+
+            await session.commit()
+
+        return {
+            "success": True,
+            "season_key": season_key,
+            "created": created,
+            "queued": queued,
+            "skipped_without_wallet": skipped_without_wallet,
+            "skipped_without_payout": skipped_without_payout,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_build_ton_payout_queue: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/admin/weekly-tournament/season/{season_key}/ton-payout-status")
+async def admin_update_ton_payout_status(season_key: str, payload: AdminTonPayoutStatusUpdateRequest, request: Request):
+    try:
+        await require_admin_access(request)
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(WeeklyTournamentTonPayout).where(
+                    WeeklyTournamentTonPayout.season_key == season_key,
+                    WeeklyTournamentTonPayout.user_id == payload.user_id,
+                )
+            )
+            row = result.scalar_one_or_none()
+            if not row:
+                raise HTTPException(status_code=404, detail="TON payout row not found")
+
+            row.status = (payload.status or "queued").strip().lower()
+            row.tx_hash = (payload.tx_hash or "").strip() or None
+            row.note = (payload.note or "").strip() or None
+            row.updated_at = datetime.utcnow()
+            await session.commit()
+
+            return {
+                "success": True,
+                "season_key": season_key,
+                "user_id": payload.user_id,
+                "status": row.status,
+                "tx_hash": row.tx_hash,
+                "note": row.note,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_update_ton_payout_status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @app.post("/api/admin/weekly-tournament/season/{season_key}/fund")
 async def admin_set_weekly_tournament_fund(
     season_key: str,
@@ -3402,7 +3731,9 @@ async def admin_set_weekly_tournament_fund(
                 "top1": WEEKLY_TOP3_PAYOUT_SPLITS[1],
                 "top2": WEEKLY_TOP3_PAYOUT_SPLITS[2],
                 "top3": WEEKLY_TOP3_PAYOUT_SPLITS[3],
-                "ranks_4_50": max(0.0, 1.0 - sum(WEEKLY_TOP3_PAYOUT_SPLITS.values())),
+                "ranks_4_10": WEEKLY_RANGE_PAYOUT_SPLITS[0]["share"],
+                "ranks_11_20": WEEKLY_RANGE_PAYOUT_SPLITS[1]["share"],
+                "ranks_21_50": WEEKLY_RANGE_PAYOUT_SPLITS[2]["share"],
             },
         }
     except ValueError:

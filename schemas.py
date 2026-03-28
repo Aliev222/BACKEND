@@ -116,3 +116,25 @@ class AdminFraudUpdateRequest(BaseModel):
 class AdminWinnerStarsUpdateRequest(BaseModel):
     user_id: int
     stars_reward: int = Field(..., ge=0)
+
+
+class TonWalletConnectRequest(BaseModel):
+    user_id: int
+    wallet_address: str = Field(..., min_length=32, max_length=128)
+    wallet_provider: Optional[str] = Field(default=None, max_length=32)
+    wallet_app_name: Optional[str] = Field(default=None, max_length=64)
+
+
+class TonWalletDisconnectRequest(BaseModel):
+    user_id: int
+
+
+class AdminTonPayoutQueueRequest(BaseModel):
+    ton_price_usd: float = Field(..., gt=0)
+
+
+class AdminTonPayoutStatusUpdateRequest(BaseModel):
+    user_id: int
+    status: str = Field(..., min_length=2, max_length=24)
+    tx_hash: Optional[str] = Field(default=None, max_length=256)
+    note: Optional[str] = Field(default=None, max_length=512)
