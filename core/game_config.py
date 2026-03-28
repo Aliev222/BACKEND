@@ -73,12 +73,46 @@ UPGRADE_PRICES = {
     ],
 }
 
-GLOBAL_UPGRADE_PRICES = [
-    UPGRADE_PRICES["multitap"][level] +
-    UPGRADE_PRICES["profit"][level] +
-    UPGRADE_PRICES["energy"][level]
-    for level in range(MAX_UPGRADE_LEVEL)
-]
+def _build_global_upgrade_prices():
+    # Harder "tournament" progression:
+    # lvl 1  ~= 300
+    # lvl 10 ~= 12,000
+    # lvl 20 ~= 70,000
+    # lvl 50 ~= 1,400,000
+    # lvl 100 ~= 22,000,000
+    #
+    # We interpolate smoothly between anchor points in log space so the curve
+    # stays readable and does not spike awkwardly in the middle levels.
+    import math
+
+    anchors = [
+        (0, 300),
+        (9, 12000),
+        (19, 70000),
+        (49, 1400000),
+        (99, 22000000),
+    ]
+
+    prices = [0] * MAX_UPGRADE_LEVEL
+    for index in range(len(anchors) - 1):
+        start_level, start_price = anchors[index]
+        end_level, end_price = anchors[index + 1]
+        span = end_level - start_level
+        for level in range(start_level, end_level + 1):
+            progress = 0 if span == 0 else (level - start_level) / span
+            log_price = math.log(start_price) + (math.log(end_price) - math.log(start_price)) * progress
+            rounded_price = max(50, int(round(math.exp(log_price) / 50.0) * 50))
+            prices[level] = rounded_price
+
+    # Guarantee monotonic growth even after rounding.
+    for level in range(1, len(prices)):
+        if prices[level] <= prices[level - 1]:
+            prices[level] = prices[level - 1] + 50
+
+    return prices
+
+
+GLOBAL_UPGRADE_PRICES = _build_global_upgrade_prices()
 
 HOUR_VALUES = [
     10, 15, 22, 32, 45, 62, 83, 108, 138, 173,
