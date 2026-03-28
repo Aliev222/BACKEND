@@ -27,7 +27,7 @@ WEEKLY_TOP_PAYOUT_SPLITS = {
     3: 0.15,
 }
 WEEKLY_RANGE_PAYOUT_SPLITS = (
-    ((4, 10), 0.20),
+    ((4, 10), 0.22),
     ((11, 20), 0.10),
     ((21, 50), 0.05),
 )

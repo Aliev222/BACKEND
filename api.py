@@ -191,10 +191,10 @@ WEEKLY_LEAGUE_FUND_SPLITS = {
 WEEKLY_TOP3_PAYOUT_SPLITS = {
     1: 0.30,
     2: 0.20,
-    3: 0.15,
+    3: 0.13,
 }
 WEEKLY_RANGE_PAYOUT_SPLITS = [
-    {"start": 4, "end": 10, "share": 0.20},
+    {"start": 4, "end": 10, "share": 0.22},
     {"start": 11, "end": 20, "share": 0.10},
     {"start": 21, "end": 50, "share": 0.05},
 ]
