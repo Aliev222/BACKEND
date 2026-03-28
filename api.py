@@ -12,7 +12,7 @@ import logging
 import httpx
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from DATABASE.base import User, AsyncSessionLocal, WeeklyTournamentEntry, WeeklyTournamentWinner, RewardedAdClaim
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -714,6 +714,51 @@ def get_click_guard_state(extra: dict) -> dict:
 def write_click_guard_state(extra: dict, click_guard: dict) -> dict:
     extra["click_guard"] = click_guard
     return extra
+
+
+def serialize_db_field(field: str, value):
+    if field == "extra_data" and value is not None and not isinstance(value, str):
+        return json.dumps(value)
+    return value
+
+
+async def update_user_if_matches(user_id: int, expected: dict, data: dict):
+    allowed_fields = {
+        "username", "coins", "profit_per_hour", "profit_per_tap", "energy",
+        "max_energy", "level", "multitap_level", "profit_level", "energy_level",
+        "boost_level", "last_passive_income", "last_energy_update", "referrer_id",
+        "referral_count", "referral_earnings", "extra_data", "luck_level"
+    }
+    unknown_fields = (set(expected) | set(data)) - allowed_fields
+    if unknown_fields:
+        raise ValueError(f"Unsupported atomic update fields: {sorted(unknown_fields)}")
+
+    where_clauses = [User.user_id == user_id]
+    for field, raw_value in expected.items():
+        value = serialize_db_field(field, raw_value)
+        column = getattr(User, field)
+        if value is None:
+            where_clauses.append(column.is_(None))
+        else:
+            where_clauses.append(column == value)
+
+    values = {
+        field: serialize_db_field(field, raw_value)
+        for field, raw_value in data.items()
+    }
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(User)
+            .where(*where_clauses)
+            .values(**values)
+        )
+        if result.rowcount != 1:
+            await session.rollback()
+            return None
+        await session.commit()
+
+    return await get_user(user_id)
 
 
 def resolve_video_task_coin_drop() -> int:
@@ -2236,8 +2281,20 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             update_data["energy"] = new_energy
             update_data["last_energy_update"] = now
 
-        # РЎРѕС…СЂР°РЅСЏРµРј СЌРЅРµСЂРіРёСЋ Рё Р±Р°Р»Р°РЅСЃ РѕРґРЅРёРј server-side update РЅР° Р±Р°С‚С‡ РєР»РёРєРѕРІ.
-        await update_user(payload.user_id, update_data)
+        # РЎРѕС…СЂР°РЅСЏРµРј СЌРЅРµСЂРіРёСЋ Рё Р±Р°Р»Р°РЅСЃ РѕРґРЅРёРј atomic update, С‡С‚РѕР±С‹ РіРѕРЅРєРё
+        # РјРµР¶РґСѓ РєР»РёРєР°РјРё/РїР°СЃСЃРёРІРєРѕР№/СЌРЅРµСЂРіРёРµР№ РЅРµ РїРµСЂРµС‚РёСЂР°Р»Рё СЃРѕСЃС‚РѕСЏРЅРёРµ.
+        updated_user = await update_user_if_matches(
+            payload.user_id,
+            {
+                "coins": int(user.get("coins", 0)),
+                "energy": int(user.get("energy", 0)),
+                "last_energy_update": normalize_dt(user.get("last_energy_update")),
+            },
+            update_data,
+        )
+        if not updated_user:
+            logger.warning("Atomic click update conflict for user=%s", payload.user_id)
+            raise HTTPException(status_code=409, detail="Click state changed, retry")
 
         conn = await get_redis_or_none()
         if conn and gained > 0:
@@ -2262,12 +2319,12 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
 
         # вњ… РёРЅРІР°Р»РёРґРёСЂСѓРµРј РєСЌС€
         await invalidate_user_cache(payload.user_id)
-        referral_bonus = await grant_referral_share_bonus(user, gained)
+        referral_bonus = await grant_referral_share_bonus(updated_user, gained)
 
         return {
             "success": True,
-            "coins": new_coins,
-            "energy": new_energy,
+            "coins": int(updated_user.get("coins", new_coins)),
+            "energy": int(updated_user.get("energy", new_energy)),
             "max_energy": max_energy,
             "regen_seconds": ENERGY_REGEN_SECONDS,
             "server_time": now.isoformat(),
@@ -3518,7 +3575,13 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
         now = datetime.utcnow()
 
         if not last_income:
-            await update_user(payload.user_id, {"last_passive_income": now})
+            initialized_user = await update_user_if_matches(
+                payload.user_id,
+                {"last_passive_income": None},
+                {"last_passive_income": now},
+            )
+            if initialized_user is None:
+                raise HTTPException(status_code=409, detail="Passive income baseline changed, retry")
             await invalidate_user_cache(payload.user_id)
             return {"success": True, "coins": user["coins"], "income": 0, "message": ""}
 
@@ -3541,20 +3604,33 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
         new_last_income = min(now, last_income + timedelta(seconds=consumed_seconds))
         new_coins = int(user.get("coins", 0)) + total_income
 
-        await update_user(payload.user_id, {
-            "coins": new_coins,
-            "last_passive_income": new_last_income
-        })
+        updated_user = await update_user_if_matches(
+            payload.user_id,
+            {
+                "coins": int(user.get("coins", 0)),
+                "last_passive_income": last_income,
+            },
+            {
+                "coins": new_coins,
+                "last_passive_income": new_last_income,
+            },
+        )
+        if not updated_user:
+            logger.warning("Atomic passive-income update conflict for user=%s", payload.user_id)
+            raise HTTPException(status_code=409, detail="Passive income state changed, retry")
+
         await invalidate_user_cache(payload.user_id)
-        referral_bonus = await grant_referral_share_bonus(user, total_income)
+        referral_bonus = await grant_referral_share_bonus(updated_user, total_income)
 
         return {
             "success": True,
-            "coins": new_coins,
+            "coins": int(updated_user.get("coins", new_coins)),
             "income": total_income,
             "referral_bonus_paid": referral_bonus,
             "message": f"+{total_income} passive income"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in passive_income: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
