@@ -122,10 +122,13 @@ DAILY_REWARD_BASE_COINS = 500
 DAILY_REWARD_INFINITE_ENERGY_MINUTES = 10
 DAILY_REWARD_SKIN_ID = "retro.pngSP"
 MEGA_BOOST_MINUTES = 1
-MEGA_BOOST_COOLDOWN_MIN_MINUTES = 5
+MEGA_BOOST_COOLDOWN_MIN_MINUTES = 10
 MEGA_BOOST_COOLDOWN_MAX_MINUTES = 10
 GHOST_BOOST_MULTIPLIER = 5
 GHOST_BOOST_MINUTES = 1
+AUTOCLICKER_COOLDOWN_MINUTES = 10
+SKIN_AD_COOLDOWN_MINUTES = 10
+ENERGY_REFILL_COOLDOWN_MINUTES = 10
 AD_ACTION_SESSION_TTL_SECONDS = 180
 AD_SESSION_MIN_WAIT_SECONDS = 8
 AD_ACTIONS_ALLOWED = {"energy_refill_max", "mega_boost", "ghost_boost", "ads_increment", "video_task", "autoclicker"}
@@ -155,6 +158,17 @@ VIDEO_TASK_DEFINITIONS = {
         "type": "coin_drop",
         "cooldown_minutes": 60,
     },
+}
+
+VIDEO_SKIN_IDS = {
+    "video.pngSP",
+    "video2.pngSP",
+    "video3.pngSP",
+    "video4.pngSP",
+    "video5.pngSP",
+    "video6.pngSP",
+    "video7.pngSP",
+    "video8.pngSP",
 }
 WEEKLY_LEAGUE_ORDER = ("diamond", "gold", "silver", "bronze")
 WEEKLY_LEAGUE_LEVEL_RANGES = {
@@ -801,6 +815,16 @@ def write_click_guard_state(extra: dict, click_guard: dict) -> dict:
     return extra
 
 
+def get_skin_ad_progress(extra: dict) -> dict:
+    value = extra.get("skin_ad_progress", {})
+    return value if isinstance(value, dict) else {}
+
+
+def get_skin_ad_last_watch(extra: dict) -> dict:
+    value = extra.get("skin_ad_last_watch", {})
+    return value if isinstance(value, dict) else {}
+
+
 def serialize_db_field(field: str, value):
     if field == "extra_data" and value is not None and not isinstance(value, str):
         return json.dumps(value)
@@ -1418,6 +1442,8 @@ async def get_user_data(user_id: int, request: Request):
             "task_passive_boost_multiplier": task_passive_boost_multiplier,
             "daily_infinite_energy_active": daily_infinite_energy_active,
             "daily_infinite_energy_expires_at": daily_infinite_energy_expires_at,
+            "skin_ad_progress": get_skin_ad_progress(extra),
+            "skin_ad_last_watch": get_skin_ad_last_watch(extra),
             "regen_seconds": ENERGY_REGEN_SECONDS,
             "server_time": now.isoformat()
         }
@@ -1537,7 +1563,7 @@ async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
             extra.pop("mega_boost_cooldown_until", None)
         
         expires_at = (now + timedelta(minutes=MEGA_BOOST_MINUTES)).isoformat()
-        cooldown_minutes = random.randint(MEGA_BOOST_COOLDOWN_MIN_MINUTES, MEGA_BOOST_COOLDOWN_MAX_MINUTES)
+        cooldown_minutes = MEGA_BOOST_COOLDOWN_MAX_MINUTES
         cooldown_until_value = (now + timedelta(minutes=cooldown_minutes)).isoformat()
         active_boosts["mega_boost"] = {"active": True, "expires_at": expires_at}
         extra["mega_boost_cooldown_until"] = cooldown_until_value
@@ -1717,7 +1743,7 @@ async def monetag_postback(request: Request):
 
         ad_session_id = extract_first_value(params, MONETAG_POSTBACK_ID_KEYS)
         if not ad_session_id:
-            logger.info("Monetag postback without session id ignored: %s", params)
+            logger.debug("Monetag postback without session id ignored: %s", params)
             return Response(content="IGNORED", media_type="text/plain", status_code=200)
 
         verified = await mark_ad_action_session_verified(ad_session_id, params)
@@ -1795,13 +1821,54 @@ async def increment_ads_watched(payload: AdActionClaimRequest, request: Request)
         ads_watched = int(extra.get("ads_watched", 0)) + 1
         extra["ads_watched"] = ads_watched
 
+        skin_id = LEGACY_SKIN_ID_MAP.get(payload.skin_id, payload.skin_id) if payload.skin_id else None
+        current_count = 0
+        required_count = 0
+        cooldown_remaining_seconds = 0
+        ready_to_unlock = False
+
+        if skin_id:
+            if skin_id not in VIDEO_SKIN_IDS:
+                raise HTTPException(status_code=400, detail="Unknown ad skin")
+
+            progress = get_skin_ad_progress(extra)
+            last_watch = get_skin_ad_last_watch(extra)
+            required_count = int(SKIN_REQUIREMENTS.get(skin_id, {}).get("count", 1))
+            current_count = int(progress.get(skin_id, 0) or 0)
+
+            if current_count >= required_count:
+                ready_to_unlock = True
+            else:
+                last_watch_at = parse_iso_datetime(last_watch.get(skin_id))
+                now = datetime.utcnow()
+                if last_watch_at:
+                    next_allowed = last_watch_at + timedelta(minutes=SKIN_AD_COOLDOWN_MINUTES)
+                    if next_allowed > now:
+                        cooldown_remaining_seconds = int((next_allowed - now).total_seconds())
+                        raise HTTPException(
+                            status_code=429,
+                            detail=f"Skin ad cooldown {cooldown_remaining_seconds // 60}:{cooldown_remaining_seconds % 60:02d}"
+                        )
+
+                current_count = min(required_count, current_count + 1)
+                progress[skin_id] = current_count
+                last_watch[skin_id] = now.isoformat()
+                extra["skin_ad_progress"] = progress
+                extra["skin_ad_last_watch"] = last_watch
+                ready_to_unlock = current_count >= required_count
+
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
-        await record_rewarded_ad_claim(payload.user_id, "skins", {"source_action": "ads_increment"})
+        await record_rewarded_ad_claim(payload.user_id, "skins", {"source_action": "ads_increment", "skin_id": skin_id})
 
         return {
             "success": True,
-            "ads_watched": ads_watched
+            "ads_watched": ads_watched,
+            "skin_id": skin_id,
+            "current_count": current_count,
+            "required_count": required_count,
+            "ready_to_unlock": ready_to_unlock,
+            "cooldown_minutes": SKIN_AD_COOLDOWN_MINUTES,
         }
 
     except HTTPException:
@@ -1919,11 +1986,22 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
 
         now = datetime.utcnow()
         max_energy = resolve_max_energy(user)
+        extra = parse_extra_data(user.get("extra_data"))
+        cooldown_until = parse_iso_datetime(extra.get("energy_refill_cooldown_until"))
+        if cooldown_until and now < cooldown_until:
+            remaining = int((cooldown_until - now).total_seconds())
+            raise HTTPException(status_code=429, detail=f"Energy refill cooldown active. Try again in {format_duration(remaining)}")
+        if cooldown_until and now >= cooldown_until:
+            extra.pop("energy_refill_cooldown_until", None)
+
+        cooldown_until_value = (now + timedelta(minutes=ENERGY_REFILL_COOLDOWN_MINUTES)).isoformat()
+        extra["energy_refill_cooldown_until"] = cooldown_until_value
 
         await update_user(user_id, {
             "max_energy": max_energy,
             "energy": max_energy,
-            "last_energy_update": now
+            "last_energy_update": now,
+            "extra_data": extra
         })
         await invalidate_user_cache(user_id)
         await record_rewarded_ad_claim(user_id, "energy_restore", {"source_action": "energy_refill_max"})
@@ -1933,7 +2011,9 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
             "energy": max_energy,
             "max_energy": max_energy,
             "regen_seconds": ENERGY_REGEN_SECONDS,
-            "server_time": now.isoformat()
+            "server_time": now.isoformat(),
+            "cooldown_until": cooldown_until_value,
+            "cooldown_minutes": ENERGY_REFILL_COOLDOWN_MINUTES
         }
 
     except HTTPException:
@@ -1949,10 +2029,29 @@ async def activate_autoclicker(payload: AdActionClaimRequest, request: Request):
         await require_telegram_user(request, payload.user_id)
         await require_dual_rate_limit("activate_autoclicker", request, payload.user_id, 10, 60, ip_limit=20)
         await consume_ad_action_session(payload.user_id, payload.ad_session_id, "autoclicker")
+        user = await get_user_cached(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = parse_extra_data(user.get("extra_data"))
+        now = datetime.utcnow()
+        cooldown_until = parse_iso_datetime(extra.get("autoclicker_cooldown_until"))
+        if cooldown_until and now < cooldown_until:
+            remaining = int((cooldown_until - now).total_seconds())
+            raise HTTPException(status_code=429, detail=f"Autoclicker cooldown {remaining // 60}:{remaining % 60:02d}")
+        if cooldown_until and now >= cooldown_until:
+            extra.pop("autoclicker_cooldown_until", None)
+
+        cooldown_until_value = (now + timedelta(minutes=AUTOCLICKER_COOLDOWN_MINUTES)).isoformat()
+        extra["autoclicker_cooldown_until"] = cooldown_until_value
+        await update_user(payload.user_id, {"extra_data": extra})
+        await invalidate_user_cache(payload.user_id)
         await record_rewarded_ad_claim(payload.user_id, "autoclicker", {"source_action": "autoclicker"})
         return {
             "success": True,
-            "duration_seconds": 60
+            "duration_seconds": 60,
+            "cooldown_until": cooldown_until_value,
+            "cooldown_minutes": AUTOCLICKER_COOLDOWN_MINUTES,
         }
     except HTTPException:
         raise
@@ -2237,8 +2336,9 @@ async def can_unlock_skin(user: dict, skin_id: str) -> bool:
         return display_level >= int(req["value"])
 
     if req["type"] == "ads":
-        ads_watched = int(extra.get("ads_watched", 0))
-        return ads_watched >= int(req["count"])
+        progress = get_skin_ad_progress(extra)
+        current = int(progress.get(skin_id, 0) or 0)
+        return current >= int(req["count"])
 
     if req["type"] == "friends":
         referral_count = int(user.get("referral_count", 0))
@@ -3899,15 +3999,15 @@ async def unlock_skin(payload: SkinRequest, request: Request):
             raise HTTPException(status_code=400, detail="Unknown skin")
 
         owned = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
-        ads_watched = int(extra.get("ads_watched", 0))
+        skin_ad_progress = get_skin_ad_progress(extra)
 
         if skin_id in owned:
             return {"success": True}
 
         if skin_id in SKIN_REQUIREMENTS and SKIN_REQUIREMENTS[skin_id]["type"] == "ads":
             required = int(SKIN_REQUIREMENTS[skin_id]["count"])
-
-            if ads_watched < required:
+            current_progress = int(skin_ad_progress.get(skin_id, 0) or 0)
+            if current_progress < required:
                 raise HTTPException(status_code=400, detail="Not enough ads watched")
 
         # вњ… РґРѕР±Р°РІР»СЏРµРј СЃРєРёРЅ

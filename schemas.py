@@ -87,6 +87,7 @@ class AdActionStartRequest(BaseModel):
 class AdActionClaimRequest(BaseModel):
     user_id: int
     ad_session_id: str
+    skin_id: Optional[str] = None
 
 
 class VideoTaskClaimRequest(BaseModel):
