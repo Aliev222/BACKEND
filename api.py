@@ -55,6 +55,7 @@ from schemas import (
     UserIdRequest,
     VideoTaskClaimRequest,
     AdminFraudUpdateRequest,
+    AdminTonPayoutConfirmRequest,
     AdminTonPayoutQueueRequest,
     AdminTonPayoutBulkStatusUpdateRequest,
     AdminTonPayoutStatusUpdateRequest,
@@ -202,6 +203,9 @@ WEEKLY_RANGE_PAYOUT_SPLITS = [
 ]
 TON_NANO = 1_000_000_000
 TON_WALLET_ALLOWED_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-:")
+TON_VERIFIER_API_BASE = (os.getenv("TON_VERIFIER_API_BASE", "https://toncenter.com/api/v3") or "").strip().rstrip("/")
+TON_VERIFIER_API_KEY = (os.getenv("TON_VERIFIER_API_KEY", "") or "").strip()
+TON_VERIFIER_TIMEOUT_SECONDS = max(5.0, float(os.getenv("TON_VERIFIER_TIMEOUT_SECONDS", "15") or "15"))
 
 
 def is_valid_ton_wallet_address(value: str) -> bool:
@@ -233,6 +237,24 @@ def get_ton_wallet_from_user(user: dict | None) -> dict:
         "app_name": (wallet.get("app_name") or "").strip(),
         "connected_at": wallet.get("connected_at"),
     }
+
+
+def ton_wallet_normalized_variants(address: str | None) -> set[str]:
+    raw = (address or "").strip()
+    if not raw:
+        return set()
+    lowered = raw.lower()
+    variants = {raw, lowered}
+    if raw.startswith("0:"):
+        variants.add(raw[2:])
+        variants.add(raw[2:].lower())
+    return {item for item in variants if item}
+
+
+def ton_wallets_equal(left: str | None, right: str | None) -> bool:
+    left_variants = ton_wallet_normalized_variants(left)
+    right_variants = ton_wallet_normalized_variants(right)
+    return bool(left_variants and right_variants and left_variants.intersection(right_variants))
 
 
 def _parse_bool_env(name: str, default: bool = False) -> bool:
@@ -3557,6 +3579,74 @@ async def admin_weekly_tournament_season_detail(season_key: str, request: Reques
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+async def fetch_ton_transactions_for_accounts(accounts: list[str], start_utime: int) -> list[dict]:
+    if not accounts:
+        return []
+
+    params: list[tuple[str, str]] = [("limit", "500"), ("sort", "desc"), ("start_utime", str(max(0, int(start_utime or 0))))]
+    for account in accounts:
+        params.append(("account", account))
+
+    headers = {}
+    if TON_VERIFIER_API_KEY:
+        headers["X-API-Key"] = TON_VERIFIER_API_KEY
+
+    async with httpx.AsyncClient(timeout=TON_VERIFIER_TIMEOUT_SECONDS) as client:
+        response = await client.get(f"{TON_VERIFIER_API_BASE}/transactions", params=params, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+
+    if isinstance(payload, dict):
+        if isinstance(payload.get("transactions"), list):
+            return payload["transactions"]
+        if isinstance(payload.get("result"), list):
+            return payload["result"]
+    return []
+
+
+def match_ton_queue_rows_to_transactions(rows: list[WeeklyTournamentTonPayout], transactions: list[dict], sender_wallet_address: str) -> tuple[list[dict], set[int]]:
+    matched_rows: list[dict] = []
+    matched_user_ids: set[int] = set()
+    sender_variants = ton_wallet_normalized_variants(sender_wallet_address)
+
+    for row in rows:
+        recipient_variants = ton_wallet_normalized_variants(row.wallet_address)
+        if not recipient_variants:
+            continue
+
+        for tx in transactions:
+            tx_account = tx.get("account")
+            if tx_account and not ton_wallets_equal(tx_account, row.wallet_address):
+                continue
+
+            in_msg = tx.get("in_msg") or {}
+            source = in_msg.get("source") or ""
+            destination = in_msg.get("destination") or tx_account or ""
+            value = int(in_msg.get("value") or 0)
+            tx_hash = tx.get("hash") or in_msg.get("hash") or tx.get("trace_id") or ""
+            tx_now = int(tx.get("now") or 0)
+            aborted = bool((tx.get("description") or {}).get("aborted"))
+
+            if aborted:
+                continue
+            if sender_variants and not ton_wallet_normalized_variants(source).intersection(sender_variants):
+                continue
+            if destination and not ton_wallets_equal(destination, row.wallet_address):
+                continue
+            if value != int(row.ton_amount_nano or 0):
+                continue
+
+            matched_rows.append({
+                "user_id": int(row.user_id),
+                "tx_hash": tx_hash,
+                "confirmed_at": tx_now,
+            })
+            matched_user_ids.add(int(row.user_id))
+            break
+
+    return matched_rows, matched_user_ids
+
+
 @app.get("/api/admin/weekly-tournament/season/{season_key}/ton-queue")
 async def admin_get_ton_payout_queue(season_key: str, request: Request):
     try:
@@ -3798,6 +3888,87 @@ async def admin_update_ton_payout_status_bulk(
         raise
     except Exception as e:
         logger.error(f"Error in admin_update_ton_payout_status_bulk: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/admin/weekly-tournament/season/{season_key}/ton-payouts/confirm")
+async def admin_confirm_ton_payouts(
+    season_key: str,
+    payload: AdminTonPayoutConfirmRequest,
+    request: Request,
+):
+    try:
+        await require_admin_access(request)
+        sender_wallet_address = (payload.sender_wallet_address or "").strip()
+        if not is_valid_ton_wallet_address(sender_wallet_address):
+            raise HTTPException(status_code=400, detail="Invalid sender_wallet_address")
+
+        lookback_minutes = max(5, int(payload.lookback_minutes or 180))
+        requested_user_ids = sorted({int(user_id) for user_id in (payload.user_ids or []) if int(user_id) > 0})
+
+        async with AsyncSessionLocal() as session:
+            query = select(WeeklyTournamentTonPayout).where(
+                WeeklyTournamentTonPayout.season_key == season_key,
+                WeeklyTournamentTonPayout.status.in_(["queued", "submitted"]),
+            )
+            if requested_user_ids:
+                query = query.where(WeeklyTournamentTonPayout.user_id.in_(requested_user_ids))
+
+            result = await session.execute(query.order_by(WeeklyTournamentTonPayout.rank.asc()))
+            rows = result.scalars().all()
+            if not rows:
+                return {
+                    "success": True,
+                    "season_key": season_key,
+                    "checked": 0,
+                    "confirmed": 0,
+                    "confirmed_user_ids": [],
+                    "missing_user_ids": [],
+                }
+
+            recipient_accounts = sorted({row.wallet_address for row in rows if row.wallet_address})
+            start_utime = int((datetime.utcnow() - timedelta(minutes=lookback_minutes)).timestamp())
+            transactions = []
+            for index in range(0, len(recipient_accounts), 50):
+                transactions.extend(await fetch_ton_transactions_for_accounts(recipient_accounts[index:index + 50], start_utime))
+
+            matched_rows, matched_user_ids = match_ton_queue_rows_to_transactions(rows, transactions, sender_wallet_address)
+            confirmed_user_ids: list[int] = []
+            tx_hash_by_user = {int(item["user_id"]): item.get("tx_hash") or None for item in matched_rows}
+            confirmed_at_by_user = {int(item["user_id"]): item.get("confirmed_at") or 0 for item in matched_rows}
+
+            for row in rows:
+                user_id = int(row.user_id)
+                if user_id not in matched_user_ids:
+                    continue
+                row.status = "sent"
+                row.tx_hash = tx_hash_by_user.get(user_id) or row.tx_hash
+                confirmed_at = confirmed_at_by_user.get(user_id)
+                note_suffix = ""
+                if confirmed_at:
+                    note_suffix = f"confirmed_at={datetime.utcfromtimestamp(int(confirmed_at)).isoformat()}Z"
+                row.note = " | ".join(part for part in [row.note or "", "verified_on_chain", note_suffix] if part)
+                row.updated_at = datetime.utcnow()
+                confirmed_user_ids.append(user_id)
+
+            await session.commit()
+
+        missing_user_ids = [int(row.user_id) for row in rows if int(row.user_id) not in set(confirmed_user_ids)]
+        return {
+            "success": True,
+            "season_key": season_key,
+            "checked": len(rows),
+            "confirmed": len(confirmed_user_ids),
+            "confirmed_user_ids": confirmed_user_ids,
+            "missing_user_ids": missing_user_ids,
+        }
+    except HTTPException:
+        raise
+    except httpx.HTTPError as e:
+        logger.error(f"TON verifier HTTP error: {e}")
+        raise HTTPException(status_code=502, detail="Failed to verify TON transactions")
+    except Exception as e:
+        logger.error(f"Error in admin_confirm_ton_payouts: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

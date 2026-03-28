@@ -145,3 +145,9 @@ class AdminTonPayoutBulkStatusUpdateRequest(BaseModel):
     status: str = Field(..., min_length=2, max_length=24)
     tx_hash: Optional[str] = Field(default=None, max_length=256)
     note: Optional[str] = Field(default=None, max_length=512)
+
+
+class AdminTonPayoutConfirmRequest(BaseModel):
+    sender_wallet_address: str = Field(..., min_length=32, max_length=128)
+    user_ids: Optional[list[int]] = Field(default=None, max_length=255)
+    lookback_minutes: int = Field(default=180, ge=5, le=1440)
