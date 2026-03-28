@@ -3647,6 +3647,122 @@ def match_ton_queue_rows_to_transactions(rows: list[WeeklyTournamentTonPayout], 
     return matched_rows, matched_user_ids
 
 
+async def build_weekly_ton_payout_candidates(season_key: str, ton_price_usd: float) -> tuple[dict | None, list[dict], dict]:
+    season_rows = await list_weekly_tournament_seasons(limit=52)
+    season = next((item for item in season_rows if item["season_key"] == season_key), None)
+    if not season:
+        return None, [], {"with_wallet": 0, "without_wallet": 0, "without_payout": 0}
+
+    total_fund_cents = max(0, int(season.get("payout_fund_cents") or 0))
+    if total_fund_cents <= 0:
+        return season, [], {"with_wallet": 0, "without_wallet": 0, "without_payout": 0}
+
+    entries_by_league: dict[str, list[dict]] = {}
+    for league in WEEKLY_LEAGUE_ORDER:
+        entries_by_league[league] = await get_weekly_tournament_leaderboard(season_key=season_key, league=league, limit=50)
+
+    user_ids = [int(entry["user_id"]) for league_entries in entries_by_league.values() for entry in league_entries]
+    wallet_map: dict[int, dict] = {}
+
+    if user_ids:
+        async with AsyncSessionLocal() as session:
+            users_result = await session.execute(select(User).where(User.user_id.in_(user_ids)))
+            user_rows = users_result.scalars().all()
+            for row in user_rows:
+                extra_data = {}
+                if row.extra_data:
+                    try:
+                        extra_data = json.loads(row.extra_data)
+                    except json.JSONDecodeError:
+                        extra_data = {}
+                wallet = get_ton_wallet_from_user({"extra_data": extra_data})
+                if wallet["connected"] and wallet["address"]:
+                    wallet_map[int(row.user_id)] = wallet
+
+    payouts: list[dict] = []
+    stats = {"with_wallet": 0, "without_wallet": 0, "without_payout": 0}
+    ton_price_usd_micros = int(round(float(ton_price_usd) * 1_000_000))
+
+    for league in WEEKLY_LEAGUE_ORDER:
+        entries = entries_by_league.get(league) or []
+        league_fund_cents = int(total_fund_cents * WEEKLY_LEAGUE_FUND_SPLITS.get(league, 0))
+
+        top_payouts = {
+            rank: int(league_fund_cents * share)
+            for rank, share in WEEKLY_TOP3_PAYOUT_SPLITS.items()
+        }
+        range_payouts = []
+        for payout_range in WEEKLY_RANGE_PAYOUT_SPLITS:
+            start_rank = int(payout_range["start"])
+            end_rank = int(payout_range["end"])
+            pool_cents = int(league_fund_cents * float(payout_range["share"]))
+            eligible_entries = [
+                entry for entry in entries
+                if start_rank <= int(entry["rank"]) <= end_rank
+                and bool(entry.get("eligible_for_payout", True))
+                and not bool(entry.get("fraud_flag", False))
+            ]
+            share_cents = 0
+            remainder_cents = 0
+            if eligible_entries:
+                share_cents = pool_cents // len(eligible_entries)
+                remainder_cents = pool_cents % len(eligible_entries)
+            range_payouts.append({
+                "start": start_rank,
+                "end": end_rank,
+                "share_cents": share_cents,
+                "remainder_cents": remainder_cents,
+            })
+
+        for entry in entries:
+            rank = int(entry["rank"])
+            payout_cents = 0
+            if bool(entry.get("eligible_for_payout", True)) and not bool(entry.get("fraud_flag", False)):
+                if rank in top_payouts:
+                    payout_cents = top_payouts[rank]
+                else:
+                    for payout_range in range_payouts:
+                        if payout_range["start"] <= rank <= payout_range["end"]:
+                            payout_cents = payout_range["share_cents"]
+                            if payout_range["remainder_cents"] > 0:
+                                payout_cents += 1
+                                payout_range["remainder_cents"] -= 1
+                            break
+
+            if payout_cents <= 0:
+                stats["without_payout"] += 1
+                continue
+
+            wallet = wallet_map.get(int(entry["user_id"]))
+            if not wallet:
+                stats["without_wallet"] += 1
+                continue
+
+            ton_amount_nano = max(0, int(round(((payout_cents / 100.0) / ton_price_usd) * TON_NANO)))
+            if ton_amount_nano <= 0:
+                stats["without_payout"] += 1
+                continue
+
+            stats["with_wallet"] += 1
+            payouts.append({
+                "user_id": int(entry["user_id"]),
+                "username": entry.get("username"),
+                "league": league,
+                "rank": rank,
+                "wallet_address": wallet["address"],
+                "masked_wallet": mask_ton_wallet(wallet["address"]),
+                "payout_cents": int(payout_cents),
+                "ton_amount_nano": int(ton_amount_nano),
+                "ton_price_usd": ton_price_usd_micros / 1_000_000,
+                "status": "preview" if season.get("status") != "finalized" else "queued",
+                "tx_hash": None,
+                "note": "preview queue" if season.get("status") != "finalized" else None,
+            })
+
+    payouts.sort(key=lambda row: (WEEKLY_LEAGUE_ORDER.index(row["league"]), int(row["rank"])))
+    return season, payouts, stats
+
+
 @app.get("/api/admin/weekly-tournament/season/{season_key}/ton-queue")
 async def admin_get_ton_payout_queue(season_key: str, request: Request):
     try:
@@ -3687,6 +3803,36 @@ async def admin_get_ton_payout_queue(season_key: str, request: Request):
         raise
     except Exception as e:
         logger.error(f"Error in admin_get_ton_payout_queue: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/admin/weekly-tournament/season/{season_key}/ton-queue/preview")
+async def admin_preview_ton_payout_queue(season_key: str, payload: AdminTonPayoutQueueRequest, request: Request):
+    try:
+        await require_admin_access(request)
+        ton_price_usd = float(payload.ton_price_usd or 0)
+        if ton_price_usd <= 0:
+            raise HTTPException(status_code=400, detail="ton_price_usd must be greater than zero")
+
+        season, payouts, stats = await build_weekly_ton_payout_candidates(season_key, ton_price_usd)
+        if not season:
+            raise HTTPException(status_code=404, detail="Season not found")
+
+        return {
+            "success": True,
+            "season_key": season_key,
+            "preview": True,
+            "season_status": season.get("status"),
+            "queued": len(payouts),
+            "with_wallet": int(stats["with_wallet"]),
+            "without_wallet": int(stats["without_wallet"]),
+            "without_payout": int(stats["without_payout"]),
+            "payouts": payouts,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_preview_ton_payout_queue: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
