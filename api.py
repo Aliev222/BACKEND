@@ -14,6 +14,7 @@ import httpx
 import hmac
 import hashlib
 import secrets
+import re
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from sqlalchemy import select, func, update
@@ -262,6 +263,11 @@ ALLOWED_CORS_ORIGINS = _parse_csv_env(
     DEV_CORS_ORIGINS if APP_ENV != "production" else PROD_CORS_ORIGINS,
 )
 ALLOW_NULL_ORIGIN = _parse_bool_env("CORS_ALLOW_NULL_ORIGIN", APP_ENV != "production")
+MOBILE_ONLY_ENFORCED = _parse_bool_env("MOBILE_ONLY_ENFORCED", True)
+MOBILE_TELEGRAM_PLATFORMS = {"android", "ios", "ipados"}
+DESKTOP_TELEGRAM_PLATFORMS = {"tdesktop", "weba", "webk", "web", "macos", "windows", "linux", "unigram"}
+MOBILE_USER_AGENT_RE = re.compile(r"(android|iphone|ipad|ipod|mobile|windows phone)", re.IGNORECASE)
+DESKTOP_USER_AGENT_RE = re.compile(r"(windows nt|macintosh|x11|cros|linux x86_64)", re.IGNORECASE)
 # Single lightweight reconnect helper to avoid code duplication
 async def try_reconnect_redis() -> None:
     global redis_client
@@ -633,7 +639,43 @@ def read_bearer_token(request: Request) -> str:
     return parts[1].strip()
 
 
+def is_mobile_game_client_request(request: Request) -> bool:
+    platform = (request.headers.get("X-Telegram-Platform", "") or "").strip().lower()
+    if platform in DESKTOP_TELEGRAM_PLATFORMS:
+        return False
+    if platform in MOBILE_TELEGRAM_PLATFORMS:
+        return True
+
+    sec_mobile = (request.headers.get("sec-ch-ua-mobile", "") or "").strip().lower()
+    if sec_mobile == "?1":
+        return True
+
+    client_mobile_header = (request.headers.get("X-Client-Mobile", "") or "").strip().lower()
+    client_mobile = client_mobile_header in {"1", "true", "yes", "on"}
+
+    user_agent = request.headers.get("user-agent", "") or ""
+    ua_is_mobile = bool(MOBILE_USER_AGENT_RE.search(user_agent))
+    ua_is_desktop = bool(DESKTOP_USER_AGENT_RE.search(user_agent))
+
+    if client_mobile and not ua_is_desktop:
+        return True
+
+    return ua_is_mobile and not ua_is_desktop
+
+
+def ensure_mobile_only_game_access(request: Request) -> None:
+    if not MOBILE_ONLY_ENFORCED:
+        return
+    if is_mobile_game_client_request(request):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="This game is available only on mobile devices inside Telegram",
+    )
+
+
 async def require_telegram_user(request: Request, expected_user_id: int | None = None) -> dict:
+    ensure_mobile_only_game_access(request)
     bearer_token = read_bearer_token(request)
     if bearer_token:
         telegram_user = verify_session_token(bearer_token)
@@ -1155,6 +1197,7 @@ app.add_middleware(
 
 @app.post("/api/auth/session")
 async def create_api_session(request: Request):
+    ensure_mobile_only_game_access(request)
     telegram_user = verify_telegram_init_data(
         request.headers.get("X-Telegram-Init-Data", "")
     )
