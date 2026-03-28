@@ -56,6 +56,7 @@ from schemas import (
     VideoTaskClaimRequest,
     AdminFraudUpdateRequest,
     AdminTonPayoutQueueRequest,
+    AdminTonPayoutBulkStatusUpdateRequest,
     AdminTonPayoutStatusUpdateRequest,
     AdminWinnerStarsUpdateRequest,
     TonWalletConnectRequest,
@@ -3744,6 +3745,59 @@ async def admin_update_ton_payout_status(season_key: str, payload: AdminTonPayou
         raise
     except Exception as e:
         logger.error(f"Error in admin_update_ton_payout_status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/admin/weekly-tournament/season/{season_key}/ton-payout-status/bulk")
+async def admin_update_ton_payout_status_bulk(
+    season_key: str,
+    payload: AdminTonPayoutBulkStatusUpdateRequest,
+    request: Request,
+):
+    try:
+        await require_admin_access(request)
+        user_ids = sorted({int(user_id) for user_id in (payload.user_ids or []) if int(user_id) > 0})
+        if not user_ids:
+            raise HTTPException(status_code=400, detail="user_ids are required")
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(WeeklyTournamentTonPayout).where(
+                    WeeklyTournamentTonPayout.season_key == season_key,
+                    WeeklyTournamentTonPayout.user_id.in_(user_ids),
+                )
+            )
+            rows = result.scalars().all()
+            if not rows:
+                raise HTTPException(status_code=404, detail="TON payout rows not found")
+
+            status = (payload.status or "queued").strip().lower()
+            tx_hash = (payload.tx_hash or "").strip() or None
+            note = (payload.note or "").strip() or None
+            updated_user_ids = []
+
+            for row in rows:
+                row.status = status
+                row.tx_hash = tx_hash
+                row.note = note
+                row.updated_at = datetime.utcnow()
+                updated_user_ids.append(int(row.user_id))
+
+            await session.commit()
+
+        return {
+            "success": True,
+            "season_key": season_key,
+            "status": status,
+            "updated_count": len(updated_user_ids),
+            "updated_user_ids": updated_user_ids,
+            "tx_hash": tx_hash,
+            "note": note,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_update_ton_payout_status_bulk: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

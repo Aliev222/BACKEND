@@ -138,3 +138,10 @@ class AdminTonPayoutStatusUpdateRequest(BaseModel):
     status: str = Field(..., min_length=2, max_length=24)
     tx_hash: Optional[str] = Field(default=None, max_length=256)
     note: Optional[str] = Field(default=None, max_length=512)
+
+
+class AdminTonPayoutBulkStatusUpdateRequest(BaseModel):
+    user_ids: list[int] = Field(..., min_length=1, max_length=255)
+    status: str = Field(..., min_length=2, max_length=24)
+    tx_hash: Optional[str] = Field(default=None, max_length=256)
+    note: Optional[str] = Field(default=None, max_length=512)
