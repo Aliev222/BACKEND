@@ -111,3 +111,8 @@ class AdminFraudUpdateRequest(BaseModel):
     reason: Optional[str] = None
     disqualify_from_payout: bool = False
     season_key: Optional[str] = None
+
+
+class AdminWinnerStarsUpdateRequest(BaseModel):
+    user_id: int
+    stars_reward: int = Field(..., ge=0)

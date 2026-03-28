@@ -54,6 +54,7 @@ from schemas import (
     UserIdRequest,
     VideoTaskClaimRequest,
     AdminFraudUpdateRequest,
+    AdminWinnerStarsUpdateRequest,
     WeeklyTournamentFundRequest,
 )
 from core.game_config import (
@@ -3112,6 +3113,41 @@ async def get_weekly_tournament_player_endpoint(user_id: int, request: Request, 
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@app.get("/api/weekly-tournament/results/{league}")
+async def get_weekly_tournament_results_endpoint(league: str, season_key: str | None = None, limit: int = 50):
+    try:
+        league = (league or "").strip().lower()
+        if league not in WEEKLY_LEAGUE_ORDER:
+            raise HTTPException(status_code=400, detail="Unknown league")
+
+        season_rows = await list_weekly_tournament_seasons(limit=52)
+        if season_key:
+            season = next((item for item in season_rows if item["season_key"] == season_key and item["status"] == "finalized"), None)
+        else:
+            season = next((item for item in season_rows if item["status"] == "finalized"), None)
+
+        if not season:
+            return {
+                "success": True,
+                "league": league,
+                "season": None,
+                "players": [],
+            }
+
+        winners = await get_weekly_tournament_winners(season["season_key"], league=league)
+        return {
+            "success": True,
+            "league": league,
+            "season": season,
+            "players": winners[:max(1, min(50, int(limit or 50)))],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_weekly_tournament_results_endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @app.get("/api/admin/weekly-tournament/seasons")
 async def admin_weekly_tournament_seasons(request: Request, limit: int = 12):
     try:
@@ -3362,6 +3398,43 @@ async def admin_set_weekly_tournament_fund(
         raise
     except Exception as e:
         logger.error(f"Error in admin_set_weekly_tournament_fund: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/admin/weekly-tournament/season/{season_key}/winner-stars")
+async def admin_set_weekly_tournament_winner_stars(
+    season_key: str,
+    payload: AdminWinnerStarsUpdateRequest,
+    request: Request,
+):
+    try:
+        await require_admin_access(request)
+        async with AsyncSessionLocal() as session:
+            winner_result = await session.execute(
+                select(WeeklyTournamentWinner).where(
+                    WeeklyTournamentWinner.season_key == season_key,
+                    WeeklyTournamentWinner.user_id == payload.user_id,
+                )
+            )
+            winner = winner_result.scalar_one_or_none()
+            if not winner:
+                raise HTTPException(status_code=404, detail="Winner not found for this season")
+
+            winner.stars_reward = int(payload.stars_reward or 0)
+            await session.commit()
+
+            return {
+                "success": True,
+                "season_key": season_key,
+                "user_id": payload.user_id,
+                "stars_reward": int(winner.stars_reward or 0),
+                "league": winner.league,
+                "rank": int(winner.rank or 0),
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_set_weekly_tournament_winner_stars: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
