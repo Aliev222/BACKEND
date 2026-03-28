@@ -103,3 +103,10 @@ class TournamentData(BaseModel):
 class WeeklyTournamentFundRequest(BaseModel):
     gross_ad_revenue_cents: int = Field(..., ge=0)
     payout_fund_cents: int = Field(..., ge=0)
+
+
+class AdminFraudUpdateRequest(BaseModel):
+    status: str = Field(..., min_length=2, max_length=16)
+    reason: Optional[str] = None
+    disqualify_from_payout: bool = False
+    season_key: Optional[str] = None

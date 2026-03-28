@@ -13,7 +13,7 @@ import httpx
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from sqlalchemy import select, func
-from DATABASE.base import User, AsyncSessionLocal, WeeklyTournamentEntry
+from DATABASE.base import User, AsyncSessionLocal, WeeklyTournamentEntry, WeeklyTournamentWinner, RewardedAdClaim
 from collections import defaultdict, deque
 from dataclasses import dataclass
 import redis.asyncio as redis
@@ -27,6 +27,8 @@ from DATABASE.base import (
     get_weekly_tournament_season_window, get_weekly_tournament_league,
     list_weekly_tournament_seasons, get_weekly_tournament_winners,
     finalize_weekly_tournament_season, ensure_weekly_tournament_season,
+    get_rewarded_ads_admin_summary, get_stars_skin_sales_admin_summary,
+    get_admin_fraud_reviews, upsert_admin_fraud_review, record_rewarded_ad_claim,
 )
 from schemas import (
     AdActionClaimRequest,
@@ -47,6 +49,7 @@ from schemas import (
     UpgradeRequest,
     UserIdRequest,
     VideoTaskClaimRequest,
+    AdminFraudUpdateRequest,
     WeeklyTournamentFundRequest,
 )
 from core.game_config import (
@@ -481,6 +484,124 @@ async def require_admin_access(request: Request) -> dict:
     if telegram_user_id not in ADMIN_TELEGRAM_IDS:
         raise HTTPException(status_code=403, detail="Admin access required")
     return telegram_user
+
+
+def format_int(value: int) -> str:
+    return f"{int(value or 0):,}".replace(",", " ")
+
+
+async def get_rewarded_ad_user_counts(user_ids: list[int], *, hours: int) -> dict[int, int]:
+    if not user_ids:
+        return {}
+    since = datetime.utcnow() - timedelta(hours=max(1, int(hours or 1)))
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(RewardedAdClaim.user_id, func.count(RewardedAdClaim.id))
+            .where(
+                RewardedAdClaim.user_id.in_(user_ids),
+                RewardedAdClaim.created_at >= since,
+            )
+            .group_by(RewardedAdClaim.user_id)
+        )
+        return {int(user_id): int(count or 0) for user_id, count in result.all()}
+
+
+async def build_admin_fraud_overview(season_key: str) -> list[dict]:
+    now = datetime.utcnow()
+    async with AsyncSessionLocal() as session:
+        entries_result = await session.execute(
+            select(WeeklyTournamentEntry)
+            .where(WeeklyTournamentEntry.season_key == season_key)
+            .order_by(WeeklyTournamentEntry.fraud_flag.desc(), WeeklyTournamentEntry.score.desc())
+            .limit(200)
+        )
+        entries = entries_result.scalars().all()
+
+        user_ids = [int(entry.user_id) for entry in entries]
+        if not user_ids:
+            return []
+
+        users_result = await session.execute(select(User).where(User.user_id.in_(user_ids)))
+        users_map = {int(user.user_id): user for user in users_result.scalars().all()}
+
+        referrer_ids = sorted({
+            int(user.referrer_id)
+            for user in users_map.values()
+            if getattr(user, "referrer_id", None)
+        })
+        referrer_cluster_counts: dict[int, int] = {}
+        if referrer_ids:
+            cluster_result = await session.execute(
+                select(User.referrer_id, func.count(User.id))
+                .where(User.referrer_id.in_(referrer_ids))
+                .group_by(User.referrer_id)
+            )
+            referrer_cluster_counts = {
+                int(referrer_id): int(count or 0)
+                for referrer_id, count in cluster_result.all()
+                if referrer_id is not None
+            }
+
+    reviews_map = await get_admin_fraud_reviews(user_ids)
+    recent_ads_1h = await get_rewarded_ad_user_counts(user_ids, hours=1)
+    recent_ads_24h = await get_rewarded_ad_user_counts(user_ids, hours=24)
+
+    suspicious_rows = []
+    for entry in entries:
+        user = users_map.get(int(entry.user_id))
+        if user is None:
+            continue
+
+        account_age_hours = max(0.0, (now - (user.created_at or now)).total_seconds() / 3600)
+        review = reviews_map.get(int(entry.user_id), {})
+        reasons: list[str] = []
+
+        if review.get("status") == "fraud":
+            reasons.append(review.get("reason") or "Manual fraud review")
+
+        if entry.display_level >= 100 and account_age_hours < 72:
+            reasons.append("Too fast level growth to Diamond")
+        elif entry.display_level >= 66 and account_age_hours < 24:
+            reasons.append("Too fast level growth to Gold")
+        elif entry.display_level >= 33 and account_age_hours < 8:
+            reasons.append("Too fast level growth to Silver")
+
+        ads_1h = int(recent_ads_1h.get(int(entry.user_id), 0))
+        ads_24h = int(recent_ads_24h.get(int(entry.user_id), 0))
+        if ads_1h >= 25 or ads_24h >= 120:
+            reasons.append(f"Too many rewarded ads in a short period ({ads_1h}/1h, {ads_24h}/24h)")
+
+        score_per_hour = int((entry.score or 0) / max(account_age_hours, 1))
+        if score_per_hour >= 500000:
+            reasons.append(f"Unusually fast click income velocity ({format_int(score_per_hour)} per hour)")
+
+        referrer_id = getattr(user, "referrer_id", None)
+        if referrer_id and referrer_cluster_counts.get(int(referrer_id), 0) >= 5 and account_age_hours <= 72:
+            reasons.append("Possible multi-account referral cluster")
+
+        is_flagged = bool(entry.fraud_flag) or review.get("status") == "fraud" or bool(reasons)
+        if not is_flagged:
+            continue
+
+        suspicious_rows.append({
+            "user_id": int(entry.user_id),
+            "username": entry.username or getattr(user, "username", None),
+            "display_level": int(entry.display_level or 1),
+            "league": entry.league,
+            "score": int(entry.score or 0),
+            "eligible_for_payout": bool(entry.eligible_for_payout),
+            "fraud_flag": bool(entry.fraud_flag) or review.get("status") == "fraud",
+            "manual_status": review.get("status", "ok"),
+            "manual_reason": review.get("reason"),
+            "disqualify_from_payout": bool(review.get("disqualify_from_payout")),
+            "account_age_hours": round(account_age_hours, 1),
+            "rewarded_ads_1h": ads_1h,
+            "rewarded_ads_24h": ads_24h,
+            "reasons": reasons,
+        })
+
+    suspicious_rows.sort(key=lambda item: (not item["fraud_flag"], not item["disqualify_from_payout"], -item["score"]))
+    return suspicious_rows
 
 
 
@@ -1185,6 +1306,7 @@ async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
         extra["active_boosts"] = active_boosts
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
+        await record_rewarded_ad_claim(payload.user_id, "boost", {"source_action": "mega_boost"})
         
         return {
             "success": True,
@@ -1274,6 +1396,7 @@ async def activate_ghost_boost(payload: AdActionClaimRequest, request: Request):
 
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
+        await record_rewarded_ad_claim(payload.user_id, "ghost", {"source_action": "ghost_boost"})
 
         return {
             "success": True,
@@ -1442,6 +1565,7 @@ async def increment_ads_watched(payload: AdActionClaimRequest, request: Request)
 
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
+        await record_rewarded_ad_claim(payload.user_id, "skins", {"source_action": "ads_increment"})
 
         return {
             "success": True,
@@ -1568,6 +1692,7 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
             "last_energy_update": now
         })
         await invalidate_user_cache(user_id)
+        await record_rewarded_ad_claim(user_id, "energy_restore", {"source_action": "energy_refill_max"})
 
         return {
             "success": True,
@@ -1590,6 +1715,7 @@ async def activate_autoclicker(payload: AdActionClaimRequest, request: Request):
         await require_telegram_user(request, payload.user_id)
         await consume_ad_action_session(payload.user_id, payload.ad_session_id, "autoclicker")
         await require_redis_rate_limit("activate_autoclicker", payload.user_id, 10, 60)
+        await record_rewarded_ad_claim(payload.user_id, "autoclicker", {"source_action": "autoclicker"})
         return {
             "success": True,
             "duration_seconds": 60
@@ -2638,6 +2764,119 @@ async def admin_overview(request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@app.get("/api/admin/rewarded-ads/summary")
+async def admin_rewarded_ads_summary(request: Request, hours: int = 24):
+    try:
+        await require_admin_access(request)
+        summary = await get_rewarded_ads_admin_summary(hours=hours)
+        tracked_actions = ("boost", "autoclicker", "tasks", "ghost", "energy_restore", "skins")
+        actions = {
+            action: {
+                "total": int(summary["actions_total"].get(action, 0)),
+                "recent": int(summary["actions_recent"].get(action, 0)),
+            }
+            for action in tracked_actions
+        }
+        return {
+            "success": True,
+            "hours_window": summary["hours_window"],
+            "total_claims": summary["total_claims"],
+            "recent_claims": summary["recent_claims"],
+            "actions": actions,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_rewarded_ads_summary: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/admin/stars-skins/summary")
+async def admin_stars_skins_summary(request: Request, limit: int = 20):
+    try:
+        await require_admin_access(request)
+        summary = await get_stars_skin_sales_admin_summary(limit=limit)
+        return {"success": True, **summary}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_stars_skins_summary: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/admin/fraud/overview")
+async def admin_fraud_overview(request: Request, season_key: str | None = None):
+    try:
+        await require_admin_access(request)
+        effective_season_key = season_key or get_weekly_tournament_season_key()
+        players = await build_admin_fraud_overview(effective_season_key)
+        return {
+            "success": True,
+            "season_key": effective_season_key,
+            "players": players,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_fraud_overview: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/admin/fraud/user/{user_id}")
+async def admin_update_fraud_status(user_id: int, payload: AdminFraudUpdateRequest, request: Request):
+    try:
+        await require_admin_access(request)
+        status = (payload.status or "").strip().lower()
+        if status not in {"fraud", "ok"}:
+            raise HTTPException(status_code=400, detail="status must be fraud or ok")
+
+        effective_season_key = payload.season_key or get_weekly_tournament_season_key()
+        disqualify = bool(payload.disqualify_from_payout)
+        await upsert_admin_fraud_review(user_id, status, payload.reason, disqualify)
+
+        async with AsyncSessionLocal() as session:
+            entry_result = await session.execute(
+                select(WeeklyTournamentEntry).where(
+                    WeeklyTournamentEntry.season_key == effective_season_key,
+                    WeeklyTournamentEntry.user_id == user_id,
+                )
+            )
+            entry = entry_result.scalar_one_or_none()
+            if entry:
+                entry.fraud_flag = status == "fraud"
+                entry.eligible_for_payout = not disqualify
+
+            winner_result = await session.execute(
+                select(WeeklyTournamentWinner).where(
+                    WeeklyTournamentWinner.season_key == effective_season_key,
+                    WeeklyTournamentWinner.user_id == user_id,
+                )
+            )
+            winner = winner_result.scalar_one_or_none()
+            if winner:
+                winner.fraud_flag = status == "fraud"
+                winner.eligible_for_payout = not disqualify
+                if disqualify:
+                    winner.payout_cents = 0
+                    winner.stars_reward = 0
+
+            await session.commit()
+
+        return {
+            "success": True,
+            "user_id": user_id,
+            "season_key": effective_season_key,
+            "status": status,
+            "disqualify_from_payout": disqualify,
+            "reason": payload.reason,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_update_fraud_status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @app.get("/api/admin/weekly-tournament/season/{season_key}")
 async def admin_weekly_tournament_season_detail(season_key: str, request: Request):
     try:
@@ -3096,6 +3335,7 @@ async def claim_video_task(payload: VideoTaskClaimRequest, request: Request):
 
         await update_user(payload.user_id, updates)
         await invalidate_user_cache(payload.user_id)
+        await record_rewarded_ad_claim(payload.user_id, "tasks", {"task_id": payload.task_id})
         return response
     except HTTPException:
         raise

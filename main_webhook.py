@@ -11,7 +11,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
 from CONFIG.settings import BOT_TOKEN
-from DATABASE.base import add_user, get_user, init_db, update_user
+from DATABASE.base import add_user, get_user, init_db, record_stars_skin_purchase, update_user
 from core.game_config import USER_CACHE_PREFIX
 from core.reengagement import reengagement_loop
 from core.stars_skins import get_stars_skin_price
@@ -61,7 +61,7 @@ async def cmd_start(message: types.Message) -> None:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🎮 Играть",
+                    text="Play",
                     web_app=WebAppInfo(url="https://spirix.vercel.app"),
                 )
             ]
@@ -69,9 +69,9 @@ async def cmd_start(message: types.Message) -> None:
     )
 
     await message.answer(
-        f"👋 Привет, {username}!\n\n"
-        f"💰 Монет: {user_coins}\n"
-        f"Нажми кнопку ниже, чтобы играть:",
+        f"Welcome, {username}!\n\n"
+        f"Coins: {user_coins}\n"
+        f"Tap the button below to open the game:",
         reply_markup=keyboard,
     )
 
@@ -150,7 +150,16 @@ async def handle_successful_payment(message: types.Message) -> None:
     else:
         logger.info("Stars skin %s already owned by user %s", skin_id, target_user_id)
 
-    await message.answer(f"✅ Скин {skin_id} разблокирован.")
+    await record_stars_skin_purchase(
+        user_id=target_user_id,
+        username=message.from_user.username,
+        skin_id=skin_id,
+        stars_amount=payment.total_amount,
+        currency=payment.currency,
+        telegram_charge_id=getattr(payment, "telegram_payment_charge_id", None),
+    )
+
+    await message.answer(f"Skin {skin_id} unlocked.")
 
 
 async def on_startup(bot_instance: Bot) -> None:

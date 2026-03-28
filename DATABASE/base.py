@@ -144,6 +144,54 @@ class WeeklyTournamentWinner(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class RewardedAdClaim(Base):
+    __tablename__ = "rewarded_ad_claims"
+    __table_args__ = (
+        Index("ix_rewarded_ad_claims_action_created_at", "action", "created_at"),
+        Index("ix_rewarded_ad_claims_user_id", "user_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    action = Column(String, nullable=False)
+    metadata_json = Column(String, default="{}")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class StarsSkinPurchase(Base):
+    __tablename__ = "stars_skin_purchases"
+    __table_args__ = (
+        Index("ix_stars_skin_purchases_skin_id_created_at", "skin_id", "created_at"),
+        Index("ix_stars_skin_purchases_user_id", "user_id"),
+        UniqueConstraint("telegram_charge_id", name="uq_stars_skin_purchases_charge_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    username = Column(String, nullable=True)
+    skin_id = Column(String, nullable=False)
+    stars_amount = Column(BigInteger, nullable=False)
+    currency = Column(String, default="XTR", nullable=False)
+    telegram_charge_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AdminFraudReview(Base):
+    __tablename__ = "admin_fraud_reviews"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_admin_fraud_reviews_user_id"),
+        Index("ix_admin_fraud_reviews_status", "status"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    status = Column(String, default="ok", nullable=False)
+    reason = Column(String, nullable=True)
+    disqualify_from_payout = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 # ==================== ФУНКЦИИ ====================
 
 async def init_db():
@@ -698,3 +746,161 @@ async def get_weekly_tournament_winners(season_key: str, league: str | None = No
             }
             for winner in winners
         ]
+
+
+async def record_rewarded_ad_claim(user_id: int, action: str, metadata: dict | None = None):
+    async with AsyncSessionLocal() as session:
+        row = RewardedAdClaim(
+            user_id=user_id,
+            action=action,
+            metadata_json=json.dumps(metadata or {}),
+        )
+        session.add(row)
+        await session.commit()
+        return True
+
+
+async def get_rewarded_ads_admin_summary(hours: int = 24):
+    hours = max(1, int(hours or 24))
+    since = datetime.utcnow() - timedelta(hours=hours)
+
+    async with AsyncSessionLocal() as session:
+        total_result = await session.execute(select(func.count(RewardedAdClaim.id)))
+        recent_result = await session.execute(
+            select(func.count(RewardedAdClaim.id)).where(RewardedAdClaim.created_at >= since)
+        )
+        grouped_total_result = await session.execute(
+            select(RewardedAdClaim.action, func.count(RewardedAdClaim.id))
+            .group_by(RewardedAdClaim.action)
+        )
+        grouped_recent_result = await session.execute(
+            select(RewardedAdClaim.action, func.count(RewardedAdClaim.id))
+            .where(RewardedAdClaim.created_at >= since)
+            .group_by(RewardedAdClaim.action)
+        )
+
+        grouped_total = {action: int(count or 0) for action, count in grouped_total_result.all()}
+        grouped_recent = {action: int(count or 0) for action, count in grouped_recent_result.all()}
+
+        return {
+            "total_claims": int(total_result.scalar() or 0),
+            "recent_claims": int(recent_result.scalar() or 0),
+            "hours_window": hours,
+            "actions_total": grouped_total,
+            "actions_recent": grouped_recent,
+        }
+
+
+async def record_stars_skin_purchase(
+    user_id: int,
+    username: str | None,
+    skin_id: str,
+    stars_amount: int,
+    currency: str = "XTR",
+    telegram_charge_id: str | None = None,
+):
+    async with AsyncSessionLocal() as session:
+        if telegram_charge_id:
+            existing_result = await session.execute(
+                select(StarsSkinPurchase).where(StarsSkinPurchase.telegram_charge_id == telegram_charge_id)
+            )
+            if existing_result.scalar_one_or_none():
+                return False
+
+        row = StarsSkinPurchase(
+            user_id=user_id,
+            username=username,
+            skin_id=skin_id,
+            stars_amount=max(0, int(stars_amount or 0)),
+            currency=currency or "XTR",
+            telegram_charge_id=telegram_charge_id,
+        )
+        session.add(row)
+        await session.commit()
+        return True
+
+
+async def get_stars_skin_sales_admin_summary(limit: int = 20):
+    limit = max(1, min(100, int(limit or 20)))
+    async with AsyncSessionLocal() as session:
+        total_result = await session.execute(select(func.count(StarsSkinPurchase.id)))
+        total_stars_result = await session.execute(select(func.coalesce(func.sum(StarsSkinPurchase.stars_amount), 0)))
+        grouped_result = await session.execute(
+            select(
+                StarsSkinPurchase.skin_id,
+                func.count(StarsSkinPurchase.id),
+                func.coalesce(func.sum(StarsSkinPurchase.stars_amount), 0),
+            )
+            .group_by(StarsSkinPurchase.skin_id)
+            .order_by(desc(func.count(StarsSkinPurchase.id)), desc(func.coalesce(func.sum(StarsSkinPurchase.stars_amount), 0)))
+        )
+        recent_result = await session.execute(
+            select(StarsSkinPurchase)
+            .order_by(desc(StarsSkinPurchase.created_at))
+            .limit(limit)
+        )
+
+        return {
+            "total_purchases": int(total_result.scalar() or 0),
+            "total_stars": int(total_stars_result.scalar() or 0),
+            "by_skin": [
+                {
+                    "skin_id": skin_id,
+                    "purchases": int(purchases or 0),
+                    "stars_amount": int(stars_amount or 0),
+                }
+                for skin_id, purchases, stars_amount in grouped_result.all()
+            ],
+            "recent": [
+                {
+                    "user_id": row.user_id,
+                    "username": row.username,
+                    "skin_id": row.skin_id,
+                    "stars_amount": int(row.stars_amount or 0),
+                    "currency": row.currency,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in recent_result.scalars().all()
+            ],
+        }
+
+
+async def upsert_admin_fraud_review(user_id: int, status: str, reason: str | None, disqualify_from_payout: bool):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AdminFraudReview).where(AdminFraudReview.user_id == user_id)
+        )
+        review = result.scalar_one_or_none()
+        if review is None:
+            review = AdminFraudReview(
+                user_id=user_id,
+                status=status,
+                reason=reason,
+                disqualify_from_payout=bool(disqualify_from_payout),
+            )
+            session.add(review)
+        else:
+            review.status = status
+            review.reason = reason
+            review.disqualify_from_payout = bool(disqualify_from_payout)
+            review.updated_at = datetime.utcnow()
+        await session.commit()
+        return True
+
+
+async def get_admin_fraud_reviews(user_ids: list[int] | None = None):
+    async with AsyncSessionLocal() as session:
+        query = select(AdminFraudReview)
+        if user_ids:
+            query = query.where(AdminFraudReview.user_id.in_(user_ids))
+        result = await session.execute(query)
+        rows = result.scalars().all()
+        return {
+            int(row.user_id): {
+                "status": row.status,
+                "reason": row.reason,
+                "disqualify_from_payout": bool(row.disqualify_from_payout),
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+            for row in rows
+        }
