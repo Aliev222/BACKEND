@@ -53,12 +53,16 @@ async def cmd_start(message: types.Message) -> None:
         await add_user(user_id, username, referrer_id)
         user_coins = 0
 
+    webapp_url = "https://spirix.vercel.app"
+    if referrer_id:
+        webapp_url = f"{webapp_url}?ref={referrer_id}"
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="Play",
-                    web_app=WebAppInfo(url="https://spirix.vercel.app"),
+                    web_app=WebAppInfo(url=webapp_url),
                 )
             ]
         ]

@@ -20,7 +20,7 @@ import redis.asyncio as redis
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from DATABASE.base import (
-    get_user, add_user as create_user, update_user,
+    get_user, add_user as create_user, update_user, add_referral_bonus,
     init_db, get_completed_tasks, add_completed_task,
     add_weekly_tournament_score, get_weekly_tournament_leaderboard,
     get_weekly_tournament_player_entry, get_weekly_tournament_season_key,
@@ -2181,19 +2181,41 @@ async def register_user(payload: RegisterRequest, request: Request):
         telegram_user = await require_telegram_user(request, payload.user_id)
         await require_user_action_lock("register", payload.user_id, ttl=5)
         existing = await get_user(payload.user_id)
-        if existing:
-            username = telegram_user.get("username") or payload.username
-            if username and username != existing.get("username"):
-                await update_user(payload.user_id, {"username": username})
-                await invalidate_user_cache(payload.user_id)
-            return {"status": "exists", "user": existing}
-
         valid_referrer_id = None
         requested_referrer_id = int(payload.referrer_id or 0)
         if requested_referrer_id and requested_referrer_id != payload.user_id:
             referrer = await get_user_cached(requested_referrer_id)
             if referrer and int(referrer.get("referrer_id") or 0) != payload.user_id:
                 valid_referrer_id = requested_referrer_id
+
+        if existing:
+            username = telegram_user.get("username") or payload.username
+            updates = {}
+            if username and username != existing.get("username"):
+                updates["username"] = username
+
+            # Allow a one-time referral attachment for a fresh account that was
+            # created before the WebApp received the referral param.
+            can_attach_referrer = (
+                valid_referrer_id
+                and not existing.get("referrer_id")
+                and int(existing.get("coins", 0) or 0) == 0
+                and int(existing.get("level", 0) or 0) == 0
+                and int(existing.get("referral_count", 0) or 0) == 0
+                and int(existing.get("referral_earnings", 0) or 0) == 0
+            )
+            if can_attach_referrer:
+                updates["referrer_id"] = valid_referrer_id
+
+            if updates:
+                await update_user(payload.user_id, updates)
+                await invalidate_user_cache(payload.user_id)
+                if can_attach_referrer:
+                    await add_referral_bonus(valid_referrer_id, payload.user_id)
+                    await invalidate_user_cache(valid_referrer_id)
+
+            refreshed = await get_user_cached(payload.user_id)
+            return {"status": "exists", "user": refreshed or existing}
 
         await create_user(
             user_id=payload.user_id,
