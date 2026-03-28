@@ -26,6 +26,11 @@ WEEKLY_TOP_PAYOUT_SPLITS = {
     2: 0.20,
     3: 0.15,
 }
+WEEKLY_RANGE_PAYOUT_SPLITS = (
+    ((4, 10), 0.20),
+    ((11, 20), 0.10),
+    ((21, 50), 0.05),
+)
 
 
 # Модель пользователя
@@ -657,27 +662,40 @@ async def finalize_weekly_tournament_season(season_key: str):
                 rank: int(league_fund_cents * share)
                 for rank, share in WEEKLY_TOP_PAYOUT_SPLITS.items()
             }
-            rest_pool_cents = max(0, league_fund_cents - sum(top_payouts.values()))
-            eligible_rest_entries = [
-                entry for index, entry in enumerate(entries, start=1)
-                if index >= 4 and bool(entry.eligible_for_payout) and not bool(entry.fraud_flag)
-            ]
-            rest_share_cents = 0
-            rest_remainder_cents = 0
-            if eligible_rest_entries:
-                rest_share_cents = rest_pool_cents // len(eligible_rest_entries)
-                rest_remainder_cents = rest_pool_cents % len(eligible_rest_entries)
+            range_payouts = []
+            for (start_rank, end_rank), share in WEEKLY_RANGE_PAYOUT_SPLITS:
+                pool_cents = int(league_fund_cents * share)
+                eligible_entries = [
+                    entry for index, entry in enumerate(entries, start=1)
+                    if start_rank <= index <= end_rank
+                    and bool(entry.eligible_for_payout)
+                    and not bool(entry.fraud_flag)
+                ]
+                share_cents = 0
+                remainder_cents = 0
+                if eligible_entries:
+                    share_cents = pool_cents // len(eligible_entries)
+                    remainder_cents = pool_cents % len(eligible_entries)
+                range_payouts.append({
+                    "start": start_rank,
+                    "end": end_rank,
+                    "share_cents": share_cents,
+                    "remainder_cents": remainder_cents,
+                })
 
             for idx, entry in enumerate(entries, start=1):
                 payout_cents = 0
                 if bool(entry.eligible_for_payout) and not bool(entry.fraud_flag):
                     if idx in top_payouts:
                         payout_cents = top_payouts[idx]
-                    elif idx >= 4 and eligible_rest_entries:
-                        payout_cents = rest_share_cents
-                        if rest_remainder_cents > 0:
-                            payout_cents += 1
-                            rest_remainder_cents -= 1
+                    else:
+                        for payout_range in range_payouts:
+                            if payout_range["start"] <= idx <= payout_range["end"]:
+                                payout_cents = payout_range["share_cents"]
+                                if payout_range["remainder_cents"] > 0:
+                                    payout_cents += 1
+                                    payout_range["remainder_cents"] -= 1
+                                break
 
                 winner = WeeklyTournamentWinner(
                     season_key=season_key,

@@ -189,6 +189,11 @@ WEEKLY_TOP3_PAYOUT_SPLITS = {
     2: 0.20,
     3: 0.15,
 }
+WEEKLY_RANGE_PAYOUT_SPLITS = [
+    {"start": 4, "end": 10, "share": 0.20},
+    {"start": 11, "end": 20, "share": 0.10},
+    {"start": 21, "end": 50, "share": 0.05},
+]
 
 
 def _parse_bool_env(name: str, default: bool = False) -> bool:
@@ -3060,6 +3065,10 @@ async def get_weekly_tournament_overview(user_id: int, request: Request):
             "fund_splits": WEEKLY_LEAGUE_FUND_SPLITS,
             "top3_splits": WEEKLY_TOP3_PAYOUT_SPLITS,
             "rest_split": max(0.0, 1.0 - sum(WEEKLY_TOP3_PAYOUT_SPLITS.values())),
+            "payout_splits": {
+                "top": WEEKLY_TOP3_PAYOUT_SPLITS,
+                "ranges": WEEKLY_RANGE_PAYOUT_SPLITS,
+            },
             "player": player,
         }
     except HTTPException:
@@ -3354,6 +3363,10 @@ async def admin_weekly_tournament_season_detail(season_key: str, request: Reques
             "leagues": leagues,
             "top3_splits": WEEKLY_TOP3_PAYOUT_SPLITS,
             "rest_split": max(0.0, 1.0 - sum(WEEKLY_TOP3_PAYOUT_SPLITS.values())),
+            "payout_splits": {
+                "top": WEEKLY_TOP3_PAYOUT_SPLITS,
+                "ranges": WEEKLY_RANGE_PAYOUT_SPLITS,
+            },
         }
     except HTTPException:
         raise
