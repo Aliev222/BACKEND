@@ -15,8 +15,10 @@ import hmac
 import hashlib
 import secrets
 import re
+import struct
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 from sqlalchemy import select, func, update
 from DATABASE.base import User, UserTask, AsyncSessionLocal, WeeklyTournamentEntry, WeeklyTournamentWinner, WeeklyTournamentTonPayout, RewardedAdClaim
 from collections import defaultdict, deque
@@ -61,6 +63,7 @@ from schemas import (
     AdminTonPayoutStatusUpdateRequest,
     AdminWalletReminderRequest,
     AdminWinnerStarsUpdateRequest,
+    TonProofRequest,
     TonWalletConnectRequest,
     TonWalletDisconnectRequest,
     WeeklyTournamentFundRequest,
@@ -108,6 +111,7 @@ redis_client = None
 LOCAL_LOCKS: dict[str, float] = {}
 LOCAL_IDEMPOTENCY_KEYS: dict[str, float] = {}
 LOCAL_RATE_LIMITS_STATE: dict[str, deque[float]] = defaultdict(deque)
+LOCAL_TON_PROOF_PAYLOADS: dict[str, dict] = {}
 APP_ENV = (os.getenv("APP_ENV", "production") or "production").strip().lower()
 ONLINE_USERS_KEY = "online:users"
 ONLINE_WINDOW_SECONDS = 75
@@ -217,6 +221,12 @@ TON_WALLET_ALLOWED_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv
 TON_VERIFIER_API_BASE = (os.getenv("TON_VERIFIER_API_BASE", "https://toncenter.com/api/v3") or "").strip().rstrip("/")
 TON_VERIFIER_API_KEY = (os.getenv("TON_VERIFIER_API_KEY", "") or "").strip()
 TON_VERIFIER_TIMEOUT_SECONDS = max(5.0, float(os.getenv("TON_VERIFIER_TIMEOUT_SECONDS", "15") or "15"))
+TON_PROOF_TTL_SECONDS = max(120, int((os.getenv("TON_PROOF_TTL_SECONDS", "900") or "900").strip()))
+TON_PROOF_ALLOWED_DOMAINS = tuple(
+    item.strip().lower()
+    for item in (os.getenv("TON_PROOF_ALLOWED_DOMAINS", "") or "").split(",")
+    if item.strip()
+)
 
 
 def is_valid_ton_wallet_address(value: str) -> bool:
@@ -247,7 +257,198 @@ def get_ton_wallet_from_user(user: dict | None) -> dict:
         "provider": (wallet.get("provider") or "").strip(),
         "app_name": (wallet.get("app_name") or "").strip(),
         "connected_at": wallet.get("connected_at"),
+        "verified": bool(connected and wallet.get("verified")),
+        "verified_at": wallet.get("verified_at"),
     }
+
+
+def get_ton_proof_storage_key(user_id: int, payload: str) -> str:
+    return f"ton:proof:{int(user_id)}:{payload}"
+
+
+def ton_proof_allowed_domains(request: Request | None = None) -> set[str]:
+    allowed: set[str] = set(TON_PROOF_ALLOWED_DOMAINS)
+    game_host = (urlparse(GAME_WEBAPP_URL).netloc or "").strip().lower()
+    if game_host:
+        allowed.add(game_host)
+    if request:
+        for header_name in ("origin", "referer"):
+            header_value = (request.headers.get(header_name) or "").strip()
+            if not header_value:
+                continue
+            header_host = (urlparse(header_value).netloc or "").strip().lower()
+            if header_host:
+                allowed.add(header_host)
+    return {item for item in allowed if item}
+
+
+def crc16_xmodem(data: bytes) -> int:
+    crc = 0
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc
+
+
+def parse_ton_address_parts(address: str) -> tuple[int, bytes, str]:
+    value = (address or "").strip()
+    if ":" in value:
+        workchain_raw, account_id = value.split(":", 1)
+        workchain = int(workchain_raw.strip())
+        account_id = account_id.strip().lower()
+        if len(account_id) != 64 or not re.fullmatch(r"[0-9a-f]{64}", account_id):
+            raise ValueError("Invalid raw TON address")
+        return workchain, bytes.fromhex(account_id), f"{workchain}:{account_id}"
+
+    normalized = value.replace("-", "+").replace("_", "/")
+    padding = (-len(normalized)) % 4
+    if padding:
+        normalized += "=" * padding
+    decoded = base64.b64decode(normalized)
+    if len(decoded) != 36:
+        raise ValueError("Invalid friendly TON address")
+    body, checksum = decoded[:34], decoded[34:]
+    expected_checksum = crc16_xmodem(body).to_bytes(2, "big")
+    if checksum != expected_checksum:
+        raise ValueError("Invalid TON address checksum")
+    workchain = struct.unpack("b", body[1:2])[0]
+    account_bytes = body[2:]
+    return workchain, account_bytes, f"{workchain}:{account_bytes.hex()}"
+
+
+async def issue_ton_proof_payload(user_id: int) -> tuple[str, int]:
+    payload = secrets.token_urlsafe(24)
+    expires_at = int(time.time()) + TON_PROOF_TTL_SECONDS
+    storage_key = get_ton_proof_storage_key(user_id, payload)
+    payload_data = {"user_id": int(user_id), "expires_at": expires_at}
+    redis_conn = get_redis()
+    if redis_conn:
+        await redis_conn.setex(storage_key, TON_PROOF_TTL_SECONDS, json.dumps(payload_data))
+    else:
+        LOCAL_TON_PROOF_PAYLOADS[storage_key] = payload_data
+    return payload, expires_at
+
+
+async def consume_ton_proof_payload(user_id: int, payload: str) -> bool:
+    storage_key = get_ton_proof_storage_key(user_id, payload)
+    now_ts = int(time.time())
+    redis_conn = get_redis()
+    if redis_conn:
+        raw = await redis_conn.get(storage_key)
+        if not raw:
+            return False
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            data = {}
+        await redis_conn.delete(storage_key)
+        return int(data.get("user_id") or 0) == int(user_id) and int(data.get("expires_at") or 0) >= now_ts
+
+    payload_data = LOCAL_TON_PROOF_PAYLOADS.pop(storage_key, None)
+    if not payload_data:
+        return False
+    return int(payload_data.get("user_id") or 0) == int(user_id) and int(payload_data.get("expires_at") or 0) >= now_ts
+
+
+async def fetch_wallet_public_key_from_chain(raw_address: str) -> bytes | None:
+    headers = {}
+    if TON_VERIFIER_API_KEY:
+        headers["X-API-Key"] = TON_VERIFIER_API_KEY
+    payload = {
+        "address": raw_address,
+        "method": "get_public_key",
+        "stack": [],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=TON_VERIFIER_TIMEOUT_SECONDS) as client:
+            response = await client.post(f"{TON_VERIFIER_API_BASE}/runGetMethod", json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        logger.warning(f"TON public key lookup failed for {raw_address}: {exc}")
+        return None
+
+    stack = data.get("stack") or data.get("result", {}).get("stack") or []
+    if not stack:
+        return None
+    value = stack[0].get("value")
+    if value is None:
+        return None
+    try:
+        key_int = int(str(value), 0)
+        if key_int < 0:
+            return None
+        return key_int.to_bytes(32, "big")
+    except Exception:
+        return None
+
+
+async def verify_ton_wallet_proof(user_id: int, wallet_address: str, ton_proof: TonProofRequest, request: Request) -> tuple[bool, str | None]:
+    try:
+        from nacl.exceptions import BadSignatureError
+        from nacl.signing import VerifyKey
+    except ImportError:
+        logger.error("PyNaCl is not installed; TON proof verification is unavailable")
+        raise HTTPException(status_code=500, detail="TON proof verification is unavailable")
+
+    payload = (ton_proof.payload or "").strip()
+    if not payload:
+        return False, "Missing ton proof payload"
+    if not await consume_ton_proof_payload(user_id, payload):
+        return False, "TON proof payload expired or invalid"
+
+    proof_domain = (ton_proof.domain.value or "").strip().lower()
+    if not proof_domain or proof_domain not in ton_proof_allowed_domains(request):
+        return False, "TON proof domain is not allowed"
+
+    domain_bytes = proof_domain.encode("utf-8")
+    if int(ton_proof.domain.lengthBytes) != len(domain_bytes):
+        return False, "TON proof domain length mismatch"
+
+    now_ts = int(time.time())
+    proof_ts = int(ton_proof.timestamp or 0)
+    if proof_ts <= 0 or abs(now_ts - proof_ts) > TON_PROOF_TTL_SECONDS:
+        return False, "TON proof expired"
+
+    try:
+        workchain, account_bytes, raw_address = parse_ton_address_parts(wallet_address)
+    except ValueError:
+        return False, "Invalid TON wallet address"
+
+    public_key = await fetch_wallet_public_key_from_chain(raw_address)
+    if not public_key:
+        return False, "Unable to verify wallet public key"
+
+    try:
+        signature_bytes = base64.b64decode(ton_proof.signature)
+    except Exception:
+        return False, "Invalid TON proof signature"
+
+    message = b"".join([
+        b"ton-proof-item-v2/",
+        struct.pack(">i", int(workchain)),
+        account_bytes,
+        struct.pack("<I", len(domain_bytes)),
+        domain_bytes,
+        struct.pack("<Q", proof_ts),
+        payload.encode("utf-8"),
+    ])
+    message_hash = hashlib.sha256(message).digest()
+    full_message = b"\xff\xff" + b"ton-connect" + message_hash
+    verify_hash = hashlib.sha256(full_message).digest()
+
+    try:
+        VerifyKey(public_key).verify(verify_hash, signature_bytes)
+    except BadSignatureError:
+        return False, "Invalid TON proof signature"
+    except Exception:
+        return False, "TON proof verification failed"
+
+    return True, None
 
 
 async def get_pending_ton_wallet_notice(user_id: int) -> dict | None:
@@ -257,7 +458,7 @@ async def get_pending_ton_wallet_notice(user_id: int) -> dict | None:
 
     extra_data = parse_extra_data(user.get("extra_data"))
     wallet = get_ton_wallet_from_user({"extra_data": extra_data})
-    if wallet.get("connected"):
+    if wallet.get("connected") and wallet.get("verified"):
         return None
 
     async with AsyncSessionLocal() as session:
@@ -1876,6 +2077,26 @@ async def get_ton_wallet_status(user_id: int, request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@app.get("/api/ton/wallet/proof-payload/{user_id}")
+async def get_ton_wallet_proof_payload(user_id: int, request: Request):
+    try:
+        await require_telegram_user(request, user_id)
+        payload, expires_at = await issue_ton_proof_payload(user_id)
+        return {
+            "success": True,
+            "user_id": user_id,
+            "payload": payload,
+            "expires_at": expires_at,
+            "expires_in_seconds": max(0, expires_at - int(time.time())),
+            "allowed_domains": sorted(ton_proof_allowed_domains(request)),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_ton_wallet_proof_payload: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @app.post("/api/ton/wallet/connect")
 async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request):
     try:
@@ -1888,12 +2109,27 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
+        wallet_verified = False
+        verification_error = None
+        if payload.ton_proof:
+            wallet_verified, verification_error = await verify_ton_wallet_proof(
+                payload.user_id,
+                wallet_address,
+                payload.ton_proof,
+                request,
+            )
+            if not wallet_verified:
+                raise HTTPException(status_code=400, detail=verification_error or "TON wallet proof verification failed")
+
         extra = parse_extra_data(user.get("extra_data"))
         extra["ton_wallet"] = {
             "address": wallet_address,
             "provider": (payload.wallet_provider or "").strip(),
             "app_name": (payload.wallet_app_name or "").strip(),
+            "network": (payload.wallet_network or "").strip(),
             "connected_at": datetime.utcnow().isoformat(),
+            "verified": wallet_verified,
+            "verified_at": datetime.utcnow().isoformat() if wallet_verified else None,
         }
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
@@ -4076,7 +4312,7 @@ async def build_weekly_ton_payout_candidates(season_key: str, ton_price_usd: flo
                     except json.JSONDecodeError:
                         extra_data = {}
                 wallet = get_ton_wallet_from_user({"extra_data": extra_data})
-                if wallet["connected"] and wallet["address"]:
+                if wallet["connected"] and wallet["verified"] and wallet["address"]:
                     wallet_map[int(row.user_id)] = wallet
 
     payouts: list[dict] = []
@@ -4192,7 +4428,7 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
                     except json.JSONDecodeError:
                         extra_data = {}
                 wallet = get_ton_wallet_from_user({"extra_data": extra_data})
-                if wallet["connected"] and wallet["address"]:
+                if wallet["connected"] and wallet["verified"] and wallet["address"]:
                     wallet_map[int(row.user_id)] = wallet
                 reminders_by_season = extra_data.get("ton_wallet_reminders") or {}
                 if isinstance(reminders_by_season, dict):
@@ -4287,7 +4523,7 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
             else:
                 summary["without_payout"] += 1
 
-            wallet_connected = bool(wallet and wallet.get("address"))
+            wallet_connected = bool(wallet and wallet.get("address") and wallet.get("verified"))
             if wallet_connected:
                 summary["with_wallet"] += 1
             else:
@@ -4594,7 +4830,7 @@ async def admin_build_ton_payout_queue(season_key: str, payload: AdminTonPayoutQ
                     except json.JSONDecodeError:
                         extra_data = {}
                 wallet = get_ton_wallet_from_user({"extra_data": extra_data})
-                if wallet["connected"] and wallet["address"]:
+                if wallet["connected"] and wallet["verified"] and wallet["address"]:
                     wallet_map[int(row.user_id)] = wallet
 
             existing_result = await session.execute(

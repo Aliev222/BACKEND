@@ -118,11 +118,25 @@ class AdminWinnerStarsUpdateRequest(BaseModel):
     stars_reward: int = Field(..., ge=0)
 
 
+class TonProofDomainRequest(BaseModel):
+    lengthBytes: int = Field(..., ge=1, le=512)
+    value: str = Field(..., min_length=1, max_length=255)
+
+
+class TonProofRequest(BaseModel):
+    timestamp: int = Field(..., ge=1)
+    domain: TonProofDomainRequest
+    signature: str = Field(..., min_length=16, max_length=2048)
+    payload: str = Field(..., min_length=16, max_length=256)
+
+
 class TonWalletConnectRequest(BaseModel):
     user_id: int
     wallet_address: str = Field(..., min_length=32, max_length=128)
     wallet_provider: Optional[str] = Field(default=None, max_length=32)
     wallet_app_name: Optional[str] = Field(default=None, max_length=64)
+    wallet_network: Optional[str] = Field(default=None, max_length=32)
+    ton_proof: Optional[TonProofRequest] = None
 
 
 class TonWalletDisconnectRequest(BaseModel):
