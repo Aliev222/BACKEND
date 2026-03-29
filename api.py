@@ -18,7 +18,7 @@ import re
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from sqlalchemy import select, func, update
-from DATABASE.base import User, AsyncSessionLocal, WeeklyTournamentEntry, WeeklyTournamentWinner, WeeklyTournamentTonPayout, RewardedAdClaim
+from DATABASE.base import User, UserTask, AsyncSessionLocal, WeeklyTournamentEntry, WeeklyTournamentWinner, WeeklyTournamentTonPayout, RewardedAdClaim
 from collections import defaultdict, deque
 from dataclasses import dataclass
 import redis.asyncio as redis
@@ -121,14 +121,17 @@ GAME_WEBAPP_URL = (os.getenv("GAME_WEBAPP_URL", "https://spirix.vercel.app") or 
 ADMIN_DASHBOARD_TOKEN = (os.getenv("ADMIN_DASHBOARD_TOKEN", "") or "").strip()
 ADMIN_TELEGRAM_IDS = {
     int(item.strip())
-    for item in (os.getenv("ADMIN_TELEGRAM_IDS", "1507124181") or "1507124181").split(",")
+    for item in (os.getenv("ADMIN_TELEGRAM_IDS", "") or "").split(",")
     if item.strip().isdigit()
 }
 MONETAG_POSTBACK_SECRET = (os.getenv("MONETAG_POSTBACK_SECRET", "") or "").strip()
 MONETAG_POSTBACK_ENFORCED = (os.getenv("MONETAG_POSTBACK_ENFORCED", "1" if MONETAG_POSTBACK_SECRET else "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 ADSGRAM_REWARD_SECRET = (os.getenv("ADSGRAM_REWARD_SECRET", "") or "").strip()
 ADSGRAM_REWARD_ENFORCED = (os.getenv("ADSGRAM_REWARD_ENFORCED", "1" if ADSGRAM_REWARD_SECRET else "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
-SESSION_TOKEN_SECRET = (os.getenv("SESSION_TOKEN_SECRET", "") or "").strip() or BOT_TOKEN
+SESSION_TOKEN_SECRET = (
+    (os.getenv("SESSION_TOKEN_SECRET", "") or "").strip()
+    or hashlib.sha256(f"{BOT_TOKEN}:session-token".encode("utf-8")).hexdigest()
+)
 SESSION_TOKEN_TTL_SECONDS = max(900, int((os.getenv("SESSION_TOKEN_TTL_SECONDS", "3600") or "3600").strip()))
 DAILY_REWARD_MAX_DAYS = 30
 DAILY_REWARD_BASE_COINS = 500
@@ -581,9 +584,11 @@ async def create_ad_action_session(user_id: int, action: str) -> str:
         })
     )
     user_index_key = f"adsession:user:{user_id}"
+    active_session_key = get_ad_action_active_session_key(user_id)
     try:
         await redis_conn.zadd(user_index_key, {ad_session_id: time.time()})
         await redis_conn.expire(user_index_key, max(AD_ACTION_SESSION_TTL_SECONDS, 600))
+        await redis_conn.setex(active_session_key, AD_ACTION_SESSION_TTL_SECONDS, ad_session_id)
     except Exception:
         pass
     return ad_session_id
@@ -625,6 +630,25 @@ async def mark_ad_action_session_verified(ad_session_id: str, postback_payload: 
 async def find_latest_ad_action_session_for_user(user_id: int) -> str | None:
     redis_conn = await ensure_redis_available()
     user_index_key = f"adsession:user:{user_id}"
+    active_session_key = get_ad_action_active_session_key(user_id)
+    active_session_id = await redis_conn.get(active_session_key)
+    if active_session_id:
+        session_key = f"adsession:action:{active_session_id}"
+        raw = await redis_conn.get(session_key)
+        if raw:
+            try:
+                session = json.loads(raw)
+                if (
+                    int(session.get("user_id", 0)) == int(user_id)
+                    and session.get("claimed") is not True
+                ):
+                    return active_session_id
+            except Exception:
+                pass
+        try:
+            await redis_conn.delete(active_session_key)
+        except Exception:
+            pass
     session_ids = await redis_conn.zrevrange(user_index_key, 0, 24)
     stale_ids: list[str] = []
 
@@ -671,6 +695,7 @@ async def mark_latest_ad_action_session_verified_for_user(user_id: int, postback
 async def consume_ad_action_session(user_id: int, ad_session_id: str, expected_action: str) -> dict:
     redis_conn = await ensure_redis_available()
     session_key = f"adsession:action:{ad_session_id}"
+    active_session_key = get_ad_action_active_session_key(user_id)
     raw = await redis_conn.get(session_key)
     if not raw:
         raise HTTPException(status_code=400, detail="Invalid or expired ad session")
@@ -689,7 +714,7 @@ async def consume_ad_action_session(user_id: int, ad_session_id: str, expected_a
     if session.get("claimed") is True:
         raise HTTPException(status_code=409, detail="Reward already claimed")
 
-    if MONETAG_POSTBACK_ENFORCED:
+    if MONETAG_POSTBACK_ENFORCED or ADSGRAM_REWARD_ENFORCED:
         if session.get("verified") is not True:
             raise HTTPException(status_code=400, detail="Ad completion was not confirmed yet")
     else:
@@ -699,6 +724,12 @@ async def consume_ad_action_session(user_id: int, ad_session_id: str, expected_a
 
     session["claimed"] = True
     await redis_conn.setex(session_key, 60, json.dumps(session))
+    try:
+        active_session_id = await redis_conn.get(active_session_key)
+        if active_session_id == ad_session_id:
+            await redis_conn.delete(active_session_key)
+    except Exception:
+        pass
     return session
 
 
@@ -1115,6 +1146,10 @@ def serialize_db_field(field: str, value):
     return value
 
 
+def get_ad_action_active_session_key(user_id: int) -> str:
+    return f"adsession:user:active:{int(user_id)}"
+
+
 async def update_user_if_matches(user_id: int, expected: dict, data: dict):
     allowed_fields = {
         "username", "coins", "profit_per_hour", "profit_per_tap", "energy",
@@ -1149,6 +1184,56 @@ async def update_user_if_matches(user_id: int, expected: dict, data: dict):
         if result.rowcount != 1:
             await session.rollback()
             return None
+        await session.commit()
+
+    return await get_user(user_id)
+
+
+async def apply_atomic_user_updates(
+    user_id: int,
+    current_user: dict,
+    updates: dict,
+    *,
+    expected_fields: tuple[str, ...] | None = None,
+    conflict_detail: str = "User state changed, retry",
+):
+    fields = expected_fields or tuple(
+        field
+        for field in ("coins", "energy", "last_energy_update", "extra_data", "last_passive_income", "referral_earnings")
+        if field in updates
+    )
+    expected = {field: current_user.get(field) for field in fields}
+    updated_user = await update_user_if_matches(user_id, expected, updates)
+    if not updated_user:
+        raise HTTPException(status_code=409, detail=conflict_detail)
+    await invalidate_user_cache(user_id)
+    return updated_user
+
+
+async def complete_task_reward_atomically(user_id: int, task_id: str, user_updates: dict | None = None) -> dict:
+    user_updates = user_updates or {}
+
+    async with AsyncSessionLocal() as session:
+        user_result = await session.execute(
+            select(User).where(User.user_id == user_id).with_for_update()
+        )
+        user_row = user_result.scalar_one_or_none()
+        if not user_row:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        task_result = await session.execute(
+            select(UserTask).where(
+                UserTask.user_id == user_id,
+                UserTask.task_id == task_id,
+            )
+        )
+        if task_result.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Task already completed")
+
+        session.add(UserTask(user_id=user_id, task_id=task_id))
+        for field, value in user_updates.items():
+            setattr(user_row, field, json.dumps(value) if field == "extra_data" else value)
+
         await session.commit()
 
     return await get_user(user_id)
@@ -2273,8 +2358,13 @@ async def increment_ads_watched(payload: AdActionClaimRequest, request: Request)
                 extra["skin_ad_last_watch"] = last_watch
                 ready_to_unlock = current_count >= required_count
 
-        await update_user(payload.user_id, {"extra_data": extra})
-        await invalidate_user_cache(payload.user_id)
+        await apply_atomic_user_updates(
+            payload.user_id,
+            user,
+            {"extra_data": extra},
+            expected_fields=("extra_data",),
+            conflict_detail="Ad reward state changed, retry",
+        )
         await record_rewarded_ad_claim(payload.user_id, "skins", {"source_action": "ads_increment", "skin_id": skin_id})
 
         return {
@@ -3086,10 +3176,15 @@ async def play_coinflip(payload: GameRequest, request: Request):
             user["coins"] -= payload.bet
             message = f"You lost {payload.bet} coins"
 
-        await update_user(payload.user_id, {"coins": user["coins"]})
-        await invalidate_user_cache(payload.user_id)
+        updated_user = await apply_atomic_user_updates(
+            payload.user_id,
+            user,
+            {"coins": int(user["coins"])},
+            expected_fields=("coins",),
+            conflict_detail="Coinflip state changed, retry",
+        )
 
-        return {"success": True, "coins": user["coins"], "message": message}
+        return {"success": True, "coins": int(updated_user.get("coins", 0)), "message": message}
     except HTTPException:
         raise
     except Exception as e:
@@ -3120,10 +3215,15 @@ async def play_slots(payload: GameRequest, request: Request):
             user["coins"] -= payload.bet
             message = f"You lost {payload.bet} coins"
 
-        await update_user(payload.user_id, {"coins": user["coins"]})
-        await invalidate_user_cache(payload.user_id)
+        updated_user = await apply_atomic_user_updates(
+            payload.user_id,
+            user,
+            {"coins": int(user["coins"])},
+            expected_fields=("coins",),
+            conflict_detail="Slots state changed, retry",
+        )
 
-        return {"success": True, "coins": user["coins"], "slots": slots, "message": message}
+        return {"success": True, "coins": int(updated_user.get("coins", 0)), "slots": slots, "message": message}
     except HTTPException:
         raise
     except Exception as e:
@@ -3165,12 +3265,17 @@ async def play_dice(payload: GameRequest, request: Request):
             user["coins"] -= payload.bet
             message = f"You lost {payload.bet} coins"
 
-        await update_user(payload.user_id, {"coins": user["coins"]})
-        await invalidate_user_cache(payload.user_id)
+        updated_user = await apply_atomic_user_updates(
+            payload.user_id,
+            user,
+            {"coins": int(user["coins"])},
+            expected_fields=("coins",),
+            conflict_detail="Dice state changed, retry",
+        )
 
         return {
             "success": True,
-            "coins": user["coins"],
+            "coins": int(updated_user.get("coins", 0)),
             "dice1": dice1,
             "dice2": dice2,
             "message": message
@@ -3227,12 +3332,17 @@ async def play_roulette(payload: GameRequest, request: Request):
             user["coins"] -= payload.bet
             message = f"{result_symbol} {result} - You lost {payload.bet} coins"
 
-        await update_user(payload.user_id, {"coins": user["coins"]})
-        await invalidate_user_cache(payload.user_id)
+        updated_user = await apply_atomic_user_updates(
+            payload.user_id,
+            user,
+            {"coins": int(user["coins"])},
+            expected_fields=("coins",),
+            conflict_detail="Roulette state changed, retry",
+        )
 
         return {
             "success": True,
-            "coins": user["coins"],
+            "coins": int(updated_user.get("coins", 0)),
             "result_number": result,
             "result_color": result_color,
             "result_symbol": result_symbol,
@@ -3274,12 +3384,17 @@ async def play_luckybox(payload: LuckyBoxRequest, request: Request):
             message = f"Bust. You lost {payload.bet} coins."
             outcome = "lose"
 
-        await update_user(payload.user_id, {"coins": new_coins})
-        await invalidate_user_cache(payload.user_id)
+        updated_user = await apply_atomic_user_updates(
+            payload.user_id,
+            user,
+            {"coins": new_coins},
+            expected_fields=("coins",),
+            conflict_detail="Lucky box state changed, retry",
+        )
 
         return {
             "success": True,
-            "coins": new_coins,
+            "coins": int(updated_user.get("coins", new_coins)),
             "message": message,
             "outcome": outcome,
             "multiplier": multiplier,
@@ -3323,14 +3438,19 @@ async def start_crash_ghost_round(payload: CrashGameStartRequest, request: Reque
         session = build_crash_ghost_session(payload.bet, payload.user_id)
         session["session_id"] = f"{payload.user_id}:{int(session['started_at'] * 1000)}:{random.randint(100000, 999999)}"
 
-        await update_user(payload.user_id, {"coins": new_coins})
-        await invalidate_user_cache(payload.user_id)
+        updated_user = await apply_atomic_user_updates(
+            payload.user_id,
+            user,
+            {"coins": new_coins},
+            expected_fields=("coins",),
+            conflict_detail="Crash round state changed, retry",
+        )
         await redis_conn.setex(session_key, CRASH_GHOST_SESSION_TTL_SECONDS, json.dumps(session))
 
         return {
             "success": True,
             "session_id": session["session_id"],
-            "coins": new_coins,
+            "coins": int(updated_user.get("coins", new_coins)),
             "multiplier": 1.0,
             "server_started_at": datetime.utcfromtimestamp(session["started_at"]).isoformat(),
         }
@@ -3413,14 +3533,19 @@ async def cashout_crash_ghost_round(payload: CrashGameCashoutRequest, request: R
         payout = max(0, int(bet * runtime["multiplier"]))
         new_coins = int(user.get("coins", 0)) + payout
 
-        await update_user(payload.user_id, {"coins": new_coins})
-        await invalidate_user_cache(payload.user_id)
+        updated_user = await apply_atomic_user_updates(
+            payload.user_id,
+            user,
+            {"coins": new_coins},
+            expected_fields=("coins",),
+            conflict_detail="Crash cashout state changed, retry",
+        )
         await redis_conn.delete(session_key)
 
         return {
             "success": True,
             "crashed": False,
-            "coins": new_coins,
+            "coins": int(updated_user.get("coins", new_coins)),
             "payout": payout,
             "profit": payout - bet,
             "multiplier": runtime["multiplier"],
@@ -4923,7 +5048,7 @@ async def get_tasks(user_id: int, request: Request):
             {"id": "energy_refill", "title": "вљЎ Infinite Energy", "description": "5 minutes of unlimited energy", 
              "reward": "вљЎ 5 minutes", "icon": "вљЎ", "completed": "energy_refill" in completed_tasks},
             {"id": "link_click", "title": "рџ”— Follow Link", "description": "Click the link and get reward", 
-             "reward": "25000 coins", "icon": "рџ”—", "completed": False},
+             "reward": "25000 coins", "icon": "рџ”—", "completed": "link_click" in completed_tasks},
             {"id": "telegram_sub", "title": "Telegram Channel", "description": "Subscribe to Telegram channel",
              "reward": "20000 coins + skin", "icon": "📣", "completed": "telegram_sub" in completed_tasks},
             {"id": "tiktok_sub", "title": "TikTok", "description": "Subscribe to TikTok",
@@ -4951,35 +5076,42 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
 
         task_id = payload.task_id
         
-        if task_id == "link_click":
-            user["coins"] += 25000
-            await update_user(payload.user_id, {"coins": user["coins"]})
-            await invalidate_user_cache(payload.user_id)
-            
-            return {"success": True, "message": "рџ”— +25000 coins!", "coins": user["coins"]}
-        
         completed = await get_completed_tasks(payload.user_id) or []
         if task_id in completed:
             raise HTTPException(status_code=400, detail="Task already completed")
-        
-        if task_id == "daily_bonus":
-            user["coins"] += 25000
-            await add_completed_task(payload.user_id, task_id)
-            await update_user(payload.user_id, {"coins": user["coins"]})
+
+        if task_id == "link_click":
+            updated_user = await complete_task_reward_atomically(
+                payload.user_id,
+                task_id,
+                {"coins": int(user.get("coins", 0)) + 25000},
+            )
             await invalidate_user_cache(payload.user_id)
-            return {"success": True, "message": "рџЋЃ +25000 coins!", "coins": user["coins"]}
-        
+            return {"success": True, "message": "рџ”— +25000 coins!", "coins": int(updated_user.get("coins", 0))}
+
+        if task_id == "daily_bonus":
+            updated_user = await complete_task_reward_atomically(
+                payload.user_id,
+                task_id,
+                {"coins": int(user.get("coins", 0)) + 25000},
+            )
+            await invalidate_user_cache(payload.user_id)
+            return {"success": True, "message": "рџЋЃ +25000 coins!", "coins": int(updated_user.get("coins", 0))}
+
         elif task_id == "energy_refill":
-            await add_completed_task(payload.user_id, task_id)
+            await complete_task_reward_atomically(payload.user_id, task_id)
+            await invalidate_user_cache(payload.user_id)
             return {"success": True, "message": "вљЎ Energy refill activated!"}
-        
+
         elif task_id == "invite_5_friends":
             if user.get("referral_count", 0) >= 5:
-                user["coins"] += 20000
-                await add_completed_task(payload.user_id, task_id)
-                await update_user(payload.user_id, {"coins": user["coins"]})
+                updated_user = await complete_task_reward_atomically(
+                    payload.user_id,
+                    task_id,
+                    {"coins": int(user.get("coins", 0)) + 20000},
+                )
                 await invalidate_user_cache(payload.user_id)
-                return {"success": True, "message": "рџ‘Ґ +20000 coins!", "coins": user["coins"]}
+                return {"success": True, "message": "рџ‘Ґ +20000 coins!", "coins": int(updated_user.get("coins", 0))}
             else:
                 raise HTTPException(status_code=400, detail="Not enough friends")
 
@@ -5001,23 +5133,26 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
                         status_code=400,
                         detail="Telegram subscription was not verified yet"
                     )
+            else:
+                raise HTTPException(status_code=400, detail="Task verification is not available yet")
 
             if social_skin_id not in owned_skins:
                 owned_skins.append(social_skin_id)
 
             extra["owned_skins"] = normalize_owned_skins(owned_skins)
-            user["coins"] += 20000
-
-            await add_completed_task(payload.user_id, task_id)
-            await update_user(payload.user_id, {
-                "coins": user["coins"],
-                "extra_data": extra,
-            })
+            updated_user = await complete_task_reward_atomically(
+                payload.user_id,
+                task_id,
+                {
+                    "coins": int(user.get("coins", 0)) + 20000,
+                    "extra_data": extra,
+                },
+            )
             await invalidate_user_cache(payload.user_id)
             return {
                 "success": True,
                 "message": "✅ +20000 coins + skin!",
-                "coins": user["coins"],
+                "coins": int(updated_user.get("coins", 0)),
                 "skin_id": social_skin_id,
                 "verified": task_id == "telegram_sub",
             }
@@ -5135,8 +5270,15 @@ async def claim_video_task(payload: VideoTaskClaimRequest, request: Request):
         extra["video_task_boosts"] = boosts
         updates["extra_data"] = extra
 
-        await update_user(payload.user_id, updates)
-        await invalidate_user_cache(payload.user_id)
+        expected_fields = ("extra_data", "coins") if "coins" in updates else ("extra_data",)
+        updated_user = await apply_atomic_user_updates(
+            payload.user_id,
+            user,
+            updates,
+            expected_fields=expected_fields,
+            conflict_detail="Video task state changed, retry",
+        )
+        response["coins"] = int(updated_user.get("coins", response["coins"]))
         await record_rewarded_ad_claim(payload.user_id, "tasks", {"task_id": payload.task_id})
         return response
     except HTTPException:
@@ -5309,11 +5451,17 @@ async def claim_daily_reward(payload: UserIdRequest, request: Request):
             extra["owned_skins"] = normalize_owned_skins(owned_skins)
             response_payload["skin_id"] = DAILY_REWARD_SKIN_ID
 
-        await update_user(payload.user_id, {
-            "coins": new_coins,
-            "extra_data": extra,
-        })
-        await invalidate_user_cache(payload.user_id)
+        updated_user = await apply_atomic_user_updates(
+            payload.user_id,
+            user,
+            {
+                "coins": new_coins,
+                "extra_data": extra,
+            },
+            expected_fields=("coins", "extra_data"),
+            conflict_detail="Daily reward state changed, retry",
+        )
+        response_payload["coins"] = int(updated_user.get("coins", new_coins))
 
         return response_payload
     except HTTPException:
