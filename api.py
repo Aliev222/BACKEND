@@ -2410,13 +2410,8 @@ async def increment_ads_watched(payload: AdActionClaimRequest, request: Request)
                 extra["skin_ad_last_watch"] = last_watch
                 ready_to_unlock = current_count >= required_count
 
-        await apply_atomic_user_updates(
-            payload.user_id,
-            user,
-            {"extra_data": extra},
-            expected_fields=("extra_data",),
-            conflict_detail="Ad reward state changed, retry",
-        )
+        await update_user(payload.user_id, {"extra_data": extra})
+        await invalidate_user_cache(payload.user_id)
         await record_rewarded_ad_claim(payload.user_id, "skins", {"source_action": "ads_increment", "skin_id": skin_id})
 
         return {
@@ -5322,15 +5317,10 @@ async def claim_video_task(payload: VideoTaskClaimRequest, request: Request):
         extra["video_task_boosts"] = boosts
         updates["extra_data"] = extra
 
-        expected_fields = ("extra_data", "coins") if "coins" in updates else ("extra_data",)
-        updated_user = await apply_atomic_user_updates(
-            payload.user_id,
-            user,
-            updates,
-            expected_fields=expected_fields,
-            conflict_detail="Video task state changed, retry",
-        )
-        response["coins"] = int(updated_user.get("coins", response["coins"]))
+        await update_user(payload.user_id, updates)
+        await invalidate_user_cache(payload.user_id)
+        refreshed_user = await get_user_cached(payload.user_id)
+        response["coins"] = int((refreshed_user or {}).get("coins", response["coins"]))
         await record_rewarded_ad_claim(payload.user_id, "tasks", {"task_id": payload.task_id})
         return response
     except HTTPException:
@@ -5503,17 +5493,13 @@ async def claim_daily_reward(payload: UserIdRequest, request: Request):
             extra["owned_skins"] = normalize_owned_skins(owned_skins)
             response_payload["skin_id"] = DAILY_REWARD_SKIN_ID
 
-        updated_user = await apply_atomic_user_updates(
-            payload.user_id,
-            user,
-            {
-                "coins": new_coins,
-                "extra_data": extra,
-            },
-            expected_fields=("coins", "extra_data"),
-            conflict_detail="Daily reward state changed, retry",
-        )
-        response_payload["coins"] = int(updated_user.get("coins", new_coins))
+        await update_user(payload.user_id, {
+            "coins": new_coins,
+            "extra_data": extra,
+        })
+        await invalidate_user_cache(payload.user_id)
+        refreshed_user = await get_user_cached(payload.user_id)
+        response_payload["coins"] = int((refreshed_user or {}).get("coins", new_coins))
 
         return response_payload
     except HTTPException:
