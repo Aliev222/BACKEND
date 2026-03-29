@@ -70,8 +70,8 @@ async def cmd_start(message: types.Message) -> None:
 
     await message.answer(
         f"Welcome, {username}!\n\n"
-        f"Coins: {user_coins}\n"
-        f"Tap the button below to open the game:",
+        f"Your click coins: {user_coins}\n"
+        f"Tap the button below to open the game.",
         reply_markup=keyboard,
     )
 
