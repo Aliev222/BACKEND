@@ -126,6 +126,8 @@ ADMIN_TELEGRAM_IDS = {
 }
 MONETAG_POSTBACK_SECRET = (os.getenv("MONETAG_POSTBACK_SECRET", "") or "").strip()
 MONETAG_POSTBACK_ENFORCED = (os.getenv("MONETAG_POSTBACK_ENFORCED", "1" if MONETAG_POSTBACK_SECRET else "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+ADSGRAM_REWARD_SECRET = (os.getenv("ADSGRAM_REWARD_SECRET", "") or "").strip()
+ADSGRAM_REWARD_ENFORCED = (os.getenv("ADSGRAM_REWARD_ENFORCED", "1" if ADSGRAM_REWARD_SECRET else "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 SESSION_TOKEN_SECRET = (os.getenv("SESSION_TOKEN_SECRET", "") or "").strip() or BOT_TOKEN
 SESSION_TOKEN_TTL_SECONDS = max(900, int((os.getenv("SESSION_TOKEN_TTL_SECONDS", "3600") or "3600").strip()))
 DAILY_REWARD_MAX_DAYS = 30
@@ -152,6 +154,9 @@ MONETAG_POSTBACK_ID_KEYS = (
 )
 MONETAG_POSTBACK_SECRET_KEYS = ("token", "secret", "key")
 MONETAG_POSTBACK_NEGATIVE_VALUES = {"0", "false", "failed", "cancelled", "canceled", "rejected", "deny", "denied"}
+ADSGRAM_REWARD_USER_KEYS = ("user_id", "userid", "userId", "telegram_id", "telegramId", "tg_user_id", "tgUserId")
+ADSGRAM_REWARD_SESSION_KEYS = ("ad_session_id", "session_id", "request_var", "click_id", "cid", "payload", "custom_data")
+ADSGRAM_REWARD_SECRET_KEYS = ("token", "secret", "key")
 VIDEO_TASK_DEFINITIONS = {
     "tap_surge": {
         "type": "tap_boost",
@@ -575,6 +580,12 @@ async def create_ad_action_session(user_id: int, action: str) -> str:
             "created_at": time.time(),
         })
     )
+    user_index_key = f"adsession:user:{user_id}"
+    try:
+        await redis_conn.zadd(user_index_key, {ad_session_id: time.time()})
+        await redis_conn.expire(user_index_key, max(AD_ACTION_SESSION_TTL_SECONDS, 600))
+    except Exception:
+        pass
     return ad_session_id
 
 
@@ -609,6 +620,52 @@ async def mark_ad_action_session_verified(ad_session_id: str, postback_payload: 
     ttl = max(int(ttl or 0), 300)
     await redis_conn.setex(session_key, ttl, json.dumps(session))
     return True
+
+
+async def find_latest_ad_action_session_for_user(user_id: int) -> str | None:
+    redis_conn = await ensure_redis_available()
+    user_index_key = f"adsession:user:{user_id}"
+    session_ids = await redis_conn.zrevrange(user_index_key, 0, 24)
+    stale_ids: list[str] = []
+
+    for session_id in session_ids:
+        session_key = f"adsession:action:{session_id}"
+        raw = await redis_conn.get(session_key)
+        if not raw:
+            stale_ids.append(session_id)
+            continue
+
+        try:
+            session = json.loads(raw)
+        except Exception:
+            stale_ids.append(session_id)
+            continue
+
+        if int(session.get("user_id", 0)) != int(user_id):
+            stale_ids.append(session_id)
+            continue
+
+        if session.get("claimed") is True:
+            continue
+
+        return session_id
+
+    if stale_ids:
+        try:
+            await redis_conn.zrem(user_index_key, *stale_ids)
+        except Exception:
+            pass
+    return None
+
+
+async def mark_latest_ad_action_session_verified_for_user(user_id: int, postback_payload: dict) -> str | None:
+    ad_session_id = await find_latest_ad_action_session_for_user(user_id)
+    if not ad_session_id:
+        return None
+    verified = await mark_ad_action_session_verified(ad_session_id, postback_payload)
+    if not verified:
+        return None
+    return ad_session_id
 
 
 async def consume_ad_action_session(user_id: int, ad_session_id: str, expected_action: str) -> dict:
@@ -1361,7 +1418,7 @@ async def metrics_middleware(request: Request, call_next):
     method = request.method
     status_code = 500
     try:
-        if path.startswith("/api/") and path not in {"/api/ads/monetag/postback"}:
+        if path.startswith("/api/") and path not in {"/api/ads/monetag/postback", "/api/ads/adsgram/reward"}:
             request_ip = get_request_ip(request)
             ip_allowed = await redis_rate_limit(f"rl:global_api:ip:{request_ip}", 240, 60)
             if not ip_allowed:
@@ -2065,6 +2122,56 @@ async def monetag_postback(request: Request):
         raise
     except Exception as e:
         logger.error(f"Error in monetag_postback: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.api_route("/api/ads/adsgram/reward", methods=["GET", "POST"])
+async def adsgram_reward_callback(request: Request):
+    try:
+        params = {str(k): str(v) for k, v in request.query_params.items()}
+
+        if request.method == "POST":
+            content_type = (request.headers.get("content-type") or "").lower()
+            if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+                form = await request.form()
+                for key, value in form.items():
+                    params[str(key)] = str(value)
+            elif "application/json" in content_type:
+                payload = await request.json()
+                if isinstance(payload, dict):
+                    for key, value in payload.items():
+                        params[str(key)] = str(value)
+
+        if ADSGRAM_REWARD_ENFORCED:
+            provided_secret = extract_first_value(params, ADSGRAM_REWARD_SECRET_KEYS)
+            if provided_secret != ADSGRAM_REWARD_SECRET:
+                logger.warning("AdsGram reward callback rejected: invalid secret")
+                raise HTTPException(status_code=403, detail="Invalid AdsGram reward secret")
+
+        ad_session_id = extract_first_value(params, ADSGRAM_REWARD_SESSION_KEYS)
+        if ad_session_id:
+            verified = await mark_ad_action_session_verified(ad_session_id, params)
+            if not verified:
+                logger.warning("AdsGram callback could not find ad session %s", ad_session_id)
+                return Response(content="SESSION_NOT_FOUND", media_type="text/plain", status_code=404)
+            return Response(content="OK", media_type="text/plain", status_code=200)
+
+        user_id_raw = extract_first_value(params, ADSGRAM_REWARD_USER_KEYS)
+        if not user_id_raw or not str(user_id_raw).strip().isdigit():
+            logger.warning("AdsGram reward callback missing valid user id: %s", params)
+            raise HTTPException(status_code=400, detail="Missing user id")
+
+        user_id = int(str(user_id_raw).strip())
+        matched_session_id = await mark_latest_ad_action_session_verified_for_user(user_id, params)
+        if not matched_session_id:
+            logger.warning("AdsGram callback could not match an active ad session for user %s", user_id)
+            return Response(content="SESSION_NOT_FOUND", media_type="text/plain", status_code=404)
+
+        return Response(content="OK", media_type="text/plain", status_code=200)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in adsgram_reward_callback: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
