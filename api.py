@@ -627,6 +627,35 @@ async def mark_ad_action_session_verified(ad_session_id: str, postback_payload: 
     return True
 
 
+async def mark_ad_action_session_verified_for_user(
+    user_id: int,
+    ad_session_id: str,
+    verification_payload: dict | None = None,
+) -> bool:
+    redis_conn = await ensure_redis_available()
+    session_key = f"adsession:action:{ad_session_id}"
+    raw = await redis_conn.get(session_key)
+    if not raw:
+        return False
+
+    try:
+        session = json.loads(raw)
+    except Exception:
+        return False
+
+    if int(session.get("user_id", 0)) != int(user_id):
+        return False
+
+    if session.get("claimed") is True:
+        return False
+
+    created_at = float(session.get("created_at") or 0)
+    if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
+        return False
+
+    return await mark_ad_action_session_verified(ad_session_id, verification_payload or {})
+
+
 async def find_latest_ad_action_session_for_user(user_id: int) -> str | None:
     redis_conn = await ensure_redis_available()
     user_index_key = f"adsession:user:{user_id}"
@@ -2150,6 +2179,29 @@ async def ad_action_start(payload: AdActionStartRequest, request: Request):
         raise
     except Exception as e:
         logger.error(f"Error in ad_action_start: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/ads/adsgram/complete")
+async def adsgram_complete_locally(payload: AdActionClaimRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await require_dual_rate_limit("adsgram_complete", request, payload.user_id, 20, 60, ip_limit=40)
+        await require_user_action_lock("adsgram_complete", payload.user_id, ttl=2)
+
+        verified = await mark_ad_action_session_verified_for_user(
+            payload.user_id,
+            payload.ad_session_id,
+            {"source": "adsgram_sdk", "confirmed_at": datetime.utcnow().isoformat()},
+        )
+        if not verified:
+            raise HTTPException(status_code=400, detail="Ad completion was not confirmed yet")
+
+        return {"success": True, "verified": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in adsgram_complete_locally: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
