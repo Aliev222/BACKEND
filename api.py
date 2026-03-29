@@ -242,6 +242,69 @@ def get_ton_wallet_from_user(user: dict | None) -> dict:
     }
 
 
+async def get_pending_ton_wallet_notice(user_id: int) -> dict | None:
+    user = await get_user_cached(user_id)
+    if not user:
+        return None
+
+    extra_data = parse_extra_data(user.get("extra_data"))
+    wallet = get_ton_wallet_from_user({"extra_data": extra_data})
+    if wallet.get("connected"):
+        return None
+
+    async with AsyncSessionLocal() as session:
+        winner_result = await session.execute(
+            select(WeeklyTournamentWinner)
+            .where(
+                WeeklyTournamentWinner.user_id == user_id,
+                WeeklyTournamentWinner.eligible_for_payout == True,
+                WeeklyTournamentWinner.fraud_flag == False,
+                WeeklyTournamentWinner.payout_cents > 0,
+            )
+            .order_by(WeeklyTournamentWinner.created_at.desc())
+            .limit(1)
+        )
+        winner_row = winner_result.scalars().first()
+        if not winner_row:
+            return None
+
+        payout_result = await session.execute(
+            select(WeeklyTournamentTonPayout)
+            .where(
+                WeeklyTournamentTonPayout.season_key == winner_row.season_key,
+                WeeklyTournamentTonPayout.user_id == user_id,
+            )
+            .limit(1)
+        )
+        payout_row = payout_result.scalars().first()
+
+    if payout_row and str(getattr(payout_row, "status", "") or "").lower() in {"queued", "submitted", "sent"}:
+        return None
+
+    reminders_by_season = extra_data.get("ton_wallet_reminders") or {}
+    reminder = reminders_by_season.get(winner_row.season_key) if isinstance(reminders_by_season, dict) else {}
+    if not isinstance(reminder, dict):
+        reminder = {}
+
+    reminder_sent_at = reminder.get("sent_at")
+    hours_until_deadline = int(reminder.get("hours_until_deadline") or 72)
+    deadline_at = None
+    parsed_sent_at = parse_iso_datetime(reminder_sent_at)
+    if parsed_sent_at:
+        deadline_at = (parsed_sent_at + timedelta(hours=hours_until_deadline)).isoformat()
+
+    return {
+        "season_key": winner_row.season_key,
+        "league": winner_row.league,
+        "rank": int(winner_row.rank or 0),
+        "payout_cents": int(winner_row.payout_cents or 0),
+        "wallet_connected": False,
+        "reminder_sent_at": reminder_sent_at,
+        "hours_until_deadline": hours_until_deadline,
+        "deadline_at": deadline_at,
+    }
+
+
 def ton_wallet_normalized_variants(address: str | None) -> set[str]:
     raw = (address or "").strip()
     if not raw:
@@ -3294,6 +3357,7 @@ async def get_weekly_tournament_overview(user_id: int, request: Request):
         starts_at, ends_at = get_weekly_tournament_season_window(now)
         season_key = get_weekly_tournament_season_key(now)
         player = await get_weekly_tournament_player_entry(user_id, season_key)
+        pending_ton_notice = await get_pending_ton_wallet_notice(user_id)
 
         return {
             "success": True,
@@ -3310,6 +3374,7 @@ async def get_weekly_tournament_overview(user_id: int, request: Request):
                 "ranges": WEEKLY_RANGE_PAYOUT_SPLITS,
             },
             "player": player,
+            "pending_ton_notice": pending_ton_notice,
         }
     except HTTPException:
         raise
