@@ -320,6 +320,17 @@ def parse_ton_address_parts(address: str) -> tuple[int, bytes, str]:
     return workchain, account_bytes, f"{workchain}:{account_bytes.hex()}"
 
 
+def decode_base64_any(value: str) -> bytes:
+    raw = (value or "").strip()
+    if not raw:
+        raise ValueError("Empty base64 value")
+    normalized = raw.replace("-", "+").replace("_", "/")
+    padding = (-len(normalized)) % 4
+    if padding:
+        normalized += "=" * padding
+    return base64.b64decode(normalized)
+
+
 async def issue_ton_proof_payload(user_id: int) -> tuple[str, int]:
     payload = secrets.token_urlsafe(24)
     expires_at = int(time.time()) + TON_PROOF_TTL_SECONDS
@@ -425,7 +436,7 @@ async def verify_ton_wallet_proof(user_id: int, wallet_address: str, ton_proof: 
         return False, "Unable to verify wallet public key"
 
     try:
-        signature_bytes = base64.b64decode(ton_proof.signature)
+        signature_bytes = decode_base64_any(ton_proof.signature)
     except Exception:
         return False, "Invalid TON proof signature"
 
