@@ -401,11 +401,12 @@ async def verify_ton_wallet_proof(user_id: int, wallet_address: str, ton_proof: 
     if not await consume_ton_proof_payload(user_id, payload):
         return False, "TON proof payload expired or invalid"
 
-    proof_domain = (ton_proof.domain.value or "").strip().lower()
+    proof_domain_raw = (ton_proof.domain.value or "").strip()
+    proof_domain = proof_domain_raw.lower()
     if not proof_domain or proof_domain not in ton_proof_allowed_domains(request):
         return False, "TON proof domain is not allowed"
 
-    domain_bytes = proof_domain.encode("utf-8")
+    domain_bytes = proof_domain_raw.encode("utf-8")
     if int(ton_proof.domain.lengthBytes) != len(domain_bytes):
         return False, "TON proof domain length mismatch"
 
@@ -2119,6 +2120,13 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
                 request,
             )
             if not wallet_verified:
+                logger.warning(
+                    "TON wallet proof verification failed for user %s: %s (domain=%s, address=%s)",
+                    payload.user_id,
+                    verification_error or "unknown error",
+                    getattr(getattr(payload.ton_proof, "domain", None), "value", None),
+                    wallet_address,
+                )
                 raise HTTPException(status_code=400, detail=verification_error or "TON wallet proof verification failed")
 
         extra = parse_extra_data(user.get("extra_data"))
