@@ -325,7 +325,7 @@ async def issue_ton_proof_payload(user_id: int) -> tuple[str, int]:
     expires_at = int(time.time()) + TON_PROOF_TTL_SECONDS
     storage_key = get_ton_proof_storage_key(user_id, payload)
     payload_data = {"user_id": int(user_id), "expires_at": expires_at}
-    redis_conn = get_redis()
+    redis_conn = await get_redis_or_none()
     if redis_conn:
         await redis_conn.setex(storage_key, TON_PROOF_TTL_SECONDS, json.dumps(payload_data))
     else:
@@ -336,7 +336,7 @@ async def issue_ton_proof_payload(user_id: int) -> tuple[str, int]:
 async def consume_ton_proof_payload(user_id: int, payload: str) -> bool:
     storage_key = get_ton_proof_storage_key(user_id, payload)
     now_ts = int(time.time())
-    redis_conn = get_redis()
+    redis_conn = await get_redis_or_none()
     if redis_conn:
         raw = await redis_conn.get(storage_key)
         if not raw:
