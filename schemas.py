@@ -136,6 +136,8 @@ class TonWalletConnectRequest(BaseModel):
     wallet_provider: Optional[str] = Field(default=None, max_length=32)
     wallet_app_name: Optional[str] = Field(default=None, max_length=64)
     wallet_network: Optional[str] = Field(default=None, max_length=32)
+    wallet_public_key: Optional[str] = Field(default=None, max_length=256)
+    wallet_state_init: Optional[str] = Field(default=None, max_length=8192)
     ton_proof: Optional[TonProofRequest] = None
 
 

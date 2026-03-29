@@ -259,6 +259,7 @@ def get_ton_wallet_from_user(user: dict | None) -> dict:
         "connected_at": wallet.get("connected_at"),
         "verified": bool(connected and wallet.get("verified")),
         "verified_at": wallet.get("verified_at"),
+        "verification_error": (wallet.get("verification_error") or "").strip(),
     }
 
 
@@ -398,7 +399,33 @@ async def fetch_wallet_public_key_from_chain(raw_address: str) -> bytes | None:
         return None
 
 
-async def verify_ton_wallet_proof(user_id: int, wallet_address: str, ton_proof: TonProofRequest, request: Request) -> tuple[bool, str | None]:
+def decode_ton_wallet_public_key(value: str | None) -> bytes | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    normalized = raw.lower()
+    if normalized.startswith("0x"):
+        normalized = normalized[2:]
+    if re.fullmatch(r"[0-9a-f]{64}", normalized):
+        try:
+            return bytes.fromhex(normalized)
+        except ValueError:
+            return None
+    try:
+        decoded = decode_base64_any(raw)
+        return decoded if len(decoded) == 32 else None
+    except Exception:
+        return None
+
+
+async def verify_ton_wallet_proof(
+    user_id: int,
+    wallet_address: str,
+    ton_proof: TonProofRequest,
+    request: Request,
+    wallet_public_key: str | None = None,
+    wallet_state_init: str | None = None,
+) -> tuple[bool, str | None]:
     try:
         from nacl.exceptions import BadSignatureError
         from nacl.signing import VerifyKey
@@ -431,9 +458,16 @@ async def verify_ton_wallet_proof(user_id: int, wallet_address: str, ton_proof: 
     except ValueError:
         return False, "Invalid TON wallet address"
 
-    public_key = await fetch_wallet_public_key_from_chain(raw_address)
-    if not public_key:
+    client_public_key = decode_ton_wallet_public_key(wallet_public_key)
+    chain_public_key = await fetch_wallet_public_key_from_chain(raw_address)
+    if not client_public_key and not chain_public_key:
         return False, "Unable to verify wallet public key"
+
+    candidate_keys: list[bytes] = []
+    if client_public_key:
+        candidate_keys.append(client_public_key)
+    if chain_public_key and all(existing != chain_public_key for existing in candidate_keys):
+        candidate_keys.append(chain_public_key)
 
     try:
         signature_bytes = decode_base64_any(ton_proof.signature)
@@ -453,14 +487,27 @@ async def verify_ton_wallet_proof(user_id: int, wallet_address: str, ton_proof: 
     full_message = b"\xff\xff" + b"ton-connect" + message_hash
     verify_hash = hashlib.sha256(full_message).digest()
 
-    try:
-        VerifyKey(public_key).verify(verify_hash, signature_bytes)
-    except BadSignatureError:
-        return False, "Invalid TON proof signature"
-    except Exception:
-        return False, "TON proof verification failed"
+    for public_key in candidate_keys:
+        try:
+            VerifyKey(public_key).verify(verify_hash, signature_bytes)
+            if (
+                client_public_key
+                and chain_public_key
+                and client_public_key != chain_public_key
+            ):
+                logger.warning(
+                    "TON wallet proof verified with client key that differs from chain key for user %s (address=%s, has_state_init=%s)",
+                    user_id,
+                    wallet_address,
+                    bool((wallet_state_init or "").strip()),
+                )
+            return True, None
+        except BadSignatureError:
+            continue
+        except Exception:
+            continue
 
-    return True, None
+    return False, "Invalid TON proof signature"
 
 
 async def get_pending_ton_wallet_notice(user_id: int) -> dict | None:
@@ -2129,6 +2176,8 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
                 wallet_address,
                 payload.ton_proof,
                 request,
+                payload.wallet_public_key,
+                payload.wallet_state_init,
             )
             if not wallet_verified:
                 logger.warning(
@@ -2138,7 +2187,6 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
                     getattr(getattr(payload.ton_proof, "domain", None), "value", None),
                     wallet_address,
                 )
-                raise HTTPException(status_code=400, detail=verification_error or "TON wallet proof verification failed")
 
         extra = parse_extra_data(user.get("extra_data"))
         extra["ton_wallet"] = {
@@ -2149,6 +2197,7 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
             "connected_at": datetime.utcnow().isoformat(),
             "verified": wallet_verified,
             "verified_at": datetime.utcnow().isoformat() if wallet_verified else None,
+            "verification_error": verification_error or None,
         }
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
@@ -2157,6 +2206,7 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
             "success": True,
             "user_id": payload.user_id,
             "wallet": get_ton_wallet_from_user({"extra_data": extra}),
+            "verification_error": verification_error,
         }
     except HTTPException:
         raise
