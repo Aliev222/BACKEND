@@ -59,6 +59,7 @@ from schemas import (
     AdminTonPayoutQueueRequest,
     AdminTonPayoutBulkStatusUpdateRequest,
     AdminTonPayoutStatusUpdateRequest,
+    AdminWalletReminderRequest,
     AdminWinnerStarsUpdateRequest,
     TonWalletConnectRequest,
     TonWalletDisconnectRequest,
@@ -115,6 +116,8 @@ REFERRAL_DAILY_SHARE_LIMIT = 50000
 REFERRAL_SPECIAL_SKIN_ID = "refferal.pngSP"
 TELEGRAM_VERIFY_CHANNEL = os.getenv("TELEGRAM_VERIFY_CHANNEL", "@Spirit_cliker")
 TELEGRAM_MEMBER_STATUSES = {"member", "administrator", "creator", "restricted"}
+TELEGRAM_BOT_USERNAME = (os.getenv("TELEGRAM_BOT_USERNAME", "Ryoho_bot") or "Ryoho_bot").strip().lstrip("@")
+GAME_WEBAPP_URL = (os.getenv("GAME_WEBAPP_URL", "https://spirix.vercel.app") or "https://spirix.vercel.app").strip()
 ADMIN_DASHBOARD_TOKEN = (os.getenv("ADMIN_DASHBOARD_TOKEN", "") or "").strip()
 ADMIN_TELEGRAM_IDS = {
     int(item.strip())
@@ -434,6 +437,59 @@ async def verify_telegram_channel_subscription(user_id: int) -> bool:
 
     status = ((payload.get("result") or {}).get("status") or "").lower()
     return status in TELEGRAM_MEMBER_STATUSES
+
+
+async def send_telegram_wallet_reminder_message(
+    *,
+    user_id: int,
+    season_key: str,
+    league: str,
+    hours_until_deadline: int,
+) -> tuple[bool, str | None]:
+    if not BOT_TOKEN:
+        return False, "Bot token not configured"
+
+    league_label = league.title()
+    deadline_text = f"{int(hours_until_deadline)} часов"
+    reminder_text = (
+        "Ты попал в турнирные выплаты.\n\n"
+        f"Лига: {league_label}\n"
+        f"Сезон: {season_key}\n\n"
+        f"Подключи TON-кошелёк в течение {deadline_text}, иначе выплата не будет отправлена."
+    )
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Открыть игру",
+                    "web_app": {"url": GAME_WEBAPP_URL},
+                }
+            ],
+            [
+                {
+                    "text": "Открыть бота",
+                    "url": f"https://t.me/{TELEGRAM_BOT_USERNAME}",
+                }
+            ],
+        ]
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": int(user_id),
+                    "text": reminder_text,
+                    "reply_markup": reply_markup,
+                },
+            )
+        payload = response.json() if response.content else {}
+        if response.status_code != 200 or not payload.get("ok"):
+            return False, str((payload or {}).get("description") or f"HTTP {response.status_code}")
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
 
 
 async def create_ad_action_session(user_id: int, action: str) -> str:
@@ -3777,6 +3833,7 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
 
     user_ids = [int(entry["user_id"]) for league_entries in entries_by_league.values() for entry in league_entries]
     wallet_map: dict[int, dict] = {}
+    wallet_reminders_map: dict[int, dict] = {}
     existing_payouts_map: dict[int, WeeklyTournamentTonPayout] = {}
 
     async with AsyncSessionLocal() as session:
@@ -3793,6 +3850,11 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
                 wallet = get_ton_wallet_from_user({"extra_data": extra_data})
                 if wallet["connected"] and wallet["address"]:
                     wallet_map[int(row.user_id)] = wallet
+                reminders_by_season = extra_data.get("ton_wallet_reminders") or {}
+                if isinstance(reminders_by_season, dict):
+                    reminder = reminders_by_season.get(season_key) or {}
+                    if isinstance(reminder, dict) and reminder.get("sent_at"):
+                        wallet_reminders_map[int(row.user_id)] = reminder
 
         if user_ids:
             payouts_result = await session.execute(
@@ -3819,6 +3881,7 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
         "without_wallet": 0,
         "eligible": 0,
         "without_payout": 0,
+        "wallet_reminder_sent": 0,
     }
 
     for league_key in selected_leagues:
@@ -3886,6 +3949,11 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
             else:
                 summary["without_wallet"] += 1
 
+            wallet_reminder = wallet_reminders_map.get(user_id) or {}
+            wallet_reminder_sent_at = wallet_reminder.get("sent_at")
+            if wallet_reminder_sent_at:
+                summary["wallet_reminder_sent"] += 1
+
             ton_amount_nano = 0
             if existing_row:
                 ton_amount_nano = int(existing_row.ton_amount_nano or 0)
@@ -3919,6 +3987,8 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
                 "status": derived_status,
                 "tx_hash": getattr(existing_row, "tx_hash", None),
                 "note": getattr(existing_row, "note", None),
+                "wallet_reminder_sent_at": wallet_reminder_sent_at,
+                "wallet_reminder_hours_until_deadline": wallet_reminder.get("hours_until_deadline"),
             })
 
         leagues_payload[league_key] = league_rows
@@ -4031,6 +4101,120 @@ async def admin_get_ton_payout_view(
         raise
     except Exception as e:
         logger.error(f"Error in admin_get_ton_payout_view: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/admin/weekly-tournament/season/{season_key}/wallet-reminders")
+async def admin_send_wallet_reminders(
+    season_key: str,
+    payload: AdminWalletReminderRequest,
+    request: Request,
+):
+    try:
+        await require_admin_access(request)
+        season_rows = await list_weekly_tournament_seasons(limit=52)
+        season = next((item for item in season_rows if item["season_key"] == season_key), None)
+        if not season:
+            raise HTTPException(status_code=404, detail="Season not found")
+        if season.get("status") != "finalized":
+            raise HTTPException(
+                status_code=400,
+                detail="Wallet reminders are available only after the season is finalized",
+            )
+
+        league_key = (payload.league or "").strip().lower() or None
+        if league_key and league_key not in WEEKLY_LEAGUE_ORDER:
+            raise HTTPException(status_code=400, detail="Unknown league")
+
+        _, leagues_payload, _ = await build_weekly_ton_payout_view(season_key, 1.0, league=league_key)
+        rows = [
+            row
+            for league_rows in leagues_payload.values()
+            for row in league_rows
+            if int(row.get("payout_cents") or 0) > 0 and not bool(row.get("wallet_connected"))
+        ]
+        if not rows:
+            return {
+                "success": True,
+                "season_key": season_key,
+                "league": league_key,
+                "candidates": 0,
+                "sent": 0,
+                "failed": 0,
+                "results": [],
+            }
+
+        user_ids = sorted({int(row["user_id"]) for row in rows})
+        reminder_results: list[dict] = []
+        cache_ids_to_invalidate: list[int] = []
+
+        async with AsyncSessionLocal() as session:
+            users_result = await session.execute(select(User).where(User.user_id.in_(user_ids)))
+            user_map = {int(row.user_id): row for row in users_result.scalars().all()}
+
+            for row in rows:
+                user_id = int(row["user_id"])
+                user_row = user_map.get(user_id)
+                if not user_row:
+                    reminder_results.append(
+                        {
+                            "user_id": user_id,
+                            "league": row.get("league"),
+                            "sent": False,
+                            "error": "User not found",
+                        }
+                    )
+                    continue
+
+                ok, error = await send_telegram_wallet_reminder_message(
+                    user_id=user_id,
+                    season_key=season_key,
+                    league=str(row.get("league") or league_key or ""),
+                    hours_until_deadline=int(payload.hours_until_deadline),
+                )
+                if ok:
+                    extra = parse_extra_data(user_row.extra_data)
+                    reminders_by_season = extra.get("ton_wallet_reminders") or {}
+                    if not isinstance(reminders_by_season, dict):
+                        reminders_by_season = {}
+                    reminders_by_season[season_key] = {
+                        "sent_at": datetime.utcnow().isoformat(),
+                        "league": str(row.get("league") or league_key or ""),
+                        "hours_until_deadline": int(payload.hours_until_deadline),
+                    }
+                    extra["ton_wallet_reminders"] = reminders_by_season
+                    user_row.extra_data = json.dumps(extra, ensure_ascii=False)
+                    cache_ids_to_invalidate.append(user_id)
+
+                reminder_results.append(
+                    {
+                        "user_id": user_id,
+                        "league": row.get("league"),
+                        "sent": ok,
+                        "error": error,
+                    }
+                )
+
+            await session.commit()
+
+        for user_id in cache_ids_to_invalidate:
+            await invalidate_user_cache(user_id)
+
+        sent_count = sum(1 for item in reminder_results if item["sent"])
+        failed_count = len(reminder_results) - sent_count
+        return {
+            "success": True,
+            "season_key": season_key,
+            "league": league_key,
+            "candidates": len(rows),
+            "sent": sent_count,
+            "failed": failed_count,
+            "results": reminder_results,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_send_wallet_reminders: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

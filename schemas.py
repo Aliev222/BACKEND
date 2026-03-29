@@ -151,3 +151,8 @@ class AdminTonPayoutConfirmRequest(BaseModel):
     sender_wallet_address: str = Field(..., min_length=32, max_length=128)
     user_ids: Optional[list[int]] = Field(default=None, max_length=255)
     lookback_minutes: int = Field(default=180, ge=5, le=1440)
+
+
+class AdminWalletReminderRequest(BaseModel):
+    league: Optional[str] = Field(default=None, max_length=24)
+    hours_until_deadline: int = Field(default=72, ge=1, le=336)
