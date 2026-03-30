@@ -114,6 +114,9 @@ LOCAL_LOCKS: dict[str, float] = {}
 LOCAL_IDEMPOTENCY_KEYS: dict[str, float] = {}
 LOCAL_RATE_LIMITS_STATE: dict[str, deque[float]] = defaultdict(deque)
 LOCAL_TON_PROOF_PAYLOADS: dict[str, dict] = {}
+DIAGNOSTICS_DURATION_WINDOW = 240
+ENDPOINT_DIAGNOSTICS: dict[tuple[str, str], dict] = {}
+RECENT_DIAGNOSTIC_ERRORS: deque[dict] = deque(maxlen=120)
 APP_ENV = (os.getenv("APP_ENV", "production") or "production").strip().lower()
 ONLINE_USERS_KEY = "online:users"
 ONLINE_WINDOW_SECONDS = 75
@@ -1855,6 +1858,7 @@ async def metrics_middleware(request: Request, call_next):
         duration = time.perf_counter() - start
         HTTP_REQUESTS_TOTAL.labels(method=method, path=path, status=str(status_code)).inc()
         HTTP_REQUEST_DURATION.labels(method=method, path=path).observe(duration)
+        record_endpoint_diagnostic(method, path, status_code, duration)
 
 
 @app.get("/metrics")
@@ -1864,6 +1868,88 @@ async def metrics():
 # ==================== РњРћР”Р•Р›Р ====================
 
 # ==================== Р’РЎРџРћРњРћР“РђРўР•Р›Р¬РќР«Р• Р¤РЈРќРљР¦РР ====================
+def normalize_diagnostics_path(path: str) -> str:
+    normalized = str(path or "/")
+    normalized = re.sub(r"/\d{4}-\d{2}-\d{2}(?=/|$)", "/{season_key}", normalized)
+    normalized = re.sub(r"/-?\d+(?=/|$)", "/{id}", normalized)
+    return normalized
+
+
+def record_endpoint_diagnostic(method: str, path: str, status_code: int, duration_seconds: float) -> None:
+    if path in {"/metrics", "/health"} or path.startswith("/api/admin/diagnostics"):
+        return
+
+    normalized_path = normalize_diagnostics_path(path)
+    key = (str(method or "GET").upper(), normalized_path)
+    stats = ENDPOINT_DIAGNOSTICS.get(key)
+    if stats is None:
+        stats = {
+            "method": key[0],
+            "path": normalized_path,
+            "requests": 0,
+            "errors": 0,
+            "status_counts": defaultdict(int),
+            "durations_ms": deque(maxlen=DIAGNOSTICS_DURATION_WINDOW),
+            "last_error": None,
+            "last_error_at": None,
+            "last_status": None,
+            "last_duration_ms": None,
+        }
+        ENDPOINT_DIAGNOSTICS[key] = stats
+
+    duration_ms = max(0.0, float(duration_seconds or 0.0) * 1000.0)
+    stats["requests"] += 1
+    stats["status_counts"][int(status_code or 0)] += 1
+    stats["durations_ms"].append(duration_ms)
+    stats["last_status"] = int(status_code or 0)
+    stats["last_duration_ms"] = round(duration_ms, 2)
+
+    if int(status_code or 0) >= 400:
+        stats["errors"] += 1
+        stats["last_error"] = f"HTTP {int(status_code or 0)}"
+        stats["last_error_at"] = datetime.utcnow().isoformat()
+        RECENT_DIAGNOSTIC_ERRORS.appendleft(
+            {
+                "method": stats["method"],
+                "path": normalized_path,
+                "status": int(status_code or 0),
+                "at": stats["last_error_at"],
+                "duration_ms": round(duration_ms, 2),
+            }
+        )
+
+
+def percentile_from_sorted(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    rank = max(0, min(len(values) - 1, int(round((len(values) - 1) * percentile))))
+    return float(values[rank])
+
+
+def serialize_endpoint_diagnostic(stats: dict) -> dict:
+    durations = sorted(float(item) for item in stats.get("durations_ms", []))
+    status_counts = stats.get("status_counts", {}) or {}
+    return {
+        "method": stats.get("method"),
+        "path": stats.get("path"),
+        "requests": int(stats.get("requests", 0)),
+        "errors": int(stats.get("errors", 0)),
+        "status_2xx": int(sum(count for code, count in status_counts.items() if 200 <= int(code) < 300)),
+        "status_4xx": int(sum(count for code, count in status_counts.items() if 400 <= int(code) < 500)),
+        "status_429": int(status_counts.get(429, 0)),
+        "status_5xx": int(sum(count for code, count in status_counts.items() if 500 <= int(code) < 600)),
+        "avg_ms": round(sum(durations) / len(durations), 2) if durations else 0.0,
+        "p95_ms": round(percentile_from_sorted(durations, 0.95), 2) if durations else 0.0,
+        "p99_ms": round(percentile_from_sorted(durations, 0.99), 2) if durations else 0.0,
+        "last_status": stats.get("last_status"),
+        "last_duration_ms": stats.get("last_duration_ms"),
+        "last_error": stats.get("last_error"),
+        "last_error_at": stats.get("last_error_at"),
+    }
+
+
 async def acquire_once_lock(key: str, ttl: float = 10) -> bool:
     conn = await get_redis_or_none()
     if conn:
@@ -4181,6 +4267,44 @@ async def admin_overview(request: Request):
         raise
     except Exception as e:
         logger.error(f"Error in admin_overview: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/admin/diagnostics/endpoints")
+async def admin_endpoint_diagnostics(request: Request, limit: int = 20, sort: str = "requests"):
+    try:
+        await require_admin_access(request)
+        max_items = max(1, min(100, int(limit or 20)))
+        sort_key = (sort or "requests").strip().lower()
+        supported_sort = {"requests", "errors", "p95_ms", "avg_ms", "status_429", "status_5xx"}
+        if sort_key not in supported_sort:
+            sort_key = "requests"
+
+        rows = [serialize_endpoint_diagnostic(stats) for stats in ENDPOINT_DIAGNOSTICS.values()]
+        rows.sort(key=lambda item: float(item.get(sort_key, 0) or 0), reverse=True)
+        top_rows = rows[:max_items]
+
+        summary = {
+            "tracked_endpoints": len(rows),
+            "total_requests": sum(int(item.get("requests", 0)) for item in rows),
+            "total_errors": sum(int(item.get("errors", 0)) for item in rows),
+            "total_429": sum(int(item.get("status_429", 0)) for item in rows),
+            "total_5xx": sum(int(item.get("status_5xx", 0)) for item in rows),
+            "window_size": DIAGNOSTICS_DURATION_WINDOW,
+        }
+
+        return {
+            "success": True,
+            "sort": sort_key,
+            "limit": max_items,
+            "summary": summary,
+            "endpoints": top_rows,
+            "recent_errors": list(RECENT_DIAGNOSTIC_ERRORS)[:20],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_endpoint_diagnostics: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
