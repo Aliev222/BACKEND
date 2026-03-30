@@ -5438,6 +5438,7 @@ async def admin_build_ton_payout_queue(season_key: str, payload: AdminTonPayoutQ
             queued = 0
             skipped_without_wallet = 0
             skipped_without_payout = 0
+            skipped_locked = 0
             ton_price_usd_micros = int(round(ton_price_usd * 1_000_000))
 
             for winner in winners:
@@ -5475,6 +5476,10 @@ async def admin_build_ton_payout_queue(season_key: str, payload: AdminTonPayoutQ
                     existing_rows[user_id] = row
                     created += 1
                 else:
+                    existing_status = str(row.status or "").strip().lower()
+                    if existing_status not in {"", "queued", "failed", "cancelled"}:
+                        skipped_locked += 1
+                        continue
                     row.username = winner.get("username")
                     row.league = winner.get("league") or row.league
                     row.rank = int(winner.get("rank") or row.rank or 0)
@@ -5483,7 +5488,7 @@ async def admin_build_ton_payout_queue(season_key: str, payload: AdminTonPayoutQ
                     row.ton_amount_nano = ton_amount_nano
                     row.ton_price_usd_micros = ton_price_usd_micros
                     row.updated_at = datetime.utcnow()
-                    if row.status in {"failed", "cancelled"}:
+                    if existing_status in {"failed", "cancelled"}:
                         row.status = "queued"
                 queued += 1
 
@@ -5496,6 +5501,7 @@ async def admin_build_ton_payout_queue(season_key: str, payload: AdminTonPayoutQ
             "queued": queued,
             "skipped_without_wallet": skipped_without_wallet,
             "skipped_without_payout": skipped_without_payout,
+            "skipped_locked": skipped_locked,
         }
     except HTTPException:
         raise
