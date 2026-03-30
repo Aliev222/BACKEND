@@ -3966,15 +3966,20 @@ async def get_weekly_tournament_overview(user_id: int, request: Request):
         now = datetime.utcnow()
         starts_at, ends_at = get_weekly_tournament_season_window(now)
         season_key = get_weekly_tournament_season_key(now)
+        season_rows = await list_weekly_tournament_seasons(limit=12)
+        active_season = next((item for item in season_rows if item.get("season_key") == season_key), None) or {}
         player = await get_weekly_tournament_player_entry(user_id, season_key)
         pending_ton_notice = await get_pending_ton_wallet_notice(user_id)
 
         return {
             "success": True,
             "season_key": season_key,
+            "season_status": active_season.get("status") or "active",
             "starts_at": starts_at.isoformat(),
             "ends_at": ends_at.isoformat(),
             "time_left_seconds": max(0, int((ends_at - now).total_seconds())),
+            "payout_fund_cents": int(active_season.get("payout_fund_cents") or 0),
+            "gross_ad_revenue_cents": int(active_season.get("gross_ad_revenue_cents") or 0),
             "leagues": WEEKLY_LEAGUE_LEVEL_RANGES,
             "fund_splits": WEEKLY_LEAGUE_FUND_SPLITS,
             "top3_splits": WEEKLY_TOP3_PAYOUT_SPLITS,
