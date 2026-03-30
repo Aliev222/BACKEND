@@ -4645,6 +4645,80 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
     return season, leagues_payload, summary
 
 
+async def recalculate_finalized_weekly_winner_payouts(
+    session: AsyncSession,
+    season_key: str,
+    total_fund_cents: int,
+) -> None:
+    winners_result = await session.execute(
+        select(WeeklyTournamentWinner)
+        .where(WeeklyTournamentWinner.season_key == season_key)
+        .order_by(
+            WeeklyTournamentWinner.league.asc(),
+            WeeklyTournamentWinner.rank.asc(),
+            WeeklyTournamentWinner.user_id.asc(),
+        )
+    )
+    winners = winners_result.scalars().all()
+    if not winners:
+        return
+
+    winners_by_league: dict[str, list[WeeklyTournamentWinner]] = {}
+    for winner in winners:
+        winners_by_league.setdefault((winner.league or "bronze").lower(), []).append(winner)
+
+    for league in WEEKLY_LEAGUE_ORDER:
+        league_winners = winners_by_league.get(league, [])
+        if not league_winners:
+            continue
+
+        league_fund_cents = int(max(0, int(total_fund_cents or 0)) * WEEKLY_LEAGUE_FUND_SPLITS.get(league, 0))
+        top_payouts = {
+            rank: int(league_fund_cents * share)
+            for rank, share in WEEKLY_TOP3_PAYOUT_SPLITS.items()
+        }
+
+        range_payouts = []
+        for payout_range in WEEKLY_RANGE_PAYOUT_SPLITS:
+            start_rank = int(payout_range["start"])
+            end_rank = int(payout_range["end"])
+            pool_cents = int(league_fund_cents * float(payout_range["share"]))
+            eligible_winners = [
+                row for row in league_winners
+                if start_rank <= int(row.rank or 0) <= end_rank
+                and bool(row.eligible_for_payout)
+                and not bool(row.fraud_flag)
+            ]
+            share_cents = 0
+            remainder_cents = 0
+            if eligible_winners:
+                share_cents = pool_cents // len(eligible_winners)
+                remainder_cents = pool_cents % len(eligible_winners)
+            range_payouts.append({
+                "start": start_rank,
+                "end": end_rank,
+                "share_cents": share_cents,
+                "remainder_cents": remainder_cents,
+            })
+
+        for winner in league_winners:
+            payout_cents = 0
+            rank = int(winner.rank or 0)
+            if bool(winner.eligible_for_payout) and not bool(winner.fraud_flag):
+                if rank in top_payouts:
+                    payout_cents = top_payouts[rank]
+                else:
+                    for payout_range in range_payouts:
+                        if payout_range["start"] <= rank <= payout_range["end"]:
+                            payout_cents = payout_range["share_cents"]
+                            if payout_range["remainder_cents"] > 0:
+                                payout_cents += 1
+                                payout_range["remainder_cents"] -= 1
+                            break
+
+            winner.payout_cents = int(payout_cents)
+
+
 @app.get("/api/admin/weekly-tournament/season/{season_key}/ton-queue")
 async def admin_get_ton_payout_queue(season_key: str, request: Request):
     try:
@@ -5164,6 +5238,12 @@ async def admin_set_weekly_tournament_fund(
             season = await ensure_weekly_tournament_season(session, season_key, starts_at, ends_at)
             season.gross_ad_revenue_cents = int(payload.gross_ad_revenue_cents or 0)
             season.payout_fund_cents = int(payload.payout_fund_cents or 0)
+            if season.status == "finalized":
+                await recalculate_finalized_weekly_winner_payouts(
+                    session,
+                    season_key,
+                    int(payload.payout_fund_cents or 0),
+                )
             await session.commit()
 
         return {
