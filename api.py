@@ -19,9 +19,9 @@ import struct
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
-from DATABASE.base import User, UserTask, AsyncSessionLocal, WeeklyTournamentEntry, WeeklyTournamentWinner, WeeklyTournamentTonPayout, RewardedAdClaim
+from DATABASE.base import User, UserTask, AsyncSessionLocal, WeeklyTournamentEntry, WeeklyTournamentWinner, WeeklyTournamentTonPayout, RewardedAdClaim, StarsSkinPurchase
 from collections import defaultdict, deque
 from dataclasses import dataclass
 import redis.asyncio as redis
@@ -37,6 +37,7 @@ from DATABASE.base import (
     finalize_weekly_tournament_season, ensure_weekly_tournament_season,
     get_rewarded_ads_admin_summary, get_stars_skin_sales_admin_summary,
     get_admin_fraud_reviews, upsert_admin_fraud_review, record_rewarded_ad_claim,
+    get_referral_stats, get_referrals_list,
 )
 from schemas import (
     AdActionClaimRequest,
@@ -262,6 +263,30 @@ def get_ton_wallet_from_user(user: dict | None) -> dict:
         "verified_at": wallet.get("verified_at"),
         "verification_error": (wallet.get("verification_error") or "").strip(),
     }
+
+
+def parse_extra_data_object(raw_extra) -> dict:
+    if isinstance(raw_extra, dict):
+        return raw_extra
+    if isinstance(raw_extra, str):
+        try:
+            parsed = json.loads(raw_extra)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def parse_json_object(raw_value) -> dict:
+    if isinstance(raw_value, dict):
+        return raw_value
+    if isinstance(raw_value, str):
+        try:
+            parsed = json.loads(raw_value)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def get_ton_proof_storage_key(user_id: int, payload: str) -> str:
@@ -4191,6 +4216,408 @@ async def admin_fraud_overview(request: Request, season_key: str | None = None):
         raise
     except Exception as e:
         logger.error(f"Error in admin_fraud_overview: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/admin/players/search")
+async def admin_players_search(
+    request: Request,
+    query: str = "",
+    season_key: str | None = None,
+    limit: int = 20,
+):
+    try:
+        await require_admin_access(request)
+        effective_season_key = (season_key or get_weekly_tournament_season_key() or "").strip()
+        search_query = (query or "").strip()
+        normalized_query = search_query.lstrip("@").strip()
+        search_limit = max(1, min(50, int(limit or 20)))
+
+        async with AsyncSessionLocal() as session:
+            stmt = select(User)
+            if normalized_query:
+                if normalized_query.isdigit():
+                    stmt = stmt.where(User.user_id == int(normalized_query))
+                else:
+                    lowered = normalized_query.lower()
+                    matching_user_ids: set[int] = set()
+
+                    users_match_result = await session.execute(
+                        select(User.user_id).where(
+                            func.lower(func.coalesce(User.username, "")).like(f"%{lowered}%")
+                        ).limit(search_limit * 3)
+                    )
+                    matching_user_ids.update(int(row[0]) for row in users_match_result.all() if row and row[0] is not None)
+
+                    entry_match_result = await session.execute(
+                        select(WeeklyTournamentEntry.user_id).where(
+                            func.lower(func.coalesce(WeeklyTournamentEntry.username, "")).like(f"%{lowered}%")
+                        ).limit(search_limit * 3)
+                    )
+                    matching_user_ids.update(int(row[0]) for row in entry_match_result.all() if row and row[0] is not None)
+
+                    winner_match_result = await session.execute(
+                        select(WeeklyTournamentWinner.user_id).where(
+                            func.lower(func.coalesce(WeeklyTournamentWinner.username, "")).like(f"%{lowered}%")
+                        ).limit(search_limit * 3)
+                    )
+                    matching_user_ids.update(int(row[0]) for row in winner_match_result.all() if row and row[0] is not None)
+
+                    payout_match_result = await session.execute(
+                        select(WeeklyTournamentTonPayout.user_id).where(
+                            func.lower(func.coalesce(WeeklyTournamentTonPayout.username, "")).like(f"%{lowered}%")
+                        ).limit(search_limit * 3)
+                    )
+                    matching_user_ids.update(int(row[0]) for row in payout_match_result.all() if row and row[0] is not None)
+
+                    if matching_user_ids:
+                        stmt = stmt.where(User.user_id.in_(sorted(matching_user_ids)))
+                    else:
+                        stmt = stmt.where(
+                            or_(
+                                func.lower(func.coalesce(User.username, "")).like(f"%{lowered}%"),
+                                User.user_id == -1,
+                            )
+                        )
+
+            stmt = stmt.order_by(User.created_at.desc()).limit(search_limit)
+            users = (await session.execute(stmt)).scalars().all()
+            user_ids = [int(user.user_id) for user in users]
+
+            entry_map: dict[int, WeeklyTournamentEntry] = {}
+            if user_ids and effective_season_key:
+                entries_result = await session.execute(
+                    select(WeeklyTournamentEntry).where(
+                        WeeklyTournamentEntry.season_key == effective_season_key,
+                        WeeklyTournamentEntry.user_id.in_(user_ids),
+                    )
+                )
+                entry_map = {int(row.user_id): row for row in entries_result.scalars().all()}
+
+        reviews_map = await get_admin_fraud_reviews(user_ids) if user_ids else {}
+
+        players = []
+        for user in users:
+            extra = parse_extra_data_object(user.extra_data)
+            wallet = get_ton_wallet_from_user({"extra_data": extra})
+            owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
+            selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
+            entry = entry_map.get(int(user.user_id))
+            review = reviews_map.get(int(user.user_id), {}) or {}
+
+            players.append({
+                "user_id": int(user.user_id),
+                "username": user.username,
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+                "coins": int(user.coins or 0),
+                "energy": int(user.energy or 0),
+                "max_energy": int(user.max_energy or 0),
+                "level": int(user.level or 0),
+                "referral_count": int(user.referral_count or 0),
+                "owned_skins_count": int(len(owned_skins)),
+                "selected_skin": selected_skin,
+                "wallet_connected": bool(wallet.get("connected")),
+                "wallet_verified": bool(wallet.get("verified")),
+                "wallet_masked": wallet.get("masked_address"),
+                "season_key": effective_season_key,
+                "season_entry": {
+                    "league": entry.league,
+                    "score": int(entry.score or 0),
+                    "display_level": int(entry.display_level or 1),
+                    "eligible_for_payout": bool(entry.eligible_for_payout),
+                    "fraud_flag": bool(entry.fraud_flag),
+                } if entry else None,
+                "fraud_review": {
+                    "status": review.get("status") or "ok",
+                    "reason": review.get("reason"),
+                    "disqualify_from_payout": bool(review.get("disqualify_from_payout")),
+                },
+            })
+
+        return {
+            "success": True,
+            "query": normalized_query,
+            "season_key": effective_season_key,
+            "players": players,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_players_search: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/admin/players/{user_id}")
+async def admin_player_detail(user_id: int, request: Request, season_key: str | None = None):
+    try:
+        await require_admin_access(request)
+        effective_season_key = (season_key or get_weekly_tournament_season_key() or "").strip()
+
+        async with AsyncSessionLocal() as session:
+            user_result = await session.execute(
+                select(User).where(User.user_id == user_id)
+            )
+            user = user_result.scalar_one_or_none()
+            if not user:
+                raise HTTPException(status_code=404, detail="Player not found")
+
+            extra = parse_extra_data_object(user.extra_data)
+            wallet = get_ton_wallet_from_user({"extra_data": extra})
+            owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
+            selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
+
+            selected_entry = None
+            selected_winner = None
+            selected_payout = None
+            selected_rank = None
+
+            if effective_season_key:
+                selected_entry_result = await session.execute(
+                    select(WeeklyTournamentEntry).where(
+                        WeeklyTournamentEntry.season_key == effective_season_key,
+                        WeeklyTournamentEntry.user_id == user_id,
+                    )
+                )
+                selected_entry = selected_entry_result.scalar_one_or_none()
+
+                selected_winner_result = await session.execute(
+                    select(WeeklyTournamentWinner).where(
+                        WeeklyTournamentWinner.season_key == effective_season_key,
+                        WeeklyTournamentWinner.user_id == user_id,
+                    )
+                )
+                selected_winner = selected_winner_result.scalar_one_or_none()
+
+                selected_payout_result = await session.execute(
+                    select(WeeklyTournamentTonPayout).where(
+                        WeeklyTournamentTonPayout.season_key == effective_season_key,
+                        WeeklyTournamentTonPayout.user_id == user_id,
+                    )
+                )
+                selected_payout = selected_payout_result.scalar_one_or_none()
+
+                if selected_entry:
+                    rank_result = await session.execute(
+                        select(func.count(WeeklyTournamentEntry.id)).where(
+                            WeeklyTournamentEntry.season_key == effective_season_key,
+                            WeeklyTournamentEntry.league == selected_entry.league,
+                            WeeklyTournamentEntry.score > selected_entry.score,
+                        )
+                    )
+                    selected_rank = int(rank_result.scalar() or 0) + 1
+
+            reward_rows_result = await session.execute(
+                select(RewardedAdClaim).where(
+                    RewardedAdClaim.user_id == user_id
+                ).order_by(RewardedAdClaim.created_at.desc()).limit(20)
+            )
+            reward_rows = reward_rows_result.scalars().all()
+
+            reward_summary_result = await session.execute(
+                select(
+                    RewardedAdClaim.action,
+                    func.count(RewardedAdClaim.id)
+                ).where(
+                    RewardedAdClaim.user_id == user_id
+                ).group_by(RewardedAdClaim.action)
+            )
+            reward_summary = {
+                str(action): int(total or 0)
+                for action, total in reward_summary_result.all()
+                if action
+            }
+
+            skin_purchases_result = await session.execute(
+                select(StarsSkinPurchase).where(
+                    StarsSkinPurchase.user_id == user_id
+                ).order_by(StarsSkinPurchase.created_at.desc()).limit(20)
+            )
+            skin_purchases = skin_purchases_result.scalars().all()
+
+            payout_rows_result = await session.execute(
+                select(WeeklyTournamentTonPayout).where(
+                    WeeklyTournamentTonPayout.user_id == user_id
+                ).order_by(
+                    WeeklyTournamentTonPayout.updated_at.desc(),
+                    WeeklyTournamentTonPayout.created_at.desc(),
+                ).limit(20)
+            )
+            payout_rows = payout_rows_result.scalars().all()
+
+            task_rows_result = await session.execute(
+                select(UserTask).where(
+                    UserTask.user_id == user_id
+                ).order_by(UserTask.completed_at.desc()).limit(20)
+            )
+            task_rows = task_rows_result.scalars().all()
+
+            recent_entries_result = await session.execute(
+                select(WeeklyTournamentEntry).where(
+                    WeeklyTournamentEntry.user_id == user_id
+                ).order_by(WeeklyTournamentEntry.season_key.desc()).limit(8)
+            )
+            recent_entries = recent_entries_result.scalars().all()
+
+            recent_winners_result = await session.execute(
+                select(WeeklyTournamentWinner).where(
+                    WeeklyTournamentWinner.user_id == user_id
+                ).order_by(WeeklyTournamentWinner.season_key.desc()).limit(8)
+            )
+            recent_winners = recent_winners_result.scalars().all()
+
+        referrals = (await get_referrals_list(user_id))[:20]
+        referral_stats = await get_referral_stats(user_id)
+        review = (await get_admin_fraud_reviews([user_id])).get(user_id, {}) or {}
+
+        return {
+            "success": True,
+            "season_key": effective_season_key,
+            "player": {
+                "user_id": int(user.user_id),
+                "username": user.username,
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+                "profile": {
+                    "coins": int(user.coins or 0),
+                    "profit_per_hour": int(user.profit_per_hour or 0),
+                    "profit_per_tap": int(user.profit_per_tap or 0),
+                    "energy": int(user.energy or 0),
+                    "max_energy": int(user.max_energy or 0),
+                    "level": int(user.level or 0),
+                    "referrer_id": int(user.referrer_id) if user.referrer_id else None,
+                },
+                "upgrades": {
+                    "multitap_level": int(user.multitap_level or 0),
+                    "profit_level": int(user.profit_level or 0),
+                    "energy_level": int(user.energy_level or 0),
+                    "boost_level": int(user.boost_level or 0),
+                    "luck_level": int(user.luck_level or 0),
+                },
+                "skins": {
+                    "selected_skin": selected_skin,
+                    "owned_skins": owned_skins,
+                    "owned_count": int(len(owned_skins)),
+                },
+                "wallet": wallet,
+                "referrals": {
+                    "count": int(referral_stats.get("count", 0) or 0),
+                    "earnings": int(referral_stats.get("earnings", 0) or 0),
+                    "recent": referrals,
+                },
+                "selected_season": {
+                    "season_key": effective_season_key,
+                    "entry": {
+                        "league": selected_entry.league,
+                        "score": int(selected_entry.score or 0),
+                        "display_level": int(selected_entry.display_level or 1),
+                        "eligible_for_payout": bool(selected_entry.eligible_for_payout),
+                        "fraud_flag": bool(selected_entry.fraud_flag),
+                        "rank_estimate": selected_rank,
+                    } if selected_entry else None,
+                    "winner": {
+                        "league": selected_winner.league,
+                        "rank": int(selected_winner.rank or 0),
+                        "score": int(selected_winner.score or 0),
+                        "payout_cents": int(selected_winner.payout_cents or 0),
+                        "stars_reward": int(selected_winner.stars_reward or 0),
+                        "eligible_for_payout": bool(selected_winner.eligible_for_payout),
+                        "fraud_flag": bool(selected_winner.fraud_flag),
+                    } if selected_winner else None,
+                    "ton_payout": {
+                        "status": selected_payout.status,
+                        "payout_cents": int(selected_payout.payout_cents or 0),
+                        "ton_amount_nano": int(selected_payout.ton_amount_nano or 0),
+                        "wallet_address": selected_payout.wallet_address,
+                        "tx_hash": selected_payout.tx_hash,
+                        "note": selected_payout.note,
+                        "updated_at": selected_payout.updated_at.isoformat() if selected_payout.updated_at else None,
+                    } if selected_payout else None,
+                },
+                "recent_tournament_entries": [
+                    {
+                        "season_key": row.season_key,
+                        "league": row.league,
+                        "score": int(row.score or 0),
+                        "display_level": int(row.display_level or 1),
+                        "eligible_for_payout": bool(row.eligible_for_payout),
+                        "fraud_flag": bool(row.fraud_flag),
+                        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                    }
+                    for row in recent_entries
+                ],
+                "recent_tournament_wins": [
+                    {
+                        "season_key": row.season_key,
+                        "league": row.league,
+                        "rank": int(row.rank or 0),
+                        "score": int(row.score or 0),
+                        "payout_cents": int(row.payout_cents or 0),
+                        "stars_reward": int(row.stars_reward or 0),
+                        "eligible_for_payout": bool(row.eligible_for_payout),
+                        "fraud_flag": bool(row.fraud_flag),
+                        "created_at": row.created_at.isoformat() if row.created_at else None,
+                    }
+                    for row in recent_winners
+                ],
+                "reward_ads": {
+                    "summary_by_action": reward_summary,
+                    "recent": [
+                        {
+                            "action": row.action,
+                            "created_at": row.created_at.isoformat() if row.created_at else None,
+                            "metadata": parse_json_object(row.metadata_json),
+                        }
+                        for row in reward_rows
+                    ],
+                },
+                "completed_tasks": [
+                    {
+                        "task_id": row.task_id,
+                        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+                    }
+                    for row in task_rows
+                ],
+                "stars_skin_purchases": [
+                    {
+                        "skin_id": row.skin_id,
+                        "stars_amount": int(row.stars_amount or 0),
+                        "currency": row.currency,
+                        "telegram_charge_id": row.telegram_charge_id,
+                        "created_at": row.created_at.isoformat() if row.created_at else None,
+                    }
+                    for row in skin_purchases
+                ],
+                "payout_history": [
+                    {
+                        "season_key": row.season_key,
+                        "league": row.league,
+                        "rank": int(row.rank or 0),
+                        "status": row.status,
+                        "wallet_address": row.wallet_address,
+                        "payout_cents": int(row.payout_cents or 0),
+                        "ton_amount_nano": int(row.ton_amount_nano or 0),
+                        "tx_hash": row.tx_hash,
+                        "note": row.note,
+                        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                    }
+                    for row in payout_rows
+                ],
+                "fraud_review": {
+                    "status": review.get("status") or "ok",
+                    "reason": review.get("reason"),
+                    "disqualify_from_payout": bool(review.get("disqualify_from_payout")),
+                    "updated_at": review.get("updated_at"),
+                },
+                "support": {
+                    "reward_failures_available": False,
+                    "duplicate_reward_attempts_available": False,
+                    "moderation_timeline_available": False,
+                },
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_player_detail: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
