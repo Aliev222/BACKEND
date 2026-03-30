@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 from sqlalchemy import select, func, update
+from sqlalchemy.ext.asyncio import AsyncSession
 from DATABASE.base import User, UserTask, AsyncSessionLocal, WeeklyTournamentEntry, WeeklyTournamentWinner, WeeklyTournamentTonPayout, RewardedAdClaim
 from collections import defaultdict, deque
 from dataclasses import dataclass
