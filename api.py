@@ -444,6 +444,17 @@ def decode_ton_wallet_public_key(value: str | None) -> bytes | None:
         return None
 
 
+def ton_addresses_match(left: str | None, right: str | None) -> bool:
+    left_value = (left or "").strip()
+    right_value = (right or "").strip()
+    if not left_value or not right_value:
+        return False
+    try:
+        return parse_ton_address_parts(left_value)[2] == parse_ton_address_parts(right_value)[2]
+    except Exception:
+        return left_value == right_value
+
+
 async def verify_ton_wallet_proof(
     user_id: int,
     wallet_address: str,
@@ -2194,8 +2205,12 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
+        extra = parse_extra_data(user.get("extra_data"))
+        existing_wallet = extra.get("ton_wallet") if isinstance(extra.get("ton_wallet"), dict) else {}
+
         wallet_verified = False
         verification_error = None
+        verified_at = None
         if payload.ton_proof:
             wallet_verified, verification_error = await verify_ton_wallet_proof(
                 payload.user_id,
@@ -2213,8 +2228,11 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
                     getattr(getattr(payload.ton_proof, "domain", None), "value", None),
                     wallet_address,
                 )
+        elif bool(existing_wallet.get("verified")) and ton_addresses_match(existing_wallet.get("address"), wallet_address):
+            wallet_verified = True
+            verification_error = None
+            verified_at = existing_wallet.get("verified_at")
 
-        extra = parse_extra_data(user.get("extra_data"))
         extra["ton_wallet"] = {
             "address": wallet_address,
             "provider": (payload.wallet_provider or "").strip(),
@@ -2222,7 +2240,7 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
             "network": (payload.wallet_network or "").strip(),
             "connected_at": datetime.utcnow().isoformat(),
             "verified": wallet_verified,
-            "verified_at": datetime.utcnow().isoformat() if wallet_verified else None,
+            "verified_at": verified_at or (datetime.utcnow().isoformat() if wallet_verified else None),
             "verification_error": verification_error or None,
         }
         await update_user(payload.user_id, {"extra_data": extra})
