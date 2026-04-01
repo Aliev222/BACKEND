@@ -8,10 +8,8 @@ def _get_sync_database_url() -> str:
     if not database_url:
         raise RuntimeError("DATABASE_URL is not set")
 
-    return (
-        database_url
-        .replace("postgresql+asyncpg://", "postgresql://")
-        .replace("sqlite+aiosqlite:///", "sqlite:///")
+    return database_url.replace("postgresql+asyncpg://", "postgresql://").replace(
+        "sqlite+aiosqlite:///", "sqlite:///"
     )
 
 
@@ -67,26 +65,6 @@ def migrate() -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS uq_user_tasks_user_id_task_id
         ON user_tasks (user_id, task_id)
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS crash_ghost_cashouts (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            session_id VARCHAR(255) NOT NULL,
-            bet BIGINT NOT NULL,
-            payout BIGINT NOT NULL,
-            multiplier VARCHAR(16) NOT NULL,
-            profit BIGINT NOT NULL,
-            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        )
-        """,
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_crash_ghost_cashouts_session_id
-        ON crash_ghost_cashouts (session_id)
-        """,
-        """
-        CREATE INDEX IF NOT EXISTS ix_crash_ghost_cashouts_user_id
-        ON crash_ghost_cashouts (user_id)
         """,
     ]
 

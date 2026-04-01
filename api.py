@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+
 # Sync marker for VS Code source control
 from fastapi.responses import JSONResponse, Response
 import asyncio
@@ -21,34 +22,53 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 from sqlalchemy import select, func, update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
-from DATABASE.base import User, UserTask, AsyncSessionLocal, WeeklyTournamentEntry, WeeklyTournamentWinner, WeeklyTournamentTonPayout, RewardedAdClaim, StarsSkinPurchase
+from DATABASE.base import (
+    User,
+    UserTask,
+    AsyncSessionLocal,
+    WeeklyTournamentEntry,
+    WeeklyTournamentWinner,
+    WeeklyTournamentTonPayout,
+    RewardedAdClaim,
+    StarsSkinPurchase,
+)
 from collections import defaultdict, deque
 from dataclasses import dataclass
 import redis.asyncio as redis
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from DATABASE.base import (
-    get_user, add_user as create_user, update_user, add_referral_bonus,
-    init_db, get_completed_tasks, add_completed_task,
+    get_user,
+    add_user as create_user,
+    update_user,
+    add_referral_bonus,
+    init_db,
+    get_completed_tasks,
+    add_completed_task,
     record_crash_ghost_cashout,
-    add_weekly_tournament_score, get_weekly_tournament_leaderboard,
-    get_weekly_tournament_player_entry, get_weekly_tournament_season_key,
-    get_weekly_tournament_season_window, get_weekly_tournament_league,
-    list_weekly_tournament_seasons, get_weekly_tournament_winners,
-    finalize_weekly_tournament_season, ensure_weekly_tournament_season,
-    get_rewarded_ads_admin_summary, get_stars_skin_sales_admin_summary,
-    get_admin_fraud_reviews, upsert_admin_fraud_review, record_rewarded_ad_claim,
-    get_referral_stats, get_referrals_list,
+    add_weekly_tournament_score,
+    get_weekly_tournament_leaderboard,
+    get_weekly_tournament_player_entry,
+    get_weekly_tournament_season_key,
+    get_weekly_tournament_season_window,
+    get_weekly_tournament_league,
+    list_weekly_tournament_seasons,
+    get_weekly_tournament_winners,
+    finalize_weekly_tournament_season,
+    ensure_weekly_tournament_season,
+    get_rewarded_ads_admin_summary,
+    get_stars_skin_sales_admin_summary,
+    get_admin_fraud_reviews,
+    upsert_admin_fraud_review,
+    record_rewarded_ad_claim,
+    get_referral_stats,
+    get_referrals_list,
 )
 from schemas import (
     AdActionClaimRequest,
     AdActionStartRequest,
     ClicksBatchRequest,
-    CrashGameCashoutRequest,
-    CrashGameStartRequest,
     EnergySyncRequest,
-    GameRequest,
-    LuckyBoxRequest,
     PassiveIncomeRequest,
     RegisterRequest,
     RewardVideoClaimRequest,
@@ -126,8 +146,13 @@ REFERRAL_DAILY_SHARE_LIMIT = 50000
 REFERRAL_SPECIAL_SKIN_ID = "refferal.pngSP"
 TELEGRAM_VERIFY_CHANNEL = os.getenv("TELEGRAM_VERIFY_CHANNEL", "@Spirit_cliker")
 TELEGRAM_MEMBER_STATUSES = {"member", "administrator", "creator", "restricted"}
-TELEGRAM_BOT_USERNAME = (os.getenv("TELEGRAM_BOT_USERNAME", "Ryoho_bot") or "Ryoho_bot").strip().lstrip("@")
-GAME_WEBAPP_URL = (os.getenv("GAME_WEBAPP_URL", "https://spirix.vercel.app") or "https://spirix.vercel.app").strip()
+TELEGRAM_BOT_USERNAME = (
+    (os.getenv("TELEGRAM_BOT_USERNAME", "Ryoho_bot") or "Ryoho_bot").strip().lstrip("@")
+)
+GAME_WEBAPP_URL = (
+    os.getenv("GAME_WEBAPP_URL", "https://spirix.vercel.app")
+    or "https://spirix.vercel.app"
+).strip()
 ADMIN_DASHBOARD_TOKEN = (os.getenv("ADMIN_DASHBOARD_TOKEN", "") or "").strip()
 ADMIN_TELEGRAM_IDS = {
     int(item.strip())
@@ -135,14 +160,20 @@ ADMIN_TELEGRAM_IDS = {
     if item.strip().isdigit()
 }
 MONETAG_POSTBACK_SECRET = (os.getenv("MONETAG_POSTBACK_SECRET", "") or "").strip()
-MONETAG_POSTBACK_ENFORCED = (os.getenv("MONETAG_POSTBACK_ENFORCED", "1" if MONETAG_POSTBACK_SECRET else "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+MONETAG_POSTBACK_ENFORCED = (
+    os.getenv("MONETAG_POSTBACK_ENFORCED", "1" if MONETAG_POSTBACK_SECRET else "0")
+    or "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 ADSGRAM_REWARD_SECRET = (os.getenv("ADSGRAM_REWARD_SECRET", "") or "").strip()
-ADSGRAM_REWARD_ENFORCED = (os.getenv("ADSGRAM_REWARD_ENFORCED", "1" if ADSGRAM_REWARD_SECRET else "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+ADSGRAM_REWARD_ENFORCED = (
+    os.getenv("ADSGRAM_REWARD_ENFORCED", "1" if ADSGRAM_REWARD_SECRET else "0") or "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 SESSION_TOKEN_SECRET = (
-    (os.getenv("SESSION_TOKEN_SECRET", "") or "").strip()
-    or hashlib.sha256(f"{BOT_TOKEN}:session-token".encode("utf-8")).hexdigest()
+    os.getenv("SESSION_TOKEN_SECRET", "") or ""
+).strip() or hashlib.sha256(f"{BOT_TOKEN}:session-token".encode("utf-8")).hexdigest()
+SESSION_TOKEN_TTL_SECONDS = max(
+    900, int((os.getenv("SESSION_TOKEN_TTL_SECONDS", "3600") or "3600").strip())
 )
-SESSION_TOKEN_TTL_SECONDS = max(900, int((os.getenv("SESSION_TOKEN_TTL_SECONDS", "3600") or "3600").strip()))
 DAILY_REWARD_MAX_DAYS = 30
 DAILY_REWARD_BASE_COINS = 500
 DAILY_REWARD_INFINITE_ENERGY_MINUTES = 10
@@ -157,18 +188,62 @@ SKIN_AD_COOLDOWN_MINUTES = 10
 ENERGY_REFILL_COOLDOWN_MINUTES = 10
 AD_ACTION_SESSION_TTL_SECONDS = 180
 AD_SESSION_MIN_WAIT_SECONDS = 8
-AD_ACTIONS_ALLOWED = {"energy_refill_max", "mega_boost", "ghost_boost", "ads_increment", "video_task", "autoclicker"}
+AD_ACTIONS_ALLOWED = {
+    "energy_refill_max",
+    "mega_boost",
+    "ghost_boost",
+    "ads_increment",
+    "video_task",
+    "autoclicker",
+}
 CRASH_GHOST_SESSION_TTL_SECONDS = 90
 CRASH_GHOST_MULTIPLIER_SPEED = 0.68
 MONETAG_POSTBACK_ID_KEYS = (
-    "ad_session_id", "subid", "sub_id", "click_id", "clickid", "cid",
-    "transaction_id", "txid", "tid", "session_id", "s1", "s2", "s3",
-    "ymid", "request_var"
+    "ad_session_id",
+    "subid",
+    "sub_id",
+    "click_id",
+    "clickid",
+    "cid",
+    "transaction_id",
+    "txid",
+    "tid",
+    "session_id",
+    "s1",
+    "s2",
+    "s3",
+    "ymid",
+    "request_var",
 )
 MONETAG_POSTBACK_SECRET_KEYS = ("token", "secret", "key")
-MONETAG_POSTBACK_NEGATIVE_VALUES = {"0", "false", "failed", "cancelled", "canceled", "rejected", "deny", "denied"}
-ADSGRAM_REWARD_USER_KEYS = ("user_id", "userid", "userId", "telegram_id", "telegramId", "tg_user_id", "tgUserId")
-ADSGRAM_REWARD_SESSION_KEYS = ("ad_session_id", "session_id", "request_var", "click_id", "cid", "payload", "custom_data")
+MONETAG_POSTBACK_NEGATIVE_VALUES = {
+    "0",
+    "false",
+    "failed",
+    "cancelled",
+    "canceled",
+    "rejected",
+    "deny",
+    "denied",
+}
+ADSGRAM_REWARD_USER_KEYS = (
+    "user_id",
+    "userid",
+    "userId",
+    "telegram_id",
+    "telegramId",
+    "tg_user_id",
+    "tgUserId",
+)
+ADSGRAM_REWARD_SESSION_KEYS = (
+    "ad_session_id",
+    "session_id",
+    "request_var",
+    "click_id",
+    "cid",
+    "payload",
+    "custom_data",
+)
 ADSGRAM_REWARD_SECRET_KEYS = ("token", "secret", "key")
 VIDEO_TASK_DEFINITIONS = {
     "tap_surge": {
@@ -223,11 +298,21 @@ WEEKLY_RANGE_PAYOUT_SPLITS = [
     {"start": 21, "end": 50, "share": 0.05},
 ]
 TON_NANO = 1_000_000_000
-TON_WALLET_ALLOWED_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-:")
-TON_VERIFIER_API_BASE = (os.getenv("TON_VERIFIER_API_BASE", "https://toncenter.com/api/v3") or "").strip().rstrip("/")
+TON_WALLET_ALLOWED_CHARS = set(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-:"
+)
+TON_VERIFIER_API_BASE = (
+    (os.getenv("TON_VERIFIER_API_BASE", "https://toncenter.com/api/v3") or "")
+    .strip()
+    .rstrip("/")
+)
 TON_VERIFIER_API_KEY = (os.getenv("TON_VERIFIER_API_KEY", "") or "").strip()
-TON_VERIFIER_TIMEOUT_SECONDS = max(5.0, float(os.getenv("TON_VERIFIER_TIMEOUT_SECONDS", "15") or "15"))
-TON_PROOF_TTL_SECONDS = max(120, int((os.getenv("TON_PROOF_TTL_SECONDS", "900") or "900").strip()))
+TON_VERIFIER_TIMEOUT_SECONDS = max(
+    5.0, float(os.getenv("TON_VERIFIER_TIMEOUT_SECONDS", "15") or "15")
+)
+TON_PROOF_TTL_SECONDS = max(
+    120, int((os.getenv("TON_PROOF_TTL_SECONDS", "900") or "900").strip())
+)
 TON_PROOF_ALLOWED_DOMAINS = tuple(
     item.strip().lower()
     for item in (os.getenv("TON_PROOF_ALLOWED_DOMAINS", "") or "").split(",")
@@ -369,7 +454,9 @@ async def issue_ton_proof_payload(user_id: int) -> tuple[str, int]:
     payload_data = {"user_id": int(user_id), "expires_at": expires_at}
     redis_conn = await get_redis_or_none()
     if redis_conn:
-        await redis_conn.setex(storage_key, TON_PROOF_TTL_SECONDS, json.dumps(payload_data))
+        await redis_conn.setex(
+            storage_key, TON_PROOF_TTL_SECONDS, json.dumps(payload_data)
+        )
     else:
         LOCAL_TON_PROOF_PAYLOADS[storage_key] = payload_data
     return payload, expires_at
@@ -388,12 +475,18 @@ async def consume_ton_proof_payload(user_id: int, payload: str) -> bool:
         except (TypeError, json.JSONDecodeError):
             data = {}
         await redis_conn.delete(storage_key)
-        return int(data.get("user_id") or 0) == int(user_id) and int(data.get("expires_at") or 0) >= now_ts
+        return (
+            int(data.get("user_id") or 0) == int(user_id)
+            and int(data.get("expires_at") or 0) >= now_ts
+        )
 
     payload_data = LOCAL_TON_PROOF_PAYLOADS.pop(storage_key, None)
     if not payload_data:
         return False
-    return int(payload_data.get("user_id") or 0) == int(user_id) and int(payload_data.get("expires_at") or 0) >= now_ts
+    return (
+        int(payload_data.get("user_id") or 0) == int(user_id)
+        and int(payload_data.get("expires_at") or 0) >= now_ts
+    )
 
 
 async def fetch_wallet_public_key_from_chain(raw_address: str) -> bytes | None:
@@ -407,7 +500,9 @@ async def fetch_wallet_public_key_from_chain(raw_address: str) -> bytes | None:
     }
     try:
         async with httpx.AsyncClient(timeout=TON_VERIFIER_TIMEOUT_SECONDS) as client:
-            response = await client.post(f"{TON_VERIFIER_API_BASE}/runGetMethod", json=payload, headers=headers)
+            response = await client.post(
+                f"{TON_VERIFIER_API_BASE}/runGetMethod", json=payload, headers=headers
+            )
             response.raise_for_status()
             data = response.json()
     except Exception as exc:
@@ -454,7 +549,10 @@ def ton_addresses_match(left: str | None, right: str | None) -> bool:
     if not left_value or not right_value:
         return False
     try:
-        return parse_ton_address_parts(left_value)[2] == parse_ton_address_parts(right_value)[2]
+        return (
+            parse_ton_address_parts(left_value)[2]
+            == parse_ton_address_parts(right_value)[2]
+        )
     except Exception:
         return left_value == right_value
 
@@ -472,7 +570,9 @@ async def verify_ton_wallet_proof(
         from nacl.signing import VerifyKey
     except ImportError:
         logger.error("PyNaCl is not installed; TON proof verification is unavailable")
-        raise HTTPException(status_code=500, detail="TON proof verification is unavailable")
+        raise HTTPException(
+            status_code=500, detail="TON proof verification is unavailable"
+        )
 
     payload = (ton_proof.payload or "").strip()
     if not payload:
@@ -507,7 +607,9 @@ async def verify_ton_wallet_proof(
     candidate_keys: list[bytes] = []
     if client_public_key:
         candidate_keys.append(client_public_key)
-    if chain_public_key and all(existing != chain_public_key for existing in candidate_keys):
+    if chain_public_key and all(
+        existing != chain_public_key for existing in candidate_keys
+    ):
         candidate_keys.append(chain_public_key)
 
     try:
@@ -515,15 +617,17 @@ async def verify_ton_wallet_proof(
     except Exception:
         return False, "Invalid TON proof signature"
 
-    message = b"".join([
-        b"ton-proof-item-v2/",
-        struct.pack(">i", int(workchain)),
-        account_bytes,
-        struct.pack("<I", len(domain_bytes)),
-        domain_bytes,
-        struct.pack("<Q", proof_ts),
-        payload.encode("utf-8"),
-    ])
+    message = b"".join(
+        [
+            b"ton-proof-item-v2/",
+            struct.pack(">i", int(workchain)),
+            account_bytes,
+            struct.pack("<I", len(domain_bytes)),
+            domain_bytes,
+            struct.pack("<Q", proof_ts),
+            payload.encode("utf-8"),
+        ]
+    )
     message_hash = hashlib.sha256(message).digest()
     full_message = b"\xff\xff" + b"ton-connect" + message_hash
     verify_hash = hashlib.sha256(full_message).digest()
@@ -587,11 +691,19 @@ async def get_pending_ton_wallet_notice(user_id: int) -> dict | None:
         )
         payout_row = payout_result.scalars().first()
 
-    if payout_row and str(getattr(payout_row, "status", "") or "").lower() in {"queued", "submitted", "sent"}:
+    if payout_row and str(getattr(payout_row, "status", "") or "").lower() in {
+        "queued",
+        "submitted",
+        "sent",
+    }:
         return None
 
     reminders_by_season = extra_data.get("ton_wallet_reminders") or {}
-    reminder = reminders_by_season.get(winner_row.season_key) if isinstance(reminders_by_season, dict) else {}
+    reminder = (
+        reminders_by_season.get(winner_row.season_key)
+        if isinstance(reminders_by_season, dict)
+        else {}
+    )
     if not isinstance(reminder, dict):
         reminder = {}
 
@@ -600,7 +712,9 @@ async def get_pending_ton_wallet_notice(user_id: int) -> dict | None:
     deadline_at = None
     parsed_sent_at = parse_iso_datetime(reminder_sent_at)
     if parsed_sent_at:
-        deadline_at = (parsed_sent_at + timedelta(hours=hours_until_deadline)).isoformat()
+        deadline_at = (
+            parsed_sent_at + timedelta(hours=hours_until_deadline)
+        ).isoformat()
 
     return {
         "season_key": winner_row.season_key,
@@ -629,7 +743,9 @@ def ton_wallet_normalized_variants(address: str | None) -> set[str]:
 def ton_wallets_equal(left: str | None, right: str | None) -> bool:
     left_variants = ton_wallet_normalized_variants(left)
     right_variants = ton_wallet_normalized_variants(right)
-    return bool(left_variants and right_variants and left_variants.intersection(right_variants))
+    return bool(
+        left_variants and right_variants and left_variants.intersection(right_variants)
+    )
 
 
 def _parse_bool_env(name: str, default: bool = False) -> bool:
@@ -663,9 +779,24 @@ ALLOWED_CORS_ORIGINS = _parse_csv_env(
 ALLOW_NULL_ORIGIN = _parse_bool_env("CORS_ALLOW_NULL_ORIGIN", APP_ENV != "production")
 MOBILE_ONLY_ENFORCED = _parse_bool_env("MOBILE_ONLY_ENFORCED", True)
 MOBILE_TELEGRAM_PLATFORMS = {"android", "ios", "ipados"}
-DESKTOP_TELEGRAM_PLATFORMS = {"tdesktop", "weba", "webk", "web", "macos", "windows", "linux", "unigram"}
-MOBILE_USER_AGENT_RE = re.compile(r"(android|iphone|ipad|ipod|mobile|windows phone)", re.IGNORECASE)
-DESKTOP_USER_AGENT_RE = re.compile(r"(windows nt|macintosh|x11|cros|linux x86_64)", re.IGNORECASE)
+DESKTOP_TELEGRAM_PLATFORMS = {
+    "tdesktop",
+    "weba",
+    "webk",
+    "web",
+    "macos",
+    "windows",
+    "linux",
+    "unigram",
+}
+MOBILE_USER_AGENT_RE = re.compile(
+    r"(android|iphone|ipad|ipod|mobile|windows phone)", re.IGNORECASE
+)
+DESKTOP_USER_AGENT_RE = re.compile(
+    r"(windows nt|macintosh|x11|cros|linux x86_64)", re.IGNORECASE
+)
+
+
 # Single lightweight reconnect helper to avoid code duplication
 async def try_reconnect_redis() -> None:
     global redis_client
@@ -741,7 +872,9 @@ async def get_online_users_count() -> int:
         return 0
 
 
-async def create_telegram_stars_invoice_link(*, user_id: int, skin_id: str, price: int) -> str:
+async def create_telegram_stars_invoice_link(
+    *, user_id: int, skin_id: str, price: int
+) -> str:
     if not BOT_TOKEN:
         raise HTTPException(status_code=500, detail="Bot token not configured")
 
@@ -752,13 +885,13 @@ async def create_telegram_stars_invoice_link(*, user_id: int, skin_id: str, pric
         "payload": payload,
         "currency": "XTR",
         "prices": [{"label": skin_id, "amount": price}],
-        "provider_token": ""
+        "provider_token": "",
     }
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink",
-            json=request_body
+            json=request_body,
         )
 
     if response.status_code != 200:
@@ -786,7 +919,9 @@ async def verify_telegram_channel_subscription(user_id: int) -> bool:
                 },
             )
     except Exception as exc:
-        logger.warning("Telegram subscription verification request failed for %s: %s", user_id, exc)
+        logger.warning(
+            "Telegram subscription verification request failed for %s: %s", user_id, exc
+        )
         return False
 
     if response.status_code != 200:
@@ -800,11 +935,15 @@ async def verify_telegram_channel_subscription(user_id: int) -> bool:
     try:
         payload = response.json()
     except Exception:
-        logger.warning("Telegram subscription verification returned invalid JSON for %s", user_id)
+        logger.warning(
+            "Telegram subscription verification returned invalid JSON for %s", user_id
+        )
         return False
 
     if not payload.get("ok"):
-        logger.warning("Telegram subscription verification failed for %s: %s", user_id, payload)
+        logger.warning(
+            "Telegram subscription verification failed for %s: %s", user_id, payload
+        )
         return False
 
     status = ((payload.get("result") or {}).get("status") or "").lower()
@@ -858,7 +997,9 @@ async def send_telegram_wallet_reminder_message(
             )
         payload = response.json() if response.content else {}
         if response.status_code != 200 or not payload.get("ok"):
-            return False, str((payload or {}).get("description") or f"HTTP {response.status_code}")
+            return False, str(
+                (payload or {}).get("description") or f"HTTP {response.status_code}"
+            )
         return True, None
     except Exception as exc:
         return False, str(exc)
@@ -869,27 +1010,33 @@ async def create_ad_action_session(user_id: int, action: str) -> str:
         raise HTTPException(status_code=400, detail="Unknown ad action")
 
     redis_conn = await ensure_redis_available()
-    ad_session_id = f"{action}:{user_id}:{int(time.time())}:{random.randint(100000, 999999)}"
+    ad_session_id = (
+        f"{action}:{user_id}:{int(time.time())}:{random.randint(100000, 999999)}"
+    )
     session_key = f"adsession:action:{ad_session_id}"
 
     await redis_conn.setex(
         session_key,
         AD_ACTION_SESSION_TTL_SECONDS,
-        json.dumps({
-            "user_id": user_id,
-            "action": action,
-            "claimed": False,
-            "verified": False,
-            "verified_at": None,
-            "created_at": time.time(),
-        })
+        json.dumps(
+            {
+                "user_id": user_id,
+                "action": action,
+                "claimed": False,
+                "verified": False,
+                "verified_at": None,
+                "created_at": time.time(),
+            }
+        ),
     )
     user_index_key = f"adsession:user:{user_id}"
     active_session_key = get_ad_action_active_session_key(user_id)
     try:
         await redis_conn.zadd(user_index_key, {ad_session_id: time.time()})
         await redis_conn.expire(user_index_key, max(AD_ACTION_SESSION_TTL_SECONDS, 600))
-        await redis_conn.setex(active_session_key, AD_ACTION_SESSION_TTL_SECONDS, ad_session_id)
+        await redis_conn.setex(
+            active_session_key, AD_ACTION_SESSION_TTL_SECONDS, ad_session_id
+        )
     except Exception:
         pass
     return ad_session_id
@@ -906,7 +1053,9 @@ def extract_first_value(source: dict, keys: tuple[str, ...]) -> str | None:
     return None
 
 
-async def mark_ad_action_session_verified(ad_session_id: str, postback_payload: dict) -> bool:
+async def mark_ad_action_session_verified(
+    ad_session_id: str, postback_payload: dict
+) -> bool:
     redis_conn = await ensure_redis_available()
     session_key = f"adsession:action:{ad_session_id}"
     raw = await redis_conn.get(session_key)
@@ -954,7 +1103,9 @@ async def mark_ad_action_session_verified_for_user(
     if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
         return False
 
-    return await mark_ad_action_session_verified(ad_session_id, verification_payload or {})
+    return await mark_ad_action_session_verified(
+        ad_session_id, verification_payload or {}
+    )
 
 
 async def find_latest_ad_action_session_for_user(user_id: int) -> str | None:
@@ -1012,7 +1163,9 @@ async def find_latest_ad_action_session_for_user(user_id: int) -> str | None:
     return None
 
 
-async def mark_latest_ad_action_session_verified_for_user(user_id: int, postback_payload: dict) -> str | None:
+async def mark_latest_ad_action_session_verified_for_user(
+    user_id: int, postback_payload: dict
+) -> str | None:
     ad_session_id = await find_latest_ad_action_session_for_user(user_id)
     if not ad_session_id:
         return None
@@ -1022,7 +1175,9 @@ async def mark_latest_ad_action_session_verified_for_user(user_id: int, postback
     return ad_session_id
 
 
-async def consume_ad_action_session(user_id: int, ad_session_id: str, expected_action: str) -> dict:
+async def consume_ad_action_session(
+    user_id: int, ad_session_id: str, expected_action: str
+) -> dict:
     redis_conn = await ensure_redis_available()
     session_key = f"adsession:action:{ad_session_id}"
     active_session_key = get_ad_action_active_session_key(user_id)
@@ -1036,7 +1191,9 @@ async def consume_ad_action_session(user_id: int, ad_session_id: str, expected_a
         raise HTTPException(status_code=400, detail="Invalid ad session payload")
 
     if int(session.get("user_id", 0)) != int(user_id):
-        raise HTTPException(status_code=400, detail="Ad session does not belong to user")
+        raise HTTPException(
+            status_code=400, detail="Ad session does not belong to user"
+        )
 
     if session.get("action") != expected_action:
         raise HTTPException(status_code=400, detail="Ad session action mismatch")
@@ -1046,7 +1203,9 @@ async def consume_ad_action_session(user_id: int, ad_session_id: str, expected_a
 
     if MONETAG_POSTBACK_ENFORCED or ADSGRAM_REWARD_ENFORCED:
         if session.get("verified") is not True:
-            raise HTTPException(status_code=400, detail="Ad completion was not confirmed yet")
+            raise HTTPException(
+                status_code=400, detail="Ad completion was not confirmed yet"
+            )
     else:
         created_at = float(session.get("created_at") or 0)
         if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
@@ -1088,7 +1247,9 @@ def get_crash_ghost_runtime(session: dict, now_ts: float | None = None) -> dict:
     crash_at = float(session.get("crash_at") or 1.0)
     elapsed = max(0.0, now_ts - started_at)
     crashed = elapsed >= crash_after_seconds
-    multiplier = crash_at if crashed else round(1.0 + elapsed * CRASH_GHOST_MULTIPLIER_SPEED, 2)
+    multiplier = (
+        crash_at if crashed else round(1.0 + elapsed * CRASH_GHOST_MULTIPLIER_SPEED, 2)
+    )
     multiplier = max(1.0, min(multiplier, crash_at))
 
     return {
@@ -1120,7 +1281,9 @@ RATE_LIMIT_REJECTS = Counter(
 )
 # ==================== LOGGING ====================
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -1143,7 +1306,9 @@ def issue_session_token(telegram_user: dict) -> tuple[str, int]:
         "exp": expires_at,
         "jti": secrets.token_hex(8),
     }
-    payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode(
+        "utf-8"
+    )
     payload_part = _b64url_encode(payload_json)
     signature = hmac.new(
         SESSION_TOKEN_SECRET.encode("utf-8"),
@@ -1210,7 +1375,9 @@ def is_mobile_game_client_request(request: Request) -> bool:
     if sec_mobile == "?1":
         return True
 
-    client_mobile_header = (request.headers.get("X-Client-Mobile", "") or "").strip().lower()
+    client_mobile_header = (
+        (request.headers.get("X-Client-Mobile", "") or "").strip().lower()
+    )
     client_mobile = client_mobile_header in {"1", "true", "yes", "on"}
 
     user_agent = request.headers.get("user-agent", "") or ""
@@ -1234,7 +1401,9 @@ def ensure_mobile_only_game_access(request: Request) -> None:
     )
 
 
-async def require_telegram_user(request: Request, expected_user_id: int | None = None) -> dict:
+async def require_telegram_user(
+    request: Request, expected_user_id: int | None = None
+) -> dict:
     ensure_mobile_only_game_access(request)
     bearer_token = read_bearer_token(request)
     if bearer_token:
@@ -1244,7 +1413,9 @@ async def require_telegram_user(request: Request, expected_user_id: int | None =
             request.headers.get("X-Telegram-Init-Data", "")
         )
 
-    if expected_user_id is not None and int(telegram_user.get("id", 0)) != int(expected_user_id):
+    if expected_user_id is not None and int(telegram_user.get("id", 0)) != int(
+        expected_user_id
+    ):
         raise HTTPException(status_code=403, detail="Telegram user mismatch")
 
     return telegram_user
@@ -1268,7 +1439,9 @@ def format_int(value: int) -> str:
     return f"{int(value or 0):,}".replace(",", " ")
 
 
-async def get_rewarded_ad_user_counts(user_ids: list[int], *, hours: int) -> dict[int, int]:
+async def get_rewarded_ad_user_counts(
+    user_ids: list[int], *, hours: int
+) -> dict[int, int]:
     if not user_ids:
         return {}
     since = datetime.utcnow() - timedelta(hours=max(1, int(hours or 1)))
@@ -1290,7 +1463,10 @@ async def build_admin_fraud_overview(season_key: str) -> list[dict]:
         entries_result = await session.execute(
             select(WeeklyTournamentEntry)
             .where(WeeklyTournamentEntry.season_key == season_key)
-            .order_by(WeeklyTournamentEntry.fraud_flag.desc(), WeeklyTournamentEntry.score.desc())
+            .order_by(
+                WeeklyTournamentEntry.fraud_flag.desc(),
+                WeeklyTournamentEntry.score.desc(),
+            )
             .limit(200)
         )
         entries = entries_result.scalars().all()
@@ -1299,14 +1475,18 @@ async def build_admin_fraud_overview(season_key: str) -> list[dict]:
         if not user_ids:
             return []
 
-        users_result = await session.execute(select(User).where(User.user_id.in_(user_ids)))
+        users_result = await session.execute(
+            select(User).where(User.user_id.in_(user_ids))
+        )
         users_map = {int(user.user_id): user for user in users_result.scalars().all()}
 
-        referrer_ids = sorted({
-            int(user.referrer_id)
-            for user in users_map.values()
-            if getattr(user, "referrer_id", None)
-        })
+        referrer_ids = sorted(
+            {
+                int(user.referrer_id)
+                for user in users_map.values()
+                if getattr(user, "referrer_id", None)
+            }
+        )
         referrer_cluster_counts: dict[int, int] = {}
         if referrer_ids:
             cluster_result = await session.execute(
@@ -1330,7 +1510,9 @@ async def build_admin_fraud_overview(season_key: str) -> list[dict]:
         if user is None:
             continue
 
-        account_age_hours = max(0.0, (now - (user.created_at or now)).total_seconds() / 3600)
+        account_age_hours = max(
+            0.0, (now - (user.created_at or now)).total_seconds() / 3600
+        )
         review = reviews_map.get(int(entry.user_id), {})
         reasons: list[str] = []
         extra = parse_extra_data(getattr(user, "extra_data", {}))
@@ -1349,51 +1531,72 @@ async def build_admin_fraud_overview(season_key: str) -> list[dict]:
         ads_1h = int(recent_ads_1h.get(int(entry.user_id), 0))
         ads_24h = int(recent_ads_24h.get(int(entry.user_id), 0))
         if ads_1h >= 25 or ads_24h >= 120:
-            reasons.append(f"Too many rewarded ads in a short period ({ads_1h}/1h, {ads_24h}/24h)")
+            reasons.append(
+                f"Too many rewarded ads in a short period ({ads_1h}/1h, {ads_24h}/24h)"
+            )
 
         score_per_hour = int((entry.score or 0) / max(account_age_hours, 1))
         if score_per_hour >= 500000:
-            reasons.append(f"Unusually fast click income velocity ({format_int(score_per_hour)} per hour)")
+            reasons.append(
+                f"Unusually fast click income velocity ({format_int(score_per_hour)} per hour)"
+            )
 
         click_suspicion_score = int(click_guard.get("suspicion_score", 0) or 0)
         hard_rejections = int(click_guard.get("hard_rejections", 0) or 0)
         if click_suspicion_score >= CLICK_SUSPICION_SOFT_LIMIT:
-            reasons.append(f"Suspicious click batches detected (score {click_suspicion_score})")
+            reasons.append(
+                f"Suspicious click batches detected (score {click_suspicion_score})"
+            )
         if hard_rejections > 0:
-            reasons.append(f"Server rejected suspicious click bursts ({hard_rejections})")
+            reasons.append(
+                f"Server rejected suspicious click bursts ({hard_rejections})"
+            )
 
         referrer_id = getattr(user, "referrer_id", None)
-        if referrer_id and referrer_cluster_counts.get(int(referrer_id), 0) >= 5 and account_age_hours <= 72:
+        if (
+            referrer_id
+            and referrer_cluster_counts.get(int(referrer_id), 0) >= 5
+            and account_age_hours <= 72
+        ):
             reasons.append("Possible multi-account referral cluster")
 
-        is_flagged = bool(entry.fraud_flag) or review.get("status") == "fraud" or bool(reasons)
+        is_flagged = (
+            bool(entry.fraud_flag) or review.get("status") == "fraud" or bool(reasons)
+        )
         if not is_flagged:
             continue
 
-        suspicious_rows.append({
-            "user_id": int(entry.user_id),
-            "username": entry.username or getattr(user, "username", None),
-            "display_level": int(entry.display_level or 1),
-            "league": entry.league,
-            "score": int(entry.score or 0),
-            "eligible_for_payout": bool(entry.eligible_for_payout),
-            "fraud_flag": bool(entry.fraud_flag) or review.get("status") == "fraud",
-            "manual_status": review.get("status", "ok"),
-            "manual_reason": review.get("reason"),
-            "disqualify_from_payout": bool(review.get("disqualify_from_payout")),
-            "account_age_hours": round(account_age_hours, 1),
-            "rewarded_ads_1h": ads_1h,
-            "rewarded_ads_24h": ads_24h,
-            "reasons": reasons,
-        })
+        suspicious_rows.append(
+            {
+                "user_id": int(entry.user_id),
+                "username": entry.username or getattr(user, "username", None),
+                "display_level": int(entry.display_level or 1),
+                "league": entry.league,
+                "score": int(entry.score or 0),
+                "eligible_for_payout": bool(entry.eligible_for_payout),
+                "fraud_flag": bool(entry.fraud_flag) or review.get("status") == "fraud",
+                "manual_status": review.get("status", "ok"),
+                "manual_reason": review.get("reason"),
+                "disqualify_from_payout": bool(review.get("disqualify_from_payout")),
+                "account_age_hours": round(account_age_hours, 1),
+                "rewarded_ads_1h": ads_1h,
+                "rewarded_ads_24h": ads_24h,
+                "reasons": reasons,
+            }
+        )
 
-    suspicious_rows.sort(key=lambda item: (not item["fraud_flag"], not item["disqualify_from_payout"], -item["score"]))
+    suspicious_rows.sort(
+        key=lambda item: (
+            not item["fraud_flag"],
+            not item["disqualify_from_payout"],
+            -item["score"],
+        )
+    )
     return suspicious_rows
 
 
-
-
 # ==================== РўРЈР РќРР РќР«Р• Р”РђРќРќР«Р• ==================
+
 
 async def get_user_cached(user_id: int) -> dict | None:
     conn = await get_redis_or_none()
@@ -1414,10 +1617,11 @@ async def get_user_cached(user_id: int) -> dict | None:
         await conn.setex(
             f"{USER_CACHE_PREFIX}{user_id}",
             USER_CACHE_TTL,
-            json.dumps(user, default=str)
+            json.dumps(user, default=str),
         )
 
     return user
+
 
 # ==================== Р’СЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Рµ С„СѓРЅРєС†РёРё Р°РЅС‚РёСЃРїР°РјР° ====================
 
@@ -1482,10 +1686,24 @@ def get_ad_action_active_session_key(user_id: int) -> str:
 
 async def update_user_if_matches(user_id: int, expected: dict, data: dict):
     allowed_fields = {
-        "username", "coins", "profit_per_hour", "profit_per_tap", "energy",
-        "max_energy", "level", "multitap_level", "profit_level", "energy_level",
-        "boost_level", "last_passive_income", "last_energy_update", "referrer_id",
-        "referral_count", "referral_earnings", "extra_data", "luck_level"
+        "username",
+        "coins",
+        "profit_per_hour",
+        "profit_per_tap",
+        "energy",
+        "max_energy",
+        "level",
+        "multitap_level",
+        "profit_level",
+        "energy_level",
+        "boost_level",
+        "last_passive_income",
+        "last_energy_update",
+        "referrer_id",
+        "referral_count",
+        "referral_earnings",
+        "extra_data",
+        "luck_level",
     }
     unknown_fields = (set(expected) | set(data)) - allowed_fields
     if unknown_fields:
@@ -1501,15 +1719,12 @@ async def update_user_if_matches(user_id: int, expected: dict, data: dict):
             where_clauses.append(column == value)
 
     values = {
-        field: serialize_db_field(field, raw_value)
-        for field, raw_value in data.items()
+        field: serialize_db_field(field, raw_value) for field, raw_value in data.items()
     }
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            update(User)
-            .where(*where_clauses)
-            .values(**values)
+            update(User).where(*where_clauses).values(**values)
         )
         if result.rowcount != 1:
             await session.rollback()
@@ -1529,7 +1744,14 @@ async def apply_atomic_user_updates(
 ):
     fields = expected_fields or tuple(
         field
-        for field in ("coins", "energy", "last_energy_update", "extra_data", "last_passive_income", "referral_earnings")
+        for field in (
+            "coins",
+            "energy",
+            "last_energy_update",
+            "extra_data",
+            "last_passive_income",
+            "referral_earnings",
+        )
         if field in updates
     )
     expected = {field: current_user.get(field) for field in fields}
@@ -1540,7 +1762,9 @@ async def apply_atomic_user_updates(
     return updated_user
 
 
-async def complete_task_reward_atomically(user_id: int, task_id: str, user_updates: dict | None = None) -> dict:
+async def complete_task_reward_atomically(
+    user_id: int, task_id: str, user_updates: dict | None = None
+) -> dict:
     user_updates = user_updates or {}
 
     async with AsyncSessionLocal() as session:
@@ -1562,7 +1786,9 @@ async def complete_task_reward_atomically(user_id: int, task_id: str, user_updat
 
         session.add(UserTask(user_id=user_id, task_id=task_id))
         for field, value in user_updates.items():
-            setattr(user_row, field, json.dumps(value) if field == "extra_data" else value)
+            setattr(
+                user_row, field, json.dumps(value) if field == "extra_data" else value
+            )
 
         await session.commit()
 
@@ -1592,7 +1818,9 @@ def get_video_task_boosts(extra: dict) -> dict:
     return boosts if isinstance(boosts, dict) else {}
 
 
-def get_active_video_task_boost(extra: dict, boost_key: str) -> tuple[bool, str | None, int]:
+def get_active_video_task_boost(
+    extra: dict, boost_key: str
+) -> tuple[bool, str | None, int]:
     boosts = get_video_task_boosts(extra)
     boost = boosts.get(boost_key)
     if not isinstance(boost, dict):
@@ -1666,15 +1894,16 @@ async def grant_referral_share_bonus(referral_user: dict, source_income: int) ->
 
     extra["referral_commission_today"] = today_amount + bonus
 
-    await update_user(referrer_id, {
-        "coins": int(referrer.get("coins", 0)) + bonus,
-        "referral_earnings": int(referrer.get("referral_earnings", 0)) + bonus,
-        "extra_data": extra,
-    })
+    await update_user(
+        referrer_id,
+        {
+            "coins": int(referrer.get("coins", 0)) + bonus,
+            "referral_earnings": int(referrer.get("referral_earnings", 0)) + bonus,
+            "extra_data": extra,
+        },
+    )
     await invalidate_user_cache(referrer_id)
     return bonus
-
-
 
 
 async def distribute_tournament_rewards():
@@ -1684,12 +1913,7 @@ async def distribute_tournament_rewards():
         if not redis_conn:
             return
 
-        top_players = await redis_conn.zrevrange(
-            TOURNAMENT_KEY,
-            0,
-            2,
-            withscores=True
-        )
+        top_players = await redis_conn.zrevrange(TOURNAMENT_KEY, 0, 2, withscores=True)
         if not top_players:
             return
 
@@ -1711,7 +1935,9 @@ async def distribute_tournament_rewards():
             new_coins = int(user.get("coins", 0)) + reward
             await update_user(user_id, {"coins": new_coins})
             await invalidate_user_cache(user_id)
-            logger.info(f"рџЏ† Tournament reward: user {user_id} place {idx+1} +{reward} coins (score {int(score)})")
+            logger.info(
+                f"рџЏ† Tournament reward: user {user_id} place {idx + 1} +{reward} coins (score {int(score)})"
+            )
     except Exception as e:
         logger.error(f"Error distributing tournament rewards: {e}")
 
@@ -1748,13 +1974,15 @@ async def weekly_tournament_rollover_loop():
             previous_season_key = current_start.strftime("%Y-%m-%d")
             finalized = await finalize_weekly_tournament_season(previous_season_key)
             if finalized:
-                logger.info("Weekly tournament season finalized: %s", previous_season_key)
+                logger.info(
+                    "Weekly tournament season finalized: %s", previous_season_key
+                )
         except Exception as e:
             logger.error(f"Error finalizing weekly tournament season: {e}")
 
 
-
 # ==================== LIFESPAN ====================
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1796,6 +2024,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("рџ›‘ Shutting down")
 
+
 # ==================== CORS ====================
 app = FastAPI(title="Ryoho Clicker API", lifespan=lifespan)
 
@@ -1833,20 +2062,30 @@ async def metrics_middleware(request: Request, call_next):
     method = request.method
     status_code = 500
     try:
-        if path.startswith("/api/") and path not in {"/api/ads/monetag/postback", "/api/ads/adsgram/reward"}:
+        if path.startswith("/api/") and path not in {
+            "/api/ads/monetag/postback",
+            "/api/ads/adsgram/reward",
+        }:
             request_ip = get_request_ip(request)
-            ip_allowed = await redis_rate_limit(f"rl:global_api:ip:{request_ip}", 240, 60)
+            ip_allowed = await redis_rate_limit(
+                f"rl:global_api:ip:{request_ip}", 240, 60
+            )
             if not ip_allowed:
                 RATE_LIMIT_REJECTS.labels(namespace="global_api_ip").inc()
                 status_code = 429
-                return JSONResponse(status_code=429, content={"detail": "Too many requests from this IP"})
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Too many requests from this IP"},
+                )
 
         response = await call_next(request)
         status_code = response.status_code
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=()"
+        )
         response.headers["Content-Security-Policy"] = (
             "default-src 'none'; "
             "frame-ancestors 'none'; "
@@ -1857,7 +2096,9 @@ async def metrics_middleware(request: Request, call_next):
         return response
     finally:
         duration = time.perf_counter() - start
-        HTTP_REQUESTS_TOTAL.labels(method=method, path=path, status=str(status_code)).inc()
+        HTTP_REQUESTS_TOTAL.labels(
+            method=method, path=path, status=str(status_code)
+        ).inc()
         HTTP_REQUEST_DURATION.labels(method=method, path=path).observe(duration)
         record_endpoint_diagnostic(method, path, status_code, duration)
 
@@ -1866,7 +2107,9 @@ async def metrics_middleware(request: Request, call_next):
 async def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+
 # ==================== РњРћР”Р•Р›Р ====================
+
 
 # ==================== Р’РЎРџРћРњРћР“РђРўР•Р›Р¬РќР«Р• Р¤РЈРќРљР¦РР ====================
 def normalize_diagnostics_path(path: str) -> str:
@@ -1876,7 +2119,9 @@ def normalize_diagnostics_path(path: str) -> str:
     return normalized
 
 
-def record_endpoint_diagnostic(method: str, path: str, status_code: int, duration_seconds: float) -> None:
+def record_endpoint_diagnostic(
+    method: str, path: str, status_code: int, duration_seconds: float
+) -> None:
     if path in {"/metrics", "/health"} or path.startswith("/api/admin/diagnostics"):
         return
 
@@ -1937,13 +2182,29 @@ def serialize_endpoint_diagnostic(stats: dict) -> dict:
         "path": stats.get("path"),
         "requests": int(stats.get("requests", 0)),
         "errors": int(stats.get("errors", 0)),
-        "status_2xx": int(sum(count for code, count in status_counts.items() if 200 <= int(code) < 300)),
-        "status_4xx": int(sum(count for code, count in status_counts.items() if 400 <= int(code) < 500)),
+        "status_2xx": int(
+            sum(
+                count for code, count in status_counts.items() if 200 <= int(code) < 300
+            )
+        ),
+        "status_4xx": int(
+            sum(
+                count for code, count in status_counts.items() if 400 <= int(code) < 500
+            )
+        ),
         "status_429": int(status_counts.get(429, 0)),
-        "status_5xx": int(sum(count for code, count in status_counts.items() if 500 <= int(code) < 600)),
+        "status_5xx": int(
+            sum(
+                count for code, count in status_counts.items() if 500 <= int(code) < 600
+            )
+        ),
         "avg_ms": round(sum(durations) / len(durations), 2) if durations else 0.0,
-        "p95_ms": round(percentile_from_sorted(durations, 0.95), 2) if durations else 0.0,
-        "p99_ms": round(percentile_from_sorted(durations, 0.99), 2) if durations else 0.0,
+        "p95_ms": round(percentile_from_sorted(durations, 0.95), 2)
+        if durations
+        else 0.0,
+        "p99_ms": round(percentile_from_sorted(durations, 0.99), 2)
+        if durations
+        else 0.0,
         "last_status": stats.get("last_status"),
         "last_duration_ms": stats.get("last_duration_ms"),
         "last_error": stats.get("last_error"),
@@ -1969,6 +2230,7 @@ async def acquire_once_lock(key: str, ttl: float = 10) -> bool:
     LOCAL_LOCKS[key] = now + ttl
     return True
 
+
 async def acquire_idempotency_key(key: str, ttl: int = 60) -> bool:
     conn = await get_redis_or_none()
     if conn:
@@ -1976,7 +2238,9 @@ async def acquire_idempotency_key(key: str, ttl: int = 60) -> bool:
             result = await conn.set(key, "1", ex=ttl, nx=True)
             return bool(result)
         except Exception as e:
-            logger.warning(f"Redis acquire_idempotency_key failed, fallback to local: {e}")
+            logger.warning(
+                f"Redis acquire_idempotency_key failed, fallback to local: {e}"
+            )
 
     now = time.monotonic()
     expires_at = LOCAL_IDEMPOTENCY_KEYS.get(key)
@@ -2000,7 +2264,9 @@ async def ensure_redis_available() -> redis.Redis:
     """
     return await redis_or_503()
 
+
 # ==================== Р­РќР”РџРћРРќРўР« ====================
+
 
 def _local_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
     now = time.monotonic()
@@ -2040,7 +2306,9 @@ async def redis_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
         return _local_rate_limit(key, limit, window_seconds)
 
 
-async def require_redis_rate_limit(namespace: str, user_id: int, limit: int, window_seconds: int):
+async def require_redis_rate_limit(
+    namespace: str, user_id: int, limit: int, window_seconds: int
+):
     allowed = await redis_rate_limit(f"rl:{namespace}:{user_id}", limit, window_seconds)
     if not allowed:
         RATE_LIMIT_REJECTS.labels(namespace=namespace).inc()
@@ -2059,9 +2327,13 @@ def get_request_ip(request: Request) -> str:
     return (request.client.host if request.client else "") or "unknown"
 
 
-async def require_ip_rate_limit(namespace: str, request: Request, limit: int, window_seconds: int):
+async def require_ip_rate_limit(
+    namespace: str, request: Request, limit: int, window_seconds: int
+):
     request_ip = get_request_ip(request)
-    allowed = await redis_rate_limit(f"rl:{namespace}:ip:{request_ip}", limit, window_seconds)
+    allowed = await redis_rate_limit(
+        f"rl:{namespace}:ip:{request_ip}", limit, window_seconds
+    )
     if not allowed:
         RATE_LIMIT_REJECTS.labels(namespace=f"{namespace}_ip").inc()
         raise HTTPException(status_code=429, detail="Too many requests from this IP")
@@ -2077,7 +2349,9 @@ async def require_dual_rate_limit(
     ip_limit: int | None = None,
 ):
     await require_redis_rate_limit(namespace, user_id, user_limit, window_seconds)
-    await require_ip_rate_limit(namespace, request, ip_limit or user_limit, window_seconds)
+    await require_ip_rate_limit(
+        namespace, request, ip_limit or user_limit, window_seconds
+    )
 
 
 async def flush_click_buffer_loop():
@@ -2107,9 +2381,7 @@ async def flush_click_buffer_loop():
 
                 new_coins = int(user.get("coins", 0)) + coins
 
-                await update_user(user_id, {
-                    "coins": new_coins
-                })
+                await update_user(user_id, {"coins": new_coins})
 
                 await invalidate_user_cache(user_id)
 
@@ -2160,6 +2432,7 @@ async def health():
 
     return {"status": overall, "details": details}
 
+
 @app.get("/api/user/{user_id}")
 async def get_user_data(user_id: int, request: Request):
     try:
@@ -2173,29 +2446,46 @@ async def get_user_data(user_id: int, request: Request):
         current_energy = calculate_current_energy(user, now)
         max_energy = resolve_max_energy(user)
 
-        if int(user.get("max_energy", max_energy)) != max_energy or int(user.get("energy", current_energy)) > max_energy:
-            await update_user(user_id, {
-                "max_energy": max_energy,
-                "energy": min(current_energy, max_energy),
-            })
+        if (
+            int(user.get("max_energy", max_energy)) != max_energy
+            or int(user.get("energy", current_energy)) > max_energy
+        ):
+            await update_user(
+                user_id,
+                {
+                    "max_energy": max_energy,
+                    "energy": min(current_energy, max_energy),
+                },
+            )
             await invalidate_user_cache(user_id)
-
 
         extra = parse_extra_data(user.get("extra_data"))
 
         owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
-        selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
+        selected_skin = normalize_selected_skin(
+            extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins
+        )
         ghost_boost_active, ghost_boost_expires_at = get_ghost_boost_status(user)
-        daily_infinite_energy_active, daily_infinite_energy_expires_at = is_daily_infinite_energy_active(user)
-        task_tap_boost_active, task_tap_boost_expires_at, task_tap_boost_multiplier = get_active_video_task_boost(extra, "tap_boost")
-        task_passive_boost_active, task_passive_boost_expires_at, task_passive_boost_multiplier = get_active_video_task_boost(extra, "passive_boost")
+        daily_infinite_energy_active, daily_infinite_energy_expires_at = (
+            is_daily_infinite_energy_active(user)
+        )
+        task_tap_boost_active, task_tap_boost_expires_at, task_tap_boost_multiplier = (
+            get_active_video_task_boost(extra, "tap_boost")
+        )
+        (
+            task_passive_boost_active,
+            task_passive_boost_expires_at,
+            task_passive_boost_multiplier,
+        ) = get_active_video_task_boost(extra, "passive_boost")
         multitap_level = int(user.get("multitap_level", 0))
         profit_level = int(user.get("profit_level", 0))
         energy_level = int(user.get("energy_level", 0))
         profit_per_tap = get_tap_value(multitap_level)
         profit_per_hour = get_hour_value(profit_level)
 
-        if owned_skins != extra.get("owned_skins") or selected_skin != extra.get("selected_skin", DEFAULT_SKIN_ID):
+        if owned_skins != extra.get("owned_skins") or selected_skin != extra.get(
+            "selected_skin", DEFAULT_SKIN_ID
+        ):
             extra["owned_skins"] = owned_skins
             extra["selected_skin"] = selected_skin
             await update_user(user_id, {"extra_data": extra})
@@ -2231,7 +2521,7 @@ async def get_user_data(user_id: int, request: Request):
             "skin_ad_last_watch": get_skin_ad_last_watch(extra),
             "ton_wallet": ton_wallet,
             "regen_seconds": ENERGY_REGEN_SECONDS,
-            "server_time": now.isoformat()
+            "server_time": now.isoformat(),
         }
 
     except HTTPException:
@@ -2293,7 +2583,9 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
             raise HTTPException(status_code=404, detail="User not found")
 
         extra = parse_extra_data(user.get("extra_data"))
-        existing_wallet = extra.get("ton_wallet") if isinstance(extra.get("ton_wallet"), dict) else {}
+        existing_wallet = (
+            extra.get("ton_wallet") if isinstance(extra.get("ton_wallet"), dict) else {}
+        )
 
         wallet_verified = False
         verification_error = None
@@ -2315,7 +2607,9 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
                     getattr(getattr(payload.ton_proof, "domain", None), "value", None),
                     wallet_address,
                 )
-        elif bool(existing_wallet.get("verified")) and ton_addresses_match(existing_wallet.get("address"), wallet_address):
+        elif bool(existing_wallet.get("verified")) and ton_addresses_match(
+            existing_wallet.get("address"), wallet_address
+        ):
             wallet_verified = True
             verification_error = None
             verified_at = existing_wallet.get("verified_at")
@@ -2327,7 +2621,8 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
             "network": (payload.wallet_network or "").strip(),
             "connected_at": datetime.utcnow().isoformat(),
             "verified": wallet_verified,
-            "verified_at": verified_at or (datetime.utcnow().isoformat() if wallet_verified else None),
+            "verified_at": verified_at
+            or (datetime.utcnow().isoformat() if wallet_verified else None),
             "verification_error": verification_error or None,
         }
         await update_user(payload.user_id, {"extra_data": extra})
@@ -2379,7 +2674,7 @@ async def get_mega_boost_status(user_id: int, request: Request):
         user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
+
         extra = user.get("extra_data", {}) or {}
         if isinstance(extra, str):
             try:
@@ -2388,30 +2683,36 @@ async def get_mega_boost_status(user_id: int, request: Request):
                 extra = {}
         active_boosts = extra.get("active_boosts", {})
         now = datetime.utcnow()
-        
+
         if "mega_boost" in active_boosts:
             try:
-                expires = datetime.fromisoformat(active_boosts["mega_boost"]["expires_at"])
+                expires = datetime.fromisoformat(
+                    active_boosts["mega_boost"]["expires_at"]
+                )
                 if now > expires:
                     del active_boosts["mega_boost"]
                     extra["active_boosts"] = active_boosts
                     await update_user(user_id, {"extra_data": extra})
                     await invalidate_user_cache(user_id)
-                    cooldown_until = parse_iso_datetime(extra.get("mega_boost_cooldown_until"))
+                    cooldown_until = parse_iso_datetime(
+                        extra.get("mega_boost_cooldown_until")
+                    )
                     if cooldown_until and cooldown_until > now:
                         return {
                             "active": False,
                             "cooldown_active": True,
                             "cooldown_until": cooldown_until.isoformat(),
-                            "cooldown_remaining_seconds": int((cooldown_until - now).total_seconds())
+                            "cooldown_remaining_seconds": int(
+                                (cooldown_until - now).total_seconds()
+                            ),
                         }
                     return {"active": False, "cooldown_active": False}
                 else:
                     remaining = int((expires - now).total_seconds())
                     return {
-                        "active": True, 
-                        "expires_at": active_boosts["mega_boost"]["expires_at"], 
-                        "remaining_seconds": remaining
+                        "active": True,
+                        "expires_at": active_boosts["mega_boost"]["expires_at"],
+                        "remaining_seconds": remaining,
                     }
             except:
                 pass
@@ -2422,7 +2723,9 @@ async def get_mega_boost_status(user_id: int, request: Request):
                 "active": False,
                 "cooldown_active": True,
                 "cooldown_until": cooldown_until.isoformat(),
-                "cooldown_remaining_seconds": int((cooldown_until - now).total_seconds())
+                "cooldown_remaining_seconds": int(
+                    (cooldown_until - now).total_seconds()
+                ),
             }
         if cooldown_until and cooldown_until <= now:
             extra.pop("mega_boost_cooldown_until", None)
@@ -2434,17 +2737,21 @@ async def get_mega_boost_status(user_id: int, request: Request):
         logger.error(f"Error in get_mega_boost_status: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 @app.post("/api/activate-mega-boost")
 async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
     """Activate mega boost (x2 coins + infinite energy for 1 minute)"""
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("activate_mega_boost", request, payload.user_id, 10, 60, ip_limit=20)
-        await consume_ad_action_session(payload.user_id, payload.ad_session_id, "mega_boost")
+        await require_dual_rate_limit(
+            "activate_mega_boost", request, payload.user_id, 10, 60, ip_limit=20
+        )
+        await consume_ad_action_session(
+            payload.user_id, payload.ad_session_id, "mega_boost"
+        )
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-
 
         extra = user.get("extra_data", {}) or {}
         if isinstance(extra, str):
@@ -2452,21 +2759,23 @@ async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
                 extra = json.loads(extra)
             except:
                 extra = {}
-        
+
         active_boosts = extra.get("active_boosts", {})
         now = datetime.utcnow()
-        
+
         # РџСЂРѕРІРµСЂСЏРµРј, РЅРµ Р°РєС‚РёРІРµРЅ Р»Рё СѓР¶Рµ Р±СѓСЃС‚
         if "mega_boost" in active_boosts:
             try:
-                expires = datetime.fromisoformat(active_boosts["mega_boost"]["expires_at"])
+                expires = datetime.fromisoformat(
+                    active_boosts["mega_boost"]["expires_at"]
+                )
                 if now < expires:
                     remaining = int((expires - now).total_seconds())
                     return {
                         "success": False,
                         "message": f"Boost already active! {remaining // 60}:{remaining % 60:02d} remaining",
                         "already_active": True,
-                        "expires_at": active_boosts["mega_boost"]["expires_at"]
+                        "expires_at": active_boosts["mega_boost"]["expires_at"],
                     }
             except:
                 del active_boosts["mega_boost"]
@@ -2474,10 +2783,13 @@ async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
         cooldown_until = parse_iso_datetime(extra.get("mega_boost_cooldown_until"))
         if cooldown_until and now < cooldown_until:
             remaining = int((cooldown_until - now).total_seconds())
-            raise HTTPException(status_code=429, detail=f"Mega boost cooldown {remaining // 60}:{remaining % 60:02d}")
+            raise HTTPException(
+                status_code=429,
+                detail=f"Mega boost cooldown {remaining // 60}:{remaining % 60:02d}",
+            )
         if cooldown_until and now >= cooldown_until:
             extra.pop("mega_boost_cooldown_until", None)
-        
+
         expires_at = (now + timedelta(minutes=MEGA_BOOST_MINUTES)).isoformat()
         cooldown_minutes = MEGA_BOOST_COOLDOWN_MAX_MINUTES
         cooldown_until_value = (now + timedelta(minutes=cooldown_minutes)).isoformat()
@@ -2486,14 +2798,16 @@ async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
         extra["active_boosts"] = active_boosts
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
-        await record_rewarded_ad_claim(payload.user_id, "boost", {"source_action": "mega_boost"})
-        
+        await record_rewarded_ad_claim(
+            payload.user_id, "boost", {"source_action": "mega_boost"}
+        )
+
         return {
             "success": True,
             "message": "рџ”ҐвљЎ MEGA BOOST activated for 1 minute! x2 coins + infinite energy",
             "expires_at": expires_at,
             "cooldown_until": cooldown_until_value,
-            "cooldown_minutes": cooldown_minutes
+            "cooldown_minutes": cooldown_minutes,
         }
     except HTTPException:
         raise
@@ -2514,7 +2828,12 @@ async def get_ghost_boost_status_endpoint(user_id: int, request: Request):
         if not active or not expires_at:
             return {"active": False}
 
-        remaining = max(0, int((datetime.fromisoformat(expires_at) - datetime.utcnow()).total_seconds()))
+        remaining = max(
+            0,
+            int(
+                (datetime.fromisoformat(expires_at) - datetime.utcnow()).total_seconds()
+            ),
+        )
         return {
             "active": True,
             "expires_at": expires_at,
@@ -2532,8 +2851,12 @@ async def get_ghost_boost_status_endpoint(user_id: int, request: Request):
 async def activate_ghost_boost(payload: AdActionClaimRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("activate_ghost_boost", request, payload.user_id, 10, 60, ip_limit=20)
-        await consume_ad_action_session(payload.user_id, payload.ad_session_id, "ghost_boost")
+        await require_dual_rate_limit(
+            "activate_ghost_boost", request, payload.user_id, 10, 60, ip_limit=20
+        )
+        await consume_ad_action_session(
+            payload.user_id, payload.ad_session_id, "ghost_boost"
+        )
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -2571,7 +2894,9 @@ async def activate_ghost_boost(payload: AdActionClaimRequest, request: Request):
 
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
-        await record_rewarded_ad_claim(payload.user_id, "ghost", {"source_action": "ghost_boost"})
+        await record_rewarded_ad_claim(
+            payload.user_id, "ghost", {"source_action": "ghost_boost"}
+        )
 
         return {
             "success": True,
@@ -2586,9 +2911,11 @@ async def activate_ghost_boost(payload: AdActionClaimRequest, request: Request):
         logger.error(f"Error in activate_ghost_boost: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 @app.post("/api/reward-video")
 async def reward_video(payload: RewardVideoClaimRequest, request: Request):
     raise HTTPException(status_code=410, detail="Deprecated reward flow")
+
 
 @app.post("/api/reward-video/start")
 async def reward_video_start(payload: RewardVideoStartRequest, request: Request):
@@ -2599,7 +2926,9 @@ async def reward_video_start(payload: RewardVideoStartRequest, request: Request)
 async def ad_action_start(payload: AdActionStartRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("ad_action_start", request, payload.user_id, 20, 60, ip_limit=40)
+        await require_dual_rate_limit(
+            "ad_action_start", request, payload.user_id, 20, 60, ip_limit=40
+        )
 
         user = await get_user_cached(payload.user_id)
         if not user:
@@ -2622,7 +2951,9 @@ async def ad_action_start(payload: AdActionStartRequest, request: Request):
 async def adsgram_complete_locally(payload: AdActionClaimRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("adsgram_complete", request, payload.user_id, 20, 60, ip_limit=40)
+        await require_dual_rate_limit(
+            "adsgram_complete", request, payload.user_id, 20, 60, ip_limit=40
+        )
         await require_user_action_lock("adsgram_complete", payload.user_id, ttl=2)
 
         verified = await mark_ad_action_session_verified_for_user(
@@ -2631,7 +2962,9 @@ async def adsgram_complete_locally(payload: AdActionClaimRequest, request: Reque
             {"source": "adsgram_sdk", "confirmed_at": datetime.utcnow().isoformat()},
         )
         if not verified:
-            raise HTTPException(status_code=400, detail="Ad completion was not confirmed yet")
+            raise HTTPException(
+                status_code=400, detail="Ad completion was not confirmed yet"
+            )
 
         return {"success": True, "verified": True}
     except HTTPException:
@@ -2648,7 +2981,10 @@ async def monetag_postback(request: Request):
 
         if request.method == "POST":
             content_type = (request.headers.get("content-type") or "").lower()
-            if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+            if (
+                "application/x-www-form-urlencoded" in content_type
+                or "multipart/form-data" in content_type
+            ):
                 form = await request.form()
                 for key, value in form.items():
                     params[str(key)] = str(value)
@@ -2673,7 +3009,8 @@ async def monetag_postback(request: Request):
             params.get("completed"),
         ]
         negative_status = any(
-            hint is not None and str(hint).strip().lower() in MONETAG_POSTBACK_NEGATIVE_VALUES
+            hint is not None
+            and str(hint).strip().lower() in MONETAG_POSTBACK_NEGATIVE_VALUES
             for hint in status_hints
         )
         if negative_status:
@@ -2687,8 +3024,12 @@ async def monetag_postback(request: Request):
 
         verified = await mark_ad_action_session_verified(ad_session_id, params)
         if not verified:
-            logger.warning("Monetag postback could not find ad session %s", ad_session_id)
-            return Response(content="SESSION_NOT_FOUND", media_type="text/plain", status_code=404)
+            logger.warning(
+                "Monetag postback could not find ad session %s", ad_session_id
+            )
+            return Response(
+                content="SESSION_NOT_FOUND", media_type="text/plain", status_code=404
+            )
 
         return Response(content="OK", media_type="text/plain", status_code=200)
     except HTTPException:
@@ -2705,7 +3046,10 @@ async def adsgram_reward_callback(request: Request):
 
         if request.method == "POST":
             content_type = (request.headers.get("content-type") or "").lower()
-            if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+            if (
+                "application/x-www-form-urlencoded" in content_type
+                or "multipart/form-data" in content_type
+            ):
                 form = await request.form()
                 for key, value in form.items():
                     params[str(key)] = str(value)
@@ -2719,14 +3063,22 @@ async def adsgram_reward_callback(request: Request):
             provided_secret = extract_first_value(params, ADSGRAM_REWARD_SECRET_KEYS)
             if provided_secret != ADSGRAM_REWARD_SECRET:
                 logger.warning("AdsGram reward callback rejected: invalid secret")
-                raise HTTPException(status_code=403, detail="Invalid AdsGram reward secret")
+                raise HTTPException(
+                    status_code=403, detail="Invalid AdsGram reward secret"
+                )
 
         ad_session_id = extract_first_value(params, ADSGRAM_REWARD_SESSION_KEYS)
         if ad_session_id:
             verified = await mark_ad_action_session_verified(ad_session_id, params)
             if not verified:
-                logger.warning("AdsGram callback could not find ad session %s", ad_session_id)
-                return Response(content="SESSION_NOT_FOUND", media_type="text/plain", status_code=404)
+                logger.warning(
+                    "AdsGram callback could not find ad session %s", ad_session_id
+                )
+                return Response(
+                    content="SESSION_NOT_FOUND",
+                    media_type="text/plain",
+                    status_code=404,
+                )
             return Response(content="OK", media_type="text/plain", status_code=200)
 
         user_id_raw = extract_first_value(params, ADSGRAM_REWARD_USER_KEYS)
@@ -2735,10 +3087,17 @@ async def adsgram_reward_callback(request: Request):
             raise HTTPException(status_code=400, detail="Missing user id")
 
         user_id = int(str(user_id_raw).strip())
-        matched_session_id = await mark_latest_ad_action_session_verified_for_user(user_id, params)
+        matched_session_id = await mark_latest_ad_action_session_verified_for_user(
+            user_id, params
+        )
         if not matched_session_id:
-            logger.warning("AdsGram callback could not match an active ad session for user %s", user_id)
-            return Response(content="SESSION_NOT_FOUND", media_type="text/plain", status_code=404)
+            logger.warning(
+                "AdsGram callback could not match an active ad session for user %s",
+                user_id,
+            )
+            return Response(
+                content="SESSION_NOT_FOUND", media_type="text/plain", status_code=404
+            )
 
         return Response(content="OK", media_type="text/plain", status_code=200)
     except HTTPException:
@@ -2756,41 +3115,45 @@ async def ad_watched(payload: dict, request: Request):
         reward_type = payload.get("reward_type")
         await require_telegram_user(request, user_id)
         await require_user_action_lock("ad_watched", user_id, ttl=3)
-        
+
         user = await get_user_cached(user_id)
         if not user:
             return {"success": False}
-        
+
         extra = user.get("extra_data", {}) or {}
         if isinstance(extra, str):
             try:
                 extra = json.loads(extra)
             except:
                 extra = {}
-        
+
         # РЎРѕС…СЂР°РЅСЏРµРј СЃС‚Р°С‚РёСЃС‚РёРєСѓ
         ads_history = extra.get("ads_history", [])
-        ads_history.append({
-            "type": reward_type,
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        ads_history.append(
+            {"type": reward_type, "timestamp": datetime.utcnow().isoformat()}
+        )
         extra["ads_history"] = ads_history[-50:]
-        
+
         await update_user(user_id, {"extra_data": extra})
         await invalidate_user_cache(user_id)
-        
+
         return {"success": True}
-        
+
     except Exception as e:
         logger.error(f"Error in ad_watched: {e}")
         return {"success": False}
+
 
 @app.post("/api/ads/increment")
 async def increment_ads_watched(payload: AdActionClaimRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("ads_increment", request, payload.user_id, 20, 60, ip_limit=40)
-        await consume_ad_action_session(payload.user_id, payload.ad_session_id, "ads_increment")
+        await require_dual_rate_limit(
+            "ads_increment", request, payload.user_id, 20, 60, ip_limit=40
+        )
+        await consume_ad_action_session(
+            payload.user_id, payload.ad_session_id, "ads_increment"
+        )
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -2810,7 +3173,11 @@ async def increment_ads_watched(payload: AdActionClaimRequest, request: Request)
         ads_watched = int(extra.get("ads_watched", 0)) + 1
         extra["ads_watched"] = ads_watched
 
-        skin_id = LEGACY_SKIN_ID_MAP.get(payload.skin_id, payload.skin_id) if payload.skin_id else None
+        skin_id = (
+            LEGACY_SKIN_ID_MAP.get(payload.skin_id, payload.skin_id)
+            if payload.skin_id
+            else None
+        )
         current_count = 0
         required_count = 0
         cooldown_remaining_seconds = 0
@@ -2831,12 +3198,16 @@ async def increment_ads_watched(payload: AdActionClaimRequest, request: Request)
                 last_watch_at = parse_iso_datetime(last_watch.get(skin_id))
                 now = datetime.utcnow()
                 if last_watch_at:
-                    next_allowed = last_watch_at + timedelta(minutes=SKIN_AD_COOLDOWN_MINUTES)
+                    next_allowed = last_watch_at + timedelta(
+                        minutes=SKIN_AD_COOLDOWN_MINUTES
+                    )
                     if next_allowed > now:
-                        cooldown_remaining_seconds = int((next_allowed - now).total_seconds())
+                        cooldown_remaining_seconds = int(
+                            (next_allowed - now).total_seconds()
+                        )
                         raise HTTPException(
                             status_code=429,
-                            detail=f"Skin ad cooldown {cooldown_remaining_seconds // 60}:{cooldown_remaining_seconds % 60:02d}"
+                            detail=f"Skin ad cooldown {cooldown_remaining_seconds // 60}:{cooldown_remaining_seconds % 60:02d}",
                         )
 
                 current_count = min(required_count, current_count + 1)
@@ -2848,7 +3219,11 @@ async def increment_ads_watched(payload: AdActionClaimRequest, request: Request)
 
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
-        await record_rewarded_ad_claim(payload.user_id, "skins", {"source_action": "ads_increment", "skin_id": skin_id})
+        await record_rewarded_ad_claim(
+            payload.user_id,
+            "skins",
+            {"source_action": "ads_increment", "skin_id": skin_id},
+        )
 
         return {
             "success": True,
@@ -2917,7 +3292,11 @@ async def apply_global_upgrade_for_user(user_id: int, user: dict) -> dict:
         raise HTTPException(status_code=409, detail="Upgrade state changed, retry")
     await invalidate_user_cache(user_id)
 
-    next_cost = GLOBAL_UPGRADE_PRICES[new_level] if new_level < len(GLOBAL_UPGRADE_PRICES) else 0
+    next_cost = (
+        GLOBAL_UPGRADE_PRICES[new_level]
+        if new_level < len(GLOBAL_UPGRADE_PRICES)
+        else 0
+    )
     return {
         "success": True,
         "coins": int(updated_user.get("coins", new_coins)),
@@ -2942,7 +3321,9 @@ async def apply_global_upgrade_for_user(user_id: int, user: dict) -> dict:
 async def process_upgrade(payload: UpgradeRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("upgrade", request, payload.user_id, 25, 60, ip_limit=50)
+        await require_dual_rate_limit(
+            "upgrade", request, payload.user_id, 25, 60, ip_limit=50
+        )
         await require_user_action_lock("upgrade", payload.user_id, ttl=0.35)
         user = await get_user_cached(payload.user_id)
         if not user:
@@ -2959,7 +3340,9 @@ async def process_upgrade(payload: UpgradeRequest, request: Request):
 async def process_upgrade_all(payload: UserIdRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("upgrade_all", request, payload.user_id, 25, 60, ip_limit=50)
+        await require_dual_rate_limit(
+            "upgrade_all", request, payload.user_id, 25, 60, ip_limit=50
+        )
         await require_user_action_lock("upgrade_all", payload.user_id, ttl=0.35)
         user = await get_user_cached(payload.user_id)
         if not user:
@@ -2971,13 +3354,18 @@ async def process_upgrade_all(payload: UserIdRequest, request: Request):
         logger.error(f"Error in process_upgrade_all: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 @app.post("/api/update-energy")
 async def update_energy(payload: AdActionClaimRequest, request: Request):
     try:
         user_id = payload.user_id
         await require_telegram_user(request, user_id)
-        await require_dual_rate_limit("update_energy", request, user_id, 10, 60, ip_limit=20)
-        await consume_ad_action_session(user_id, payload.ad_session_id, "energy_refill_max")
+        await require_dual_rate_limit(
+            "update_energy", request, user_id, 10, 60, ip_limit=20
+        )
+        await consume_ad_action_session(
+            user_id, payload.ad_session_id, "energy_refill_max"
+        )
         await require_user_action_lock("update_energy", user_id, ttl=3)
         if not user_id:
             raise HTTPException(status_code=400, detail="user_id required")
@@ -2991,21 +3379,31 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
         cooldown_until = parse_iso_datetime(extra.get("energy_refill_cooldown_until"))
         if cooldown_until and now < cooldown_until:
             remaining = int((cooldown_until - now).total_seconds())
-            raise HTTPException(status_code=429, detail=f"Energy refill cooldown active. Try again in {format_duration(remaining)}")
+            raise HTTPException(
+                status_code=429,
+                detail=f"Energy refill cooldown active. Try again in {format_duration(remaining)}",
+            )
         if cooldown_until and now >= cooldown_until:
             extra.pop("energy_refill_cooldown_until", None)
 
-        cooldown_until_value = (now + timedelta(minutes=ENERGY_REFILL_COOLDOWN_MINUTES)).isoformat()
+        cooldown_until_value = (
+            now + timedelta(minutes=ENERGY_REFILL_COOLDOWN_MINUTES)
+        ).isoformat()
         extra["energy_refill_cooldown_until"] = cooldown_until_value
 
-        await update_user(user_id, {
-            "max_energy": max_energy,
-            "energy": max_energy,
-            "last_energy_update": now,
-            "extra_data": extra
-        })
+        await update_user(
+            user_id,
+            {
+                "max_energy": max_energy,
+                "energy": max_energy,
+                "last_energy_update": now,
+                "extra_data": extra,
+            },
+        )
         await invalidate_user_cache(user_id)
-        await record_rewarded_ad_claim(user_id, "energy_restore", {"source_action": "energy_refill_max"})
+        await record_rewarded_ad_claim(
+            user_id, "energy_restore", {"source_action": "energy_refill_max"}
+        )
 
         return {
             "success": True,
@@ -3014,7 +3412,7 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
             "regen_seconds": ENERGY_REGEN_SECONDS,
             "server_time": now.isoformat(),
             "cooldown_until": cooldown_until_value,
-            "cooldown_minutes": ENERGY_REFILL_COOLDOWN_MINUTES
+            "cooldown_minutes": ENERGY_REFILL_COOLDOWN_MINUTES,
         }
 
     except HTTPException:
@@ -3028,8 +3426,12 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
 async def activate_autoclicker(payload: AdActionClaimRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("activate_autoclicker", request, payload.user_id, 10, 60, ip_limit=20)
-        await consume_ad_action_session(payload.user_id, payload.ad_session_id, "autoclicker")
+        await require_dual_rate_limit(
+            "activate_autoclicker", request, payload.user_id, 10, 60, ip_limit=20
+        )
+        await consume_ad_action_session(
+            payload.user_id, payload.ad_session_id, "autoclicker"
+        )
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -3039,15 +3441,22 @@ async def activate_autoclicker(payload: AdActionClaimRequest, request: Request):
         cooldown_until = parse_iso_datetime(extra.get("autoclicker_cooldown_until"))
         if cooldown_until and now < cooldown_until:
             remaining = int((cooldown_until - now).total_seconds())
-            raise HTTPException(status_code=429, detail=f"Autoclicker cooldown {remaining // 60}:{remaining % 60:02d}")
+            raise HTTPException(
+                status_code=429,
+                detail=f"Autoclicker cooldown {remaining // 60}:{remaining % 60:02d}",
+            )
         if cooldown_until and now >= cooldown_until:
             extra.pop("autoclicker_cooldown_until", None)
 
-        cooldown_until_value = (now + timedelta(minutes=AUTOCLICKER_COOLDOWN_MINUTES)).isoformat()
+        cooldown_until_value = (
+            now + timedelta(minutes=AUTOCLICKER_COOLDOWN_MINUTES)
+        ).isoformat()
         extra["autoclicker_cooldown_until"] = cooldown_until_value
         await update_user(payload.user_id, {"extra_data": extra})
         await invalidate_user_cache(payload.user_id)
-        await record_rewarded_ad_claim(payload.user_id, "autoclicker", {"source_action": "autoclicker"})
+        await record_rewarded_ad_claim(
+            payload.user_id, "autoclicker", {"source_action": "autoclicker"}
+        )
         return {
             "success": True,
             "duration_seconds": 60,
@@ -3060,9 +3469,11 @@ async def activate_autoclicker(payload: AdActionClaimRequest, request: Request):
         logger.error(f"Error in activate_autoclicker: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 @app.post("/api/recover-energy")
 async def recover_energy_legacy(payload: UserIdRequest, request: Request):
     raise HTTPException(status_code=410, detail="Legacy endpoint disabled")
+
 
 @app.post("/api/sync-energy")
 async def sync_energy(payload: EnergySyncRequest, request: Request):
@@ -3070,7 +3481,7 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
         user = await get_user_cached(payload.user_id)
-        
+
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -3110,14 +3521,12 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
             await update_user(payload.user_id, update_data)
             await invalidate_user_cache(payload.user_id)
 
-            
-
         return {
             "success": True,
             "energy": current_energy,
             "max_energy": max_energy,
             "regen_seconds": ENERGY_REGEN_SECONDS,
-            "server_time": now.isoformat()
+            "server_time": now.isoformat(),
         }
 
     except HTTPException:
@@ -3125,6 +3534,7 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
     except Exception as e:
         logger.error(f"Error in sync_energy: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
 
 DEFAULT_SKIN_ID = "default.pngSP"
 
@@ -3211,7 +3621,9 @@ def get_selected_skin_multiplier(user: dict) -> float:
             extra = {}
 
     owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
-    selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
+    selected_skin = normalize_selected_skin(
+        extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins
+    )
     return SKIN_MULTIPLIERS.get(selected_skin, 1.0)
 
 
@@ -3303,6 +3715,7 @@ def is_daily_infinite_energy_active(user: dict) -> tuple[bool, str | None]:
 
     return True, expires_at
 
+
 SKIN_REQUIREMENTS = {
     "10lvl.pngSP": {"type": "level", "value": 10},
     "25lvl.pngSP": {"type": "level", "value": 25},
@@ -3347,22 +3760,26 @@ async def can_unlock_skin(user: dict, skin_id: str) -> bool:
 
     return False
 
+
 @app.post("/api/clicks")
 async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("clicks", request, payload.user_id, 90, 60, ip_limit=180)
+        await require_dual_rate_limit(
+            "clicks", request, payload.user_id, 90, 60, ip_limit=180
+        )
         user = await get_user_cached(payload.user_id)
-        
+
         if payload.clicks > MAX_CLICK_BATCH_SIZE:
             raise HTTPException(status_code=400, detail="Too many clicks in batch")
 
         batch_key = f"idem:clicks:{payload.user_id}:{payload.batch_id}"
         is_new_batch = await acquire_idempotency_key(batch_key, ttl=120)
         if not is_new_batch:
-            logger.warning(f"Duplicate click batch rejected: user={payload.user_id}, batch_id={payload.batch_id}")
+            logger.warning(
+                f"Duplicate click batch rejected: user={payload.user_id}, batch_id={payload.batch_id}"
+            )
             raise HTTPException(status_code=409, detail="Duplicate batch")
-
 
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -3381,14 +3798,20 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         last_click_at = parse_iso_datetime(click_guard.get("last_click_at"))
 
         owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
-        selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
+        selected_skin = normalize_selected_skin(
+            extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins
+        )
         skin_multiplier = float(SKIN_MULTIPLIERS.get(selected_skin, 1.0))
 
         mega_boost_active = is_mega_boost_active(user)
         ghost_boost_active, ghost_boost_expires_at = get_ghost_boost_status(user)
-        task_tap_boost_active, _, task_tap_boost_multiplier = get_active_video_task_boost(extra, "tap_boost")
+        task_tap_boost_active, _, task_tap_boost_multiplier = (
+            get_active_video_task_boost(extra, "tap_boost")
+        )
         daily_infinite_energy_active, _ = is_daily_infinite_energy_active(user)
-        free_energy_clicks = mega_boost_active or daily_infinite_energy_active or ghost_boost_active
+        free_energy_clicks = (
+            mega_boost_active or daily_infinite_energy_active or ghost_boost_active
+        )
 
         coin_per_tap = max(1, int(tap_value * skin_multiplier))
         if mega_boost_active:
@@ -3409,10 +3832,13 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
 
         severe_overshoot = (
             safe_requested_clicks > allowed_clicks + CLICK_SUSPICIOUS_OVERSHOOT
-            and safe_requested_clicks > max(allowed_clicks * 2, CLICK_BURST_ALLOWANCE * 2)
+            and safe_requested_clicks
+            > max(allowed_clicks * 2, CLICK_BURST_ALLOWANCE * 2)
         )
         if severe_overshoot:
-            click_guard["hard_rejections"] = int(click_guard.get("hard_rejections", 0)) + 1
+            click_guard["hard_rejections"] = (
+                int(click_guard.get("hard_rejections", 0)) + 1
+            )
             click_guard["last_rejection_at"] = now.isoformat()
             click_guard["last_reason"] = (
                 f"Click batch overshoot: requested={safe_requested_clicks}, allowed={allowed_clicks}"
@@ -3429,11 +3855,19 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             )
             raise HTTPException(status_code=429, detail="Click rate too high")
 
-        effective_clicks = allowed_clicks if free_energy_clicks else min(allowed_clicks, current_energy)
+        effective_clicks = (
+            allowed_clicks
+            if free_energy_clicks
+            else min(allowed_clicks, current_energy)
+        )
         gained = effective_clicks * coin_per_tap
 
         # РЅРѕРІС‹Рµ Р·РЅР°С‡РµРЅРёСЏ
-        new_energy = current_energy if free_energy_clicks else max(0, current_energy - effective_clicks)
+        new_energy = (
+            current_energy
+            if free_energy_clicks
+            else max(0, current_energy - effective_clicks)
+        )
         new_coins = int(user.get("coins", 0)) + gained
 
         update_data = {
@@ -3501,17 +3935,16 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         conn = await get_redis_or_none()
         if conn and gained > 0:
             # РўСѓСЂРЅРёСЂ РѕСЃС‚Р°РІР»СЏРµРј РІ Redis РєР°Рє Р±С‹СЃС‚СЂС‹Р№ leaderboard СЃР»РѕР№.
-            await conn.zincrby(
-                TOURNAMENT_KEY,
-                gained,
-                str(payload.user_id)
-            )
+            await conn.zincrby(TOURNAMENT_KEY, gained, str(payload.user_id))
         if gained > 0:
-            current_display_level = max(
-                int(user.get("multitap_level", 0)),
-                int(user.get("profit_level", 0)),
-                int(user.get("energy_level", 0)),
-            ) + 1
+            current_display_level = (
+                max(
+                    int(user.get("multitap_level", 0)),
+                    int(user.get("profit_level", 0)),
+                    int(user.get("energy_level", 0)),
+                )
+                + 1
+            )
             await add_weekly_tournament_score(
                 payload.user_id,
                 user.get("username"),
@@ -3540,7 +3973,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             "ghost_boost_expires_at": ghost_boost_expires_at,
             "daily_infinite_energy_active": daily_infinite_energy_active,
             "click_guard_suspicion_score": click_guard["suspicion_score"],
-            "referral_bonus_paid": referral_bonus
+            "referral_bonus_paid": referral_bonus,
         }
 
     except HTTPException:
@@ -3548,6 +3981,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
     except Exception as e:
         logger.error(f"Error in process_clicks_batch: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
 
 @app.get("/api/upgrade-prices/{user_id}")
 async def get_upgrade_prices(user_id: int, request: Request):
@@ -3558,7 +3992,11 @@ async def get_upgrade_prices(user_id: int, request: Request):
             raise HTTPException(status_code=404, detail="User not found")
 
         global_level = get_global_upgrade_level(user)
-        global_price = GLOBAL_UPGRADE_PRICES[global_level] if global_level < len(GLOBAL_UPGRADE_PRICES) else 0
+        global_price = (
+            GLOBAL_UPGRADE_PRICES[global_level]
+            if global_level < len(GLOBAL_UPGRADE_PRICES)
+            else 0
+        )
 
         return {
             "global": global_price,
@@ -3570,11 +4008,14 @@ async def get_upgrade_prices(user_id: int, request: Request):
         logger.error(f"Error in get_upgrade_prices: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 @app.post("/api/register")
 async def register_user(payload: RegisterRequest, request: Request):
     try:
         telegram_user = await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("register", request, payload.user_id, 10, 60, ip_limit=20)
+        await require_dual_rate_limit(
+            "register", request, payload.user_id, 10, 60, ip_limit=20
+        )
         await require_user_action_lock("register", payload.user_id, ttl=5)
         existing = await get_user(payload.user_id)
         valid_referrer_id = None
@@ -3616,7 +4057,7 @@ async def register_user(payload: RegisterRequest, request: Request):
         await create_user(
             user_id=payload.user_id,
             username=telegram_user.get("username") or payload.username,
-            referrer_id=valid_referrer_id
+            referrer_id=valid_referrer_id,
         )
 
         created_user = await get_user_cached(payload.user_id)
@@ -3626,9 +4067,8 @@ async def register_user(payload: RegisterRequest, request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-
-
 # ==================== REFERRALS ====================
+
 
 @app.get("/api/referral-data/{user_id}")
 async def get_referral_data(user_id: int, request: Request):
@@ -3638,426 +4078,21 @@ async def get_referral_data(user_id: int, request: Request):
         user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
+
         return {
             "count": user.get("referral_count", 0),
-            "earnings": user.get("referral_earnings", 0)
+            "earnings": user.get("referral_earnings", 0),
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error in get_referral_data: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# ==================== РњРРќР-РР“Р Р« ====================
 
-@app.post("/api/game/coinflip")
-async def play_coinflip(payload: GameRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("game:coinflip", payload.user_id, ttl=0.75)
-        await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
-        
-        user = await get_user_cached(payload.user_id)
-        if not user or user.get("coins", 0) < payload.bet:
-            raise HTTPException(status_code=400, detail="Not enough coins")
-
-        win = random.choice([True, False])
-        if win:
-            user["coins"] += payload.bet
-            message = f"You won +{payload.bet} coins!"
-        else:
-            user["coins"] -= payload.bet
-            message = f"You lost {payload.bet} coins"
-
-        updated_user = await apply_atomic_user_updates(
-            payload.user_id,
-            user,
-            {"coins": int(user["coins"])},
-            expected_fields=("coins",),
-            conflict_detail="Coinflip state changed, retry",
-        )
-
-        return {"success": True, "coins": int(updated_user.get("coins", 0)), "message": message}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in coinflip: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-@app.post("/api/game/slots")
-async def play_slots(payload: GameRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("game:slots", payload.user_id, ttl=0.75)
-        await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
-
-        user = await get_user_cached(payload.user_id)
-        if not user or user.get("coins", 0) < payload.bet:
-            raise HTTPException(status_code=400, detail="Not enough coins")
-
-        symbols = ["CH", "LM", "OR", "77", "DM", "ST"]
-        slots = [random.choice(symbols) for _ in range(3)]
-        win = len(set(slots)) == 1
-        multiplier = 10 if "77" in slots and win else 5 if "DM" in slots and win else 3
-
-        if win:
-            win_amount = payload.bet * multiplier
-            user["coins"] += win_amount
-            message = f"JACKPOT! +{win_amount} coins!"
-        else:
-            user["coins"] -= payload.bet
-            message = f"You lost {payload.bet} coins"
-
-        updated_user = await apply_atomic_user_updates(
-            payload.user_id,
-            user,
-            {"coins": int(user["coins"])},
-            expected_fields=("coins",),
-            conflict_detail="Slots state changed, retry",
-        )
-
-        return {"success": True, "coins": int(updated_user.get("coins", 0)), "slots": slots, "message": message}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in slots: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-@app.post("/api/game/dice")
-async def play_dice(payload: GameRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("game:dice", payload.user_id, ttl=0.75)
-        await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
-
-        user = await get_user_cached(payload.user_id)
-        if not user or user.get("coins", 0) < payload.bet:
-            raise HTTPException(status_code=400, detail="Not enough coins")
-
-        dice1 = random.randint(1, 6)
-        dice2 = random.randint(1, 6)
-        total = dice1 + dice2
-        win = False
-        multiplier = 1
-
-        if payload.prediction == "7" and total == 7:
-            win = True
-            multiplier = 5
-        elif payload.prediction == "even" and total % 2 == 0:
-            win = True
-            multiplier = 2
-        elif payload.prediction == "odd" and total % 2 == 1:
-            win = True
-            multiplier = 2
-
-        if win:
-            win_amount = payload.bet * multiplier
-            user["coins"] += win_amount
-            message = f"You won +{win_amount} coins!"
-        else:
-            user["coins"] -= payload.bet
-            message = f"You lost {payload.bet} coins"
-
-        updated_user = await apply_atomic_user_updates(
-            payload.user_id,
-            user,
-            {"coins": int(user["coins"])},
-            expected_fields=("coins",),
-            conflict_detail="Dice state changed, retry",
-        )
-
-        return {
-            "success": True,
-            "coins": int(updated_user.get("coins", 0)),
-            "dice1": dice1,
-            "dice2": dice2,
-            "message": message
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in dice: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.post("/api/game/roulette")
-async def play_roulette(payload: GameRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("game:roulette", payload.user_id, ttl=0.75)
-        await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
-
-        user = await get_user_cached(payload.user_id)
-        if not user or user.get("coins", 0) < payload.bet:
-            raise HTTPException(status_code=400, detail="Not enough coins")
-
-        red_numbers = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]
-        result = random.randint(0, 36)
-
-        if result == 0:
-            result_color = "green"
-            result_symbol = "GREEN"
-        elif result in red_numbers:
-            result_color = "red"
-            result_symbol = "RED"
-        else:
-            result_color = "black"
-            result_symbol = "BLACK"
-
-        win = False
-        multiplier = 0
-
-        if payload.bet_type == "number" and payload.bet_value == result:
-            win = True
-            multiplier = 35
-        elif payload.bet_type == "green" and result_color == "green":
-            win = True
-            multiplier = 35
-        elif payload.bet_type == result_color:
-            win = True
-            multiplier = 2
-
-        if win:
-            win_amount = payload.bet * multiplier
-            user["coins"] += win_amount
-            message = f"{result_symbol} {result} - You won +{win_amount} coins! (x{multiplier})"
-        else:
-            user["coins"] -= payload.bet
-            message = f"{result_symbol} {result} - You lost {payload.bet} coins"
-
-        updated_user = await apply_atomic_user_updates(
-            payload.user_id,
-            user,
-            {"coins": int(user["coins"])},
-            expected_fields=("coins",),
-            conflict_detail="Roulette state changed, retry",
-        )
-
-        return {
-            "success": True,
-            "coins": int(updated_user.get("coins", 0)),
-            "result_number": result,
-            "result_color": result_color,
-            "result_symbol": result_symbol,
-            "win": win,
-            "message": message
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in roulette: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.post("/api/game/luckybox")
-async def play_luckybox(payload: LuckyBoxRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("game:luckybox", payload.user_id, ttl=0.75)
-        await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
-
-        user = await get_user_cached(payload.user_id)
-        current_coins = int(user.get("coins", 0)) if user else 0
-        if not user or current_coins < payload.bet:
-            raise HTTPException(status_code=400, detail="Not enough coins")
-
-        outcomes = [0.0, 0.8, 1.6, 3.5]
-        random.shuffle(outcomes)
-        multiplier = float(outcomes[payload.box_index])
-        payout = max(0, int(payload.bet * multiplier))
-        new_coins = current_coins - payload.bet + payout
-
-        if multiplier > 1:
-            message = f"Lucky hit! x{multiplier:g} +{payout - payload.bet}"
-            outcome = "win"
-        elif multiplier == 0.8:
-            message = f"Soft save. You kept {payout} coins."
-            outcome = "refund"
-        else:
-            message = f"Bust. You lost {payload.bet} coins."
-            outcome = "lose"
-
-        updated_user = await apply_atomic_user_updates(
-            payload.user_id,
-            user,
-            {"coins": new_coins},
-            expected_fields=("coins",),
-            conflict_detail="Lucky box state changed, retry",
-        )
-
-        return {
-            "success": True,
-            "coins": int(updated_user.get("coins", new_coins)),
-            "message": message,
-            "outcome": outcome,
-            "multiplier": multiplier,
-            "payout": payout,
-            "profit": payout - payload.bet,
-            "outcomes": outcomes,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in luckybox: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.post("/api/game/crash/start")
-async def start_crash_ghost_round(payload: CrashGameStartRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("game:crash_start", payload.user_id, ttl=0.75)
-        await require_redis_rate_limit("game_action", payload.user_id, 30, 60)
-
-        redis_conn = await ensure_redis_available()
-        user = await get_user_cached(payload.user_id)
-        if not user or int(user.get("coins", 0)) < payload.bet:
-            raise HTTPException(status_code=400, detail="Not enough coins")
-
-        session_key = f"game:crash:{payload.user_id}"
-        raw_session = await redis_conn.get(session_key)
-        if raw_session:
-            try:
-                active_session = json.loads(raw_session)
-                runtime = get_crash_ghost_runtime(active_session)
-                if not runtime["crashed"] and not active_session.get("claimed"):
-                    raise HTTPException(status_code=409, detail="Crash round already active")
-            except HTTPException:
-                raise
-            except Exception:
-                pass
-
-        new_coins = int(user.get("coins", 0)) - payload.bet
-        session = build_crash_ghost_session(payload.bet, payload.user_id)
-        session["session_id"] = f"{payload.user_id}:{int(session['started_at'] * 1000)}:{random.randint(100000, 999999)}"
-
-        updated_user = await apply_atomic_user_updates(
-            payload.user_id,
-            user,
-            {"coins": new_coins},
-            expected_fields=("coins",),
-            conflict_detail="Crash round state changed, retry",
-        )
-        await redis_conn.setex(session_key, CRASH_GHOST_SESSION_TTL_SECONDS, json.dumps(session))
-
-        return {
-            "success": True,
-            "session_id": session["session_id"],
-            "coins": int(updated_user.get("coins", new_coins)),
-            "multiplier": 1.0,
-            "server_started_at": datetime.utcfromtimestamp(session["started_at"]).isoformat(),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in start_crash_ghost_round: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.get("/api/game/crash/status/{user_id}/{session_id}")
-async def get_crash_ghost_status(user_id: int, session_id: str, request: Request):
-    try:
-        await require_telegram_user(request, user_id)
-        redis_conn = await ensure_redis_available()
-        session_key = f"game:crash:{user_id}"
-        raw_session = await redis_conn.get(session_key)
-        if not raw_session:
-            return {"active": False}
-
-        session = json.loads(raw_session)
-        if session.get("session_id") != session_id:
-            raise HTTPException(status_code=404, detail="Crash round not found")
-
-        runtime = get_crash_ghost_runtime(session)
-        if runtime["crashed"]:
-            await redis_conn.delete(session_key)
-            return {
-                "active": False,
-                "crashed": True,
-                "multiplier": runtime["crash_at"],
-                "crash_at": runtime["crash_at"],
-            }
-
-        return {
-            "active": True,
-            "crashed": False,
-            "multiplier": runtime["multiplier"],
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in get_crash_ghost_status: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.post("/api/game/crash/cashout")
-async def cashout_crash_ghost_round(payload: CrashGameCashoutRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("game:crash_cashout", payload.user_id, ttl=0.35)
-        await require_redis_rate_limit("game_action", payload.user_id, 40, 60)
-
-        redis_conn = await ensure_redis_available()
-        user = await get_user_cached(payload.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        session_key = f"game:crash:{payload.user_id}"
-        raw_session = await redis_conn.get(session_key)
-        if not raw_session:
-            raise HTTPException(status_code=404, detail="Crash round not found")
-
-        session = json.loads(raw_session)
-        if session.get("session_id") != payload.session_id:
-            raise HTTPException(status_code=404, detail="Crash round not found")
-
-        runtime = get_crash_ghost_runtime(session)
-        if runtime["crashed"]:
-            await redis_conn.delete(session_key)
-            return {
-                "success": False,
-                "crashed": True,
-                "coins": int(user.get("coins", 0)),
-                "crash_at": runtime["crash_at"],
-                "message": f"Ghost crashed. You lost {session.get('bet', 0)} coins.",
-            }
-
-        bet = int(session.get("bet", 0))
-        payout = max(0, int(bet * runtime["multiplier"]))
-        profit = payout - bet
-
-        cashout_result = await record_crash_ghost_cashout(
-            payload.user_id,
-            payload.session_id,
-            bet,
-            payout,
-            runtime["multiplier"],
-            profit,
-        )
-        if cashout_result is None:
-            raise HTTPException(status_code=409, detail="Crash cashout state changed, retry")
-
-        await invalidate_user_cache(payload.user_id)
-        await redis_conn.delete(session_key)
-
-        paid = int(cashout_result["payout"])
-        return {
-            "success": True,
-            "crashed": False,
-            "coins": int(cashout_result["coins"]),
-            "payout": paid,
-            "profit": int(cashout_result["profit"]),
-            "multiplier": cashout_result["multiplier"],
-            "message": f"Ghost paid {paid} coins. Profit: +{cashout_result['profit']}",
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in cashout_crash_ghost_round: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
 # ==================== TOURNAMENT ENDPOINTS ====================
+
 
 @app.post("/api/online/heartbeat")
 async def online_heartbeat(payload: UserIdRequest, request: Request):
@@ -4090,7 +4125,13 @@ async def get_weekly_tournament_overview(user_id: int, request: Request):
         starts_at, ends_at = get_weekly_tournament_season_window(now)
         season_key = get_weekly_tournament_season_key(now)
         season_rows = await list_weekly_tournament_seasons(limit=12)
-        active_season = next((item for item in season_rows if item.get("season_key") == season_key), None) or {}
+        active_season = (
+            next(
+                (item for item in season_rows if item.get("season_key") == season_key),
+                None,
+            )
+            or {}
+        )
         player = await get_weekly_tournament_player_entry(user_id, season_key)
         pending_ton_notice = await get_pending_ton_wallet_notice(user_id)
 
@@ -4102,7 +4143,9 @@ async def get_weekly_tournament_overview(user_id: int, request: Request):
             "ends_at": ends_at.isoformat(),
             "time_left_seconds": max(0, int((ends_at - now).total_seconds())),
             "payout_fund_cents": int(active_season.get("payout_fund_cents") or 0),
-            "gross_ad_revenue_cents": int(active_season.get("gross_ad_revenue_cents") or 0),
+            "gross_ad_revenue_cents": int(
+                active_season.get("gross_ad_revenue_cents") or 0
+            ),
             "leagues": WEEKLY_LEAGUE_LEVEL_RANGES,
             "fund_splits": WEEKLY_LEAGUE_FUND_SPLITS,
             "top3_splits": WEEKLY_TOP3_PAYOUT_SPLITS,
@@ -4122,7 +4165,9 @@ async def get_weekly_tournament_overview(user_id: int, request: Request):
 
 
 @app.get("/api/weekly-tournament/leaderboard/{league}")
-async def get_weekly_tournament_leaderboard_endpoint(league: str, season_key: str | None = None, limit: int = 50):
+async def get_weekly_tournament_leaderboard_endpoint(
+    league: str, season_key: str | None = None, limit: int = 50
+):
     try:
         league = (league or "").strip().lower()
         if league not in WEEKLY_LEAGUE_ORDER:
@@ -4148,7 +4193,9 @@ async def get_weekly_tournament_leaderboard_endpoint(league: str, season_key: st
 
 
 @app.get("/api/weekly-tournament/player/{user_id}")
-async def get_weekly_tournament_player_endpoint(user_id: int, request: Request, season_key: str | None = None):
+async def get_weekly_tournament_player_endpoint(
+    user_id: int, request: Request, season_key: str | None = None
+):
     try:
         await require_telegram_user(request, user_id)
         effective_season_key = season_key or get_weekly_tournament_season_key()
@@ -4166,7 +4213,9 @@ async def get_weekly_tournament_player_endpoint(user_id: int, request: Request, 
 
 
 @app.get("/api/weekly-tournament/results/{league}")
-async def get_weekly_tournament_results_endpoint(league: str, season_key: str | None = None, limit: int = 50):
+async def get_weekly_tournament_results_endpoint(
+    league: str, season_key: str | None = None, limit: int = 50
+):
     try:
         league = (league or "").strip().lower()
         if league not in WEEKLY_LEAGUE_ORDER:
@@ -4174,9 +4223,19 @@ async def get_weekly_tournament_results_endpoint(league: str, season_key: str | 
 
         season_rows = await list_weekly_tournament_seasons(limit=52)
         if season_key:
-            season = next((item for item in season_rows if item["season_key"] == season_key and item["status"] == "finalized"), None)
+            season = next(
+                (
+                    item
+                    for item in season_rows
+                    if item["season_key"] == season_key
+                    and item["status"] == "finalized"
+                ),
+                None,
+            )
         else:
-            season = next((item for item in season_rows if item["status"] == "finalized"), None)
+            season = next(
+                (item for item in season_rows if item["status"] == "finalized"), None
+            )
 
         if not season:
             return {
@@ -4186,7 +4245,9 @@ async def get_weekly_tournament_results_endpoint(league: str, season_key: str | 
                 "players": [],
             }
 
-        winners = await get_weekly_tournament_winners(season["season_key"], league=league)
+        winners = await get_weekly_tournament_winners(
+            season["season_key"], league=league
+        )
         async with AsyncSessionLocal() as session:
             payouts_result = await session.execute(
                 select(WeeklyTournamentTonPayout).where(
@@ -4195,23 +4256,26 @@ async def get_weekly_tournament_results_endpoint(league: str, season_key: str | 
                 )
             )
             payout_rows = {
-                int(row.user_id): row
-                for row in payouts_result.scalars().all()
+                int(row.user_id): row for row in payouts_result.scalars().all()
             }
 
         enriched_winners = []
         for winner in winners:
             payout_row = payout_rows.get(int(winner["user_id"]))
             winner_payload = dict(winner)
-            winner_payload["ton_amount_nano"] = int(getattr(payout_row, "ton_amount_nano", 0) or 0)
+            winner_payload["ton_amount_nano"] = int(
+                getattr(payout_row, "ton_amount_nano", 0) or 0
+            )
             winner_payload["ton_payout_status"] = getattr(payout_row, "status", None)
-            winner_payload["ton_wallet_address"] = getattr(payout_row, "wallet_address", None)
+            winner_payload["ton_wallet_address"] = getattr(
+                payout_row, "wallet_address", None
+            )
             enriched_winners.append(winner_payload)
         return {
             "success": True,
             "league": league,
             "season": season,
-            "players": enriched_winners[:max(1, min(50, int(limit or 50)))],
+            "players": enriched_winners[: max(1, min(50, int(limit or 50)))],
         }
     except HTTPException:
         raise
@@ -4245,7 +4309,9 @@ async def admin_overview(request: Request):
         season_key = get_weekly_tournament_season_key(now)
         online_now = await get_online_users_count()
         season_rows = await list_weekly_tournament_seasons(limit=12)
-        active_season = next((item for item in season_rows if item["season_key"] == season_key), None)
+        active_season = next(
+            (item for item in season_rows if item["season_key"] == season_key), None
+        )
 
         async with AsyncSessionLocal() as session:
             total_users_result = await session.execute(select(func.count(User.id)))
@@ -4253,11 +4319,10 @@ async def admin_overview(request: Request):
 
             league_counts_result = await session.execute(
                 select(
-                    WeeklyTournamentEntry.league,
-                    func.count(WeeklyTournamentEntry.id)
-                ).where(
-                    WeeklyTournamentEntry.season_key == season_key
-                ).group_by(WeeklyTournamentEntry.league)
+                    WeeklyTournamentEntry.league, func.count(WeeklyTournamentEntry.id)
+                )
+                .where(WeeklyTournamentEntry.season_key == season_key)
+                .group_by(WeeklyTournamentEntry.league)
             )
             league_counts = {league: 0 for league in WEEKLY_LEAGUE_ORDER}
             for league, count in league_counts_result.all():
@@ -4266,7 +4331,9 @@ async def admin_overview(request: Request):
 
         top_preview = {}
         for league in WEEKLY_LEAGUE_ORDER:
-            players = await get_weekly_tournament_leaderboard(season_key=season_key, league=league, limit=3)
+            players = await get_weekly_tournament_leaderboard(
+                season_key=season_key, league=league, limit=3
+            )
             top_preview[league] = players
 
         return {
@@ -4290,16 +4357,28 @@ async def admin_overview(request: Request):
 
 
 @app.get("/api/admin/diagnostics/endpoints")
-async def admin_endpoint_diagnostics(request: Request, limit: int = 20, sort: str = "requests"):
+async def admin_endpoint_diagnostics(
+    request: Request, limit: int = 20, sort: str = "requests"
+):
     try:
         await require_admin_access(request)
         max_items = max(1, min(100, int(limit or 20)))
         sort_key = (sort or "requests").strip().lower()
-        supported_sort = {"requests", "errors", "p95_ms", "avg_ms", "status_429", "status_5xx"}
+        supported_sort = {
+            "requests",
+            "errors",
+            "p95_ms",
+            "avg_ms",
+            "status_429",
+            "status_5xx",
+        }
         if sort_key not in supported_sort:
             sort_key = "requests"
 
-        rows = [serialize_endpoint_diagnostic(stats) for stats in ENDPOINT_DIAGNOSTICS.values()]
+        rows = [
+            serialize_endpoint_diagnostic(stats)
+            for stats in ENDPOINT_DIAGNOSTICS.values()
+        ]
         rows.sort(key=lambda item: float(item.get(sort_key, 0) or 0), reverse=True)
         top_rows = rows[:max_items]
 
@@ -4332,7 +4411,14 @@ async def admin_rewarded_ads_summary(request: Request, hours: int = 24):
     try:
         await require_admin_access(request)
         summary = await get_rewarded_ads_admin_summary(hours=hours)
-        tracked_actions = ("boost", "autoclicker", "tasks", "ghost", "energy_restore", "skins")
+        tracked_actions = (
+            "boost",
+            "autoclicker",
+            "tasks",
+            "ghost",
+            "energy_restore",
+            "skins",
+        )
         actions = {
             action: {
                 "total": int(summary["actions_total"].get(action, 0)),
@@ -4394,7 +4480,9 @@ async def admin_players_search(
 ):
     try:
         await require_admin_access(request)
-        effective_season_key = (season_key or get_weekly_tournament_season_key() or "").strip()
+        effective_season_key = (
+            season_key or get_weekly_tournament_season_key() or ""
+        ).strip()
         search_query = (query or "").strip()
         normalized_query = search_query.lstrip("@").strip()
         search_limit = max(1, min(50, int(limit or 20)))
@@ -4409,39 +4497,73 @@ async def admin_players_search(
                     matching_user_ids: set[int] = set()
 
                     users_match_result = await session.execute(
-                        select(User.user_id).where(
-                            func.lower(func.coalesce(User.username, "")).like(f"%{lowered}%")
-                        ).limit(search_limit * 3)
+                        select(User.user_id)
+                        .where(
+                            func.lower(func.coalesce(User.username, "")).like(
+                                f"%{lowered}%"
+                            )
+                        )
+                        .limit(search_limit * 3)
                     )
-                    matching_user_ids.update(int(row[0]) for row in users_match_result.all() if row and row[0] is not None)
+                    matching_user_ids.update(
+                        int(row[0])
+                        for row in users_match_result.all()
+                        if row and row[0] is not None
+                    )
 
                     entry_match_result = await session.execute(
-                        select(WeeklyTournamentEntry.user_id).where(
-                            func.lower(func.coalesce(WeeklyTournamentEntry.username, "")).like(f"%{lowered}%")
-                        ).limit(search_limit * 3)
+                        select(WeeklyTournamentEntry.user_id)
+                        .where(
+                            func.lower(
+                                func.coalesce(WeeklyTournamentEntry.username, "")
+                            ).like(f"%{lowered}%")
+                        )
+                        .limit(search_limit * 3)
                     )
-                    matching_user_ids.update(int(row[0]) for row in entry_match_result.all() if row and row[0] is not None)
+                    matching_user_ids.update(
+                        int(row[0])
+                        for row in entry_match_result.all()
+                        if row and row[0] is not None
+                    )
 
                     winner_match_result = await session.execute(
-                        select(WeeklyTournamentWinner.user_id).where(
-                            func.lower(func.coalesce(WeeklyTournamentWinner.username, "")).like(f"%{lowered}%")
-                        ).limit(search_limit * 3)
+                        select(WeeklyTournamentWinner.user_id)
+                        .where(
+                            func.lower(
+                                func.coalesce(WeeklyTournamentWinner.username, "")
+                            ).like(f"%{lowered}%")
+                        )
+                        .limit(search_limit * 3)
                     )
-                    matching_user_ids.update(int(row[0]) for row in winner_match_result.all() if row and row[0] is not None)
+                    matching_user_ids.update(
+                        int(row[0])
+                        for row in winner_match_result.all()
+                        if row and row[0] is not None
+                    )
 
                     payout_match_result = await session.execute(
-                        select(WeeklyTournamentTonPayout.user_id).where(
-                            func.lower(func.coalesce(WeeklyTournamentTonPayout.username, "")).like(f"%{lowered}%")
-                        ).limit(search_limit * 3)
+                        select(WeeklyTournamentTonPayout.user_id)
+                        .where(
+                            func.lower(
+                                func.coalesce(WeeklyTournamentTonPayout.username, "")
+                            ).like(f"%{lowered}%")
+                        )
+                        .limit(search_limit * 3)
                     )
-                    matching_user_ids.update(int(row[0]) for row in payout_match_result.all() if row and row[0] is not None)
+                    matching_user_ids.update(
+                        int(row[0])
+                        for row in payout_match_result.all()
+                        if row and row[0] is not None
+                    )
 
                     if matching_user_ids:
                         stmt = stmt.where(User.user_id.in_(sorted(matching_user_ids)))
                     else:
                         stmt = stmt.where(
                             or_(
-                                func.lower(func.coalesce(User.username, "")).like(f"%{lowered}%"),
+                                func.lower(func.coalesce(User.username, "")).like(
+                                    f"%{lowered}%"
+                                ),
                                 User.user_id == -1,
                             )
                         )
@@ -4458,7 +4580,9 @@ async def admin_players_search(
                         WeeklyTournamentEntry.user_id.in_(user_ids),
                     )
                 )
-                entry_map = {int(row.user_id): row for row in entries_result.scalars().all()}
+                entry_map = {
+                    int(row.user_id): row for row in entries_result.scalars().all()
+                }
 
         reviews_map = await get_admin_fraud_reviews(user_ids) if user_ids else {}
 
@@ -4466,39 +4590,51 @@ async def admin_players_search(
         for user in users:
             extra = parse_extra_data_object(user.extra_data)
             wallet = get_ton_wallet_from_user({"extra_data": extra})
-            owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
-            selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
+            owned_skins = normalize_owned_skins(
+                extra.get("owned_skins", [DEFAULT_SKIN_ID])
+            )
+            selected_skin = normalize_selected_skin(
+                extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins
+            )
             entry = entry_map.get(int(user.user_id))
             review = reviews_map.get(int(user.user_id), {}) or {}
 
-            players.append({
-                "user_id": int(user.user_id),
-                "username": user.username,
-                "created_at": user.created_at.isoformat() if user.created_at else None,
-                "coins": int(user.coins or 0),
-                "energy": int(user.energy or 0),
-                "max_energy": int(user.max_energy or 0),
-                "level": int(user.level or 0),
-                "referral_count": int(user.referral_count or 0),
-                "owned_skins_count": int(len(owned_skins)),
-                "selected_skin": selected_skin,
-                "wallet_connected": bool(wallet.get("connected")),
-                "wallet_verified": bool(wallet.get("verified")),
-                "wallet_masked": wallet.get("masked_address"),
-                "season_key": effective_season_key,
-                "season_entry": {
-                    "league": entry.league,
-                    "score": int(entry.score or 0),
-                    "display_level": int(entry.display_level or 1),
-                    "eligible_for_payout": bool(entry.eligible_for_payout),
-                    "fraud_flag": bool(entry.fraud_flag),
-                } if entry else None,
-                "fraud_review": {
-                    "status": review.get("status") or "ok",
-                    "reason": review.get("reason"),
-                    "disqualify_from_payout": bool(review.get("disqualify_from_payout")),
-                },
-            })
+            players.append(
+                {
+                    "user_id": int(user.user_id),
+                    "username": user.username,
+                    "created_at": user.created_at.isoformat()
+                    if user.created_at
+                    else None,
+                    "coins": int(user.coins or 0),
+                    "energy": int(user.energy or 0),
+                    "max_energy": int(user.max_energy or 0),
+                    "level": int(user.level or 0),
+                    "referral_count": int(user.referral_count or 0),
+                    "owned_skins_count": int(len(owned_skins)),
+                    "selected_skin": selected_skin,
+                    "wallet_connected": bool(wallet.get("connected")),
+                    "wallet_verified": bool(wallet.get("verified")),
+                    "wallet_masked": wallet.get("masked_address"),
+                    "season_key": effective_season_key,
+                    "season_entry": {
+                        "league": entry.league,
+                        "score": int(entry.score or 0),
+                        "display_level": int(entry.display_level or 1),
+                        "eligible_for_payout": bool(entry.eligible_for_payout),
+                        "fraud_flag": bool(entry.fraud_flag),
+                    }
+                    if entry
+                    else None,
+                    "fraud_review": {
+                        "status": review.get("status") or "ok",
+                        "reason": review.get("reason"),
+                        "disqualify_from_payout": bool(
+                            review.get("disqualify_from_payout")
+                        ),
+                    },
+                }
+            )
 
         return {
             "success": True,
@@ -4514,10 +4650,14 @@ async def admin_players_search(
 
 
 @app.get("/api/admin/players/{user_id}")
-async def admin_player_detail(user_id: int, request: Request, season_key: str | None = None):
+async def admin_player_detail(
+    user_id: int, request: Request, season_key: str | None = None
+):
     try:
         await require_admin_access(request)
-        effective_season_key = (season_key or get_weekly_tournament_season_key() or "").strip()
+        effective_season_key = (
+            season_key or get_weekly_tournament_season_key() or ""
+        ).strip()
 
         async with AsyncSessionLocal() as session:
             user_result = await session.execute(
@@ -4529,8 +4669,12 @@ async def admin_player_detail(user_id: int, request: Request, season_key: str | 
 
             extra = parse_extra_data_object(user.extra_data)
             wallet = get_ton_wallet_from_user({"extra_data": extra})
-            owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
-            selected_skin = normalize_selected_skin(extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins)
+            owned_skins = normalize_owned_skins(
+                extra.get("owned_skins", [DEFAULT_SKIN_ID])
+            )
+            selected_skin = normalize_selected_skin(
+                extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins
+            )
 
             selected_entry = None
             selected_winner = None
@@ -4573,19 +4717,17 @@ async def admin_player_detail(user_id: int, request: Request, season_key: str | 
                     selected_rank = int(rank_result.scalar() or 0) + 1
 
             reward_rows_result = await session.execute(
-                select(RewardedAdClaim).where(
-                    RewardedAdClaim.user_id == user_id
-                ).order_by(RewardedAdClaim.created_at.desc()).limit(20)
+                select(RewardedAdClaim)
+                .where(RewardedAdClaim.user_id == user_id)
+                .order_by(RewardedAdClaim.created_at.desc())
+                .limit(20)
             )
             reward_rows = reward_rows_result.scalars().all()
 
             reward_summary_result = await session.execute(
-                select(
-                    RewardedAdClaim.action,
-                    func.count(RewardedAdClaim.id)
-                ).where(
-                    RewardedAdClaim.user_id == user_id
-                ).group_by(RewardedAdClaim.action)
+                select(RewardedAdClaim.action, func.count(RewardedAdClaim.id))
+                .where(RewardedAdClaim.user_id == user_id)
+                .group_by(RewardedAdClaim.action)
             )
             reward_summary = {
                 str(action): int(total or 0)
@@ -4594,40 +4736,45 @@ async def admin_player_detail(user_id: int, request: Request, season_key: str | 
             }
 
             skin_purchases_result = await session.execute(
-                select(StarsSkinPurchase).where(
-                    StarsSkinPurchase.user_id == user_id
-                ).order_by(StarsSkinPurchase.created_at.desc()).limit(20)
+                select(StarsSkinPurchase)
+                .where(StarsSkinPurchase.user_id == user_id)
+                .order_by(StarsSkinPurchase.created_at.desc())
+                .limit(20)
             )
             skin_purchases = skin_purchases_result.scalars().all()
 
             payout_rows_result = await session.execute(
-                select(WeeklyTournamentTonPayout).where(
-                    WeeklyTournamentTonPayout.user_id == user_id
-                ).order_by(
+                select(WeeklyTournamentTonPayout)
+                .where(WeeklyTournamentTonPayout.user_id == user_id)
+                .order_by(
                     WeeklyTournamentTonPayout.updated_at.desc(),
                     WeeklyTournamentTonPayout.created_at.desc(),
-                ).limit(20)
+                )
+                .limit(20)
             )
             payout_rows = payout_rows_result.scalars().all()
 
             task_rows_result = await session.execute(
-                select(UserTask).where(
-                    UserTask.user_id == user_id
-                ).order_by(UserTask.completed_at.desc()).limit(20)
+                select(UserTask)
+                .where(UserTask.user_id == user_id)
+                .order_by(UserTask.completed_at.desc())
+                .limit(20)
             )
             task_rows = task_rows_result.scalars().all()
 
             recent_entries_result = await session.execute(
-                select(WeeklyTournamentEntry).where(
-                    WeeklyTournamentEntry.user_id == user_id
-                ).order_by(WeeklyTournamentEntry.season_key.desc()).limit(8)
+                select(WeeklyTournamentEntry)
+                .where(WeeklyTournamentEntry.user_id == user_id)
+                .order_by(WeeklyTournamentEntry.season_key.desc())
+                .limit(8)
             )
             recent_entries = recent_entries_result.scalars().all()
 
             recent_winners_result = await session.execute(
-                select(WeeklyTournamentWinner).where(
-                    WeeklyTournamentWinner.user_id == user_id
-                ).order_by(WeeklyTournamentWinner.season_key.desc()).limit(8)
+                select(WeeklyTournamentWinner)
+                .where(WeeklyTournamentWinner.user_id == user_id)
+                .order_by(WeeklyTournamentWinner.season_key.desc())
+                .limit(8)
             )
             recent_winners = recent_winners_result.scalars().all()
 
@@ -4678,16 +4825,22 @@ async def admin_player_detail(user_id: int, request: Request, season_key: str | 
                         "eligible_for_payout": bool(selected_entry.eligible_for_payout),
                         "fraud_flag": bool(selected_entry.fraud_flag),
                         "rank_estimate": selected_rank,
-                    } if selected_entry else None,
+                    }
+                    if selected_entry
+                    else None,
                     "winner": {
                         "league": selected_winner.league,
                         "rank": int(selected_winner.rank or 0),
                         "score": int(selected_winner.score or 0),
                         "payout_cents": int(selected_winner.payout_cents or 0),
                         "stars_reward": int(selected_winner.stars_reward or 0),
-                        "eligible_for_payout": bool(selected_winner.eligible_for_payout),
+                        "eligible_for_payout": bool(
+                            selected_winner.eligible_for_payout
+                        ),
                         "fraud_flag": bool(selected_winner.fraud_flag),
-                    } if selected_winner else None,
+                    }
+                    if selected_winner
+                    else None,
                     "ton_payout": {
                         "status": selected_payout.status,
                         "payout_cents": int(selected_payout.payout_cents or 0),
@@ -4695,8 +4848,12 @@ async def admin_player_detail(user_id: int, request: Request, season_key: str | 
                         "wallet_address": selected_payout.wallet_address,
                         "tx_hash": selected_payout.tx_hash,
                         "note": selected_payout.note,
-                        "updated_at": selected_payout.updated_at.isoformat() if selected_payout.updated_at else None,
-                    } if selected_payout else None,
+                        "updated_at": selected_payout.updated_at.isoformat()
+                        if selected_payout.updated_at
+                        else None,
+                    }
+                    if selected_payout
+                    else None,
                 },
                 "recent_tournament_entries": [
                     {
@@ -4706,7 +4863,9 @@ async def admin_player_detail(user_id: int, request: Request, season_key: str | 
                         "display_level": int(row.display_level or 1),
                         "eligible_for_payout": bool(row.eligible_for_payout),
                         "fraud_flag": bool(row.fraud_flag),
-                        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                        "updated_at": row.updated_at.isoformat()
+                        if row.updated_at
+                        else None,
                     }
                     for row in recent_entries
                 ],
@@ -4720,7 +4879,9 @@ async def admin_player_detail(user_id: int, request: Request, season_key: str | 
                         "stars_reward": int(row.stars_reward or 0),
                         "eligible_for_payout": bool(row.eligible_for_payout),
                         "fraud_flag": bool(row.fraud_flag),
-                        "created_at": row.created_at.isoformat() if row.created_at else None,
+                        "created_at": row.created_at.isoformat()
+                        if row.created_at
+                        else None,
                     }
                     for row in recent_winners
                 ],
@@ -4729,7 +4890,9 @@ async def admin_player_detail(user_id: int, request: Request, season_key: str | 
                     "recent": [
                         {
                             "action": row.action,
-                            "created_at": row.created_at.isoformat() if row.created_at else None,
+                            "created_at": row.created_at.isoformat()
+                            if row.created_at
+                            else None,
                             "metadata": parse_json_object(row.metadata_json),
                         }
                         for row in reward_rows
@@ -4738,7 +4901,9 @@ async def admin_player_detail(user_id: int, request: Request, season_key: str | 
                 "completed_tasks": [
                     {
                         "task_id": row.task_id,
-                        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+                        "completed_at": row.completed_at.isoformat()
+                        if row.completed_at
+                        else None,
                     }
                     for row in task_rows
                 ],
@@ -4748,7 +4913,9 @@ async def admin_player_detail(user_id: int, request: Request, season_key: str | 
                         "stars_amount": int(row.stars_amount or 0),
                         "currency": row.currency,
                         "telegram_charge_id": row.telegram_charge_id,
-                        "created_at": row.created_at.isoformat() if row.created_at else None,
+                        "created_at": row.created_at.isoformat()
+                        if row.created_at
+                        else None,
                     }
                     for row in skin_purchases
                 ],
@@ -4763,14 +4930,18 @@ async def admin_player_detail(user_id: int, request: Request, season_key: str | 
                         "ton_amount_nano": int(row.ton_amount_nano or 0),
                         "tx_hash": row.tx_hash,
                         "note": row.note,
-                        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                        "updated_at": row.updated_at.isoformat()
+                        if row.updated_at
+                        else None,
                     }
                     for row in payout_rows
                 ],
                 "fraud_review": {
                     "status": review.get("status") or "ok",
                     "reason": review.get("reason"),
-                    "disqualify_from_payout": bool(review.get("disqualify_from_payout")),
+                    "disqualify_from_payout": bool(
+                        review.get("disqualify_from_payout")
+                    ),
                     "updated_at": review.get("updated_at"),
                 },
                 "support": {
@@ -4788,7 +4959,9 @@ async def admin_player_detail(user_id: int, request: Request, season_key: str | 
 
 
 @app.post("/api/admin/fraud/user/{user_id}")
-async def admin_update_fraud_status(user_id: int, payload: AdminFraudUpdateRequest, request: Request):
+async def admin_update_fraud_status(
+    user_id: int, payload: AdminFraudUpdateRequest, request: Request
+):
     try:
         await require_admin_access(request)
         status = (payload.status or "").strip().lower()
@@ -4847,7 +5020,9 @@ async def admin_weekly_tournament_season_detail(season_key: str, request: Reques
     try:
         await require_admin_access(request)
         season_rows = await list_weekly_tournament_seasons(limit=52)
-        season = next((item for item in season_rows if item["season_key"] == season_key), None)
+        season = next(
+            (item for item in season_rows if item["season_key"] == season_key), None
+        )
         winners = await get_weekly_tournament_winners(season_key)
 
         leagues = {}
@@ -4855,7 +5030,9 @@ async def admin_weekly_tournament_season_detail(season_key: str, request: Reques
             leagues[league] = {
                 "range": WEEKLY_LEAGUE_LEVEL_RANGES[league],
                 "fund_split": WEEKLY_LEAGUE_FUND_SPLITS[league],
-                "top50": await get_weekly_tournament_leaderboard(season_key=season_key, league=league, limit=50),
+                "top50": await get_weekly_tournament_leaderboard(
+                    season_key=season_key, league=league, limit=50
+                ),
                 "winners": [winner for winner in winners if winner["league"] == league],
             }
 
@@ -4878,11 +5055,17 @@ async def admin_weekly_tournament_season_detail(season_key: str, request: Reques
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-async def fetch_ton_transactions_for_accounts(accounts: list[str], start_utime: int) -> list[dict]:
+async def fetch_ton_transactions_for_accounts(
+    accounts: list[str], start_utime: int
+) -> list[dict]:
     if not accounts:
         return []
 
-    params: list[tuple[str, str]] = [("limit", "500"), ("sort", "desc"), ("start_utime", str(max(0, int(start_utime or 0))))]
+    params: list[tuple[str, str]] = [
+        ("limit", "500"),
+        ("sort", "desc"),
+        ("start_utime", str(max(0, int(start_utime or 0)))),
+    ]
     for account in accounts:
         params.append(("account", account))
 
@@ -4891,7 +5074,9 @@ async def fetch_ton_transactions_for_accounts(accounts: list[str], start_utime: 
         headers["X-API-Key"] = TON_VERIFIER_API_KEY
 
     async with httpx.AsyncClient(timeout=TON_VERIFIER_TIMEOUT_SECONDS) as client:
-        response = await client.get(f"{TON_VERIFIER_API_BASE}/transactions", params=params, headers=headers)
+        response = await client.get(
+            f"{TON_VERIFIER_API_BASE}/transactions", params=params, headers=headers
+        )
         response.raise_for_status()
         payload = response.json()
 
@@ -4903,7 +5088,11 @@ async def fetch_ton_transactions_for_accounts(accounts: list[str], start_utime: 
     return []
 
 
-def match_ton_queue_rows_to_transactions(rows: list[WeeklyTournamentTonPayout], transactions: list[dict], sender_wallet_address: str) -> tuple[list[dict], set[int]]:
+def match_ton_queue_rows_to_transactions(
+    rows: list[WeeklyTournamentTonPayout],
+    transactions: list[dict],
+    sender_wallet_address: str,
+) -> tuple[list[dict], set[int]]:
     matched_rows: list[dict] = []
     matched_user_ids: set[int] = set()
     sender_variants = ton_wallet_normalized_variants(sender_wallet_address)
@@ -4928,27 +5117,35 @@ def match_ton_queue_rows_to_transactions(rows: list[WeeklyTournamentTonPayout], 
 
             if aborted:
                 continue
-            if sender_variants and not ton_wallet_normalized_variants(source).intersection(sender_variants):
+            if sender_variants and not ton_wallet_normalized_variants(
+                source
+            ).intersection(sender_variants):
                 continue
             if destination and not ton_wallets_equal(destination, row.wallet_address):
                 continue
             if value != int(row.ton_amount_nano or 0):
                 continue
 
-            matched_rows.append({
-                "user_id": int(row.user_id),
-                "tx_hash": tx_hash,
-                "confirmed_at": tx_now,
-            })
+            matched_rows.append(
+                {
+                    "user_id": int(row.user_id),
+                    "tx_hash": tx_hash,
+                    "confirmed_at": tx_now,
+                }
+            )
             matched_user_ids.add(int(row.user_id))
             break
 
     return matched_rows, matched_user_ids
 
 
-async def build_weekly_ton_payout_candidates(season_key: str, ton_price_usd: float) -> tuple[dict | None, list[dict], dict]:
+async def build_weekly_ton_payout_candidates(
+    season_key: str, ton_price_usd: float
+) -> tuple[dict | None, list[dict], dict]:
     season_rows = await list_weekly_tournament_seasons(limit=52)
-    season = next((item for item in season_rows if item["season_key"] == season_key), None)
+    season = next(
+        (item for item in season_rows if item["season_key"] == season_key), None
+    )
     if not season:
         return None, [], {"with_wallet": 0, "without_wallet": 0, "without_payout": 0}
 
@@ -4958,14 +5155,22 @@ async def build_weekly_ton_payout_candidates(season_key: str, ton_price_usd: flo
 
     entries_by_league: dict[str, list[dict]] = {}
     for league in WEEKLY_LEAGUE_ORDER:
-        entries_by_league[league] = await get_weekly_tournament_leaderboard(season_key=season_key, league=league, limit=50)
+        entries_by_league[league] = await get_weekly_tournament_leaderboard(
+            season_key=season_key, league=league, limit=50
+        )
 
-    user_ids = [int(entry["user_id"]) for league_entries in entries_by_league.values() for entry in league_entries]
+    user_ids = [
+        int(entry["user_id"])
+        for league_entries in entries_by_league.values()
+        for entry in league_entries
+    ]
     wallet_map: dict[int, dict] = {}
 
     if user_ids:
         async with AsyncSessionLocal() as session:
-            users_result = await session.execute(select(User).where(User.user_id.in_(user_ids)))
+            users_result = await session.execute(
+                select(User).where(User.user_id.in_(user_ids))
+            )
             user_rows = users_result.scalars().all()
             for row in user_rows:
                 extra_data = {}
@@ -4984,7 +5189,9 @@ async def build_weekly_ton_payout_candidates(season_key: str, ton_price_usd: flo
 
     for league in WEEKLY_LEAGUE_ORDER:
         entries = entries_by_league.get(league) or []
-        league_fund_cents = int(total_fund_cents * WEEKLY_LEAGUE_FUND_SPLITS.get(league, 0))
+        league_fund_cents = int(
+            total_fund_cents * WEEKLY_LEAGUE_FUND_SPLITS.get(league, 0)
+        )
 
         top_payouts = {
             rank: int(league_fund_cents * share)
@@ -4996,7 +5203,8 @@ async def build_weekly_ton_payout_candidates(season_key: str, ton_price_usd: flo
             end_rank = int(payout_range["end"])
             pool_cents = int(league_fund_cents * float(payout_range["share"]))
             eligible_entries = [
-                entry for entry in entries
+                entry
+                for entry in entries
                 if start_rank <= int(entry["rank"]) <= end_rank
                 and bool(entry.get("eligible_for_payout", True))
                 and not bool(entry.get("fraud_flag", False))
@@ -5006,17 +5214,21 @@ async def build_weekly_ton_payout_candidates(season_key: str, ton_price_usd: flo
             if eligible_entries:
                 share_cents = pool_cents // len(eligible_entries)
                 remainder_cents = pool_cents % len(eligible_entries)
-            range_payouts.append({
-                "start": start_rank,
-                "end": end_rank,
-                "share_cents": share_cents,
-                "remainder_cents": remainder_cents,
-            })
+            range_payouts.append(
+                {
+                    "start": start_rank,
+                    "end": end_rank,
+                    "share_cents": share_cents,
+                    "remainder_cents": remainder_cents,
+                }
+            )
 
         for entry in entries:
             rank = int(entry["rank"])
             payout_cents = 0
-            if bool(entry.get("eligible_for_payout", True)) and not bool(entry.get("fraud_flag", False)):
+            if bool(entry.get("eligible_for_payout", True)) and not bool(
+                entry.get("fraud_flag", False)
+            ):
                 if rank in top_payouts:
                     payout_cents = top_payouts[rank]
                 else:
@@ -5037,34 +5249,48 @@ async def build_weekly_ton_payout_candidates(season_key: str, ton_price_usd: flo
                 stats["without_wallet"] += 1
                 continue
 
-            ton_amount_nano = max(0, int(round(((payout_cents / 100.0) / ton_price_usd) * TON_NANO)))
+            ton_amount_nano = max(
+                0, int(round(((payout_cents / 100.0) / ton_price_usd) * TON_NANO))
+            )
             if ton_amount_nano <= 0:
                 stats["without_payout"] += 1
                 continue
 
             stats["with_wallet"] += 1
-            payouts.append({
-                "user_id": int(entry["user_id"]),
-                "username": entry.get("username"),
-                "league": league,
-                "rank": rank,
-                "wallet_address": wallet["address"],
-                "masked_wallet": mask_ton_wallet(wallet["address"]),
-                "payout_cents": int(payout_cents),
-                "ton_amount_nano": int(ton_amount_nano),
-                "ton_price_usd": ton_price_usd_micros / 1_000_000,
-                "status": "preview" if season.get("status") != "finalized" else "queued",
-                "tx_hash": None,
-                "note": "preview queue" if season.get("status") != "finalized" else None,
-            })
+            payouts.append(
+                {
+                    "user_id": int(entry["user_id"]),
+                    "username": entry.get("username"),
+                    "league": league,
+                    "rank": rank,
+                    "wallet_address": wallet["address"],
+                    "masked_wallet": mask_ton_wallet(wallet["address"]),
+                    "payout_cents": int(payout_cents),
+                    "ton_amount_nano": int(ton_amount_nano),
+                    "ton_price_usd": ton_price_usd_micros / 1_000_000,
+                    "status": "preview"
+                    if season.get("status") != "finalized"
+                    else "queued",
+                    "tx_hash": None,
+                    "note": "preview queue"
+                    if season.get("status") != "finalized"
+                    else None,
+                }
+            )
 
-    payouts.sort(key=lambda row: (WEEKLY_LEAGUE_ORDER.index(row["league"]), int(row["rank"])))
+    payouts.sort(
+        key=lambda row: (WEEKLY_LEAGUE_ORDER.index(row["league"]), int(row["rank"]))
+    )
     return season, payouts, stats
 
 
-async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, league: str | None = None) -> tuple[dict | None, dict[str, list[dict]], dict]:
+async def build_weekly_ton_payout_view(
+    season_key: str, ton_price_usd: float, league: str | None = None
+) -> tuple[dict | None, dict[str, list[dict]], dict]:
     season_rows = await list_weekly_tournament_seasons(limit=52)
-    season = next((item for item in season_rows if item["season_key"] == season_key), None)
+    season = next(
+        (item for item in season_rows if item["season_key"] == season_key), None
+    )
     if not season:
         return None, {}, {}
 
@@ -5072,16 +5298,24 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
     total_fund_cents = max(0, int(season.get("payout_fund_cents") or 0))
     entries_by_league: dict[str, list[dict]] = {}
     for league_key in selected_leagues:
-        entries_by_league[league_key] = await get_weekly_tournament_leaderboard(season_key=season_key, league=league_key, limit=50)
+        entries_by_league[league_key] = await get_weekly_tournament_leaderboard(
+            season_key=season_key, league=league_key, limit=50
+        )
 
-    user_ids = [int(entry["user_id"]) for league_entries in entries_by_league.values() for entry in league_entries]
+    user_ids = [
+        int(entry["user_id"])
+        for league_entries in entries_by_league.values()
+        for entry in league_entries
+    ]
     wallet_map: dict[int, dict] = {}
     wallet_reminders_map: dict[int, dict] = {}
     existing_payouts_map: dict[int, WeeklyTournamentTonPayout] = {}
 
     async with AsyncSessionLocal() as session:
         if user_ids:
-            users_result = await session.execute(select(User).where(User.user_id.in_(user_ids)))
+            users_result = await session.execute(
+                select(User).where(User.user_id.in_(user_ids))
+            )
             user_rows = users_result.scalars().all()
             for row in user_rows:
                 extra_data = {}
@@ -5106,7 +5340,9 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
                     WeeklyTournamentTonPayout.user_id.in_(user_ids),
                 )
             )
-            existing_payouts_map = {int(row.user_id): row for row in payouts_result.scalars().all()}
+            existing_payouts_map = {
+                int(row.user_id): row for row in payouts_result.scalars().all()
+            }
 
     winner_map_by_league: dict[str, dict[int, dict]] = {}
     if season.get("status") == "finalized":
@@ -5129,7 +5365,9 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
 
     for league_key in selected_leagues:
         entries = entries_by_league.get(league_key, [])
-        league_fund_cents = int(total_fund_cents * WEEKLY_LEAGUE_FUND_SPLITS.get(league_key, 0))
+        league_fund_cents = int(
+            total_fund_cents * WEEKLY_LEAGUE_FUND_SPLITS.get(league_key, 0)
+        )
         top_payouts = {
             rank: int(league_fund_cents * share)
             for rank, share in WEEKLY_TOP3_PAYOUT_SPLITS.items()
@@ -5140,7 +5378,8 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
             end_rank = int(payout_range["end"])
             pool_cents = int(league_fund_cents * float(payout_range["share"]))
             eligible_entries = [
-                entry for entry in entries
+                entry
+                for entry in entries
                 if start_rank <= int(entry["rank"]) <= end_rank
                 and bool(entry.get("eligible_for_payout", True))
                 and not bool(entry.get("fraud_flag", False))
@@ -5150,12 +5389,14 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
             if eligible_entries:
                 share_cents = pool_cents // len(eligible_entries)
                 remainder_cents = pool_cents % len(eligible_entries)
-            range_payouts.append({
-                "start": start_rank,
-                "end": end_rank,
-                "share_cents": share_cents,
-                "remainder_cents": remainder_cents,
-            })
+            range_payouts.append(
+                {
+                    "start": start_rank,
+                    "end": end_rank,
+                    "share_cents": share_cents,
+                    "remainder_cents": remainder_cents,
+                }
+            )
 
         winner_map = winner_map_by_league.get(league_key, {})
         league_rows: list[dict] = []
@@ -5168,7 +5409,9 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
             payout_cents = 0
             if season.get("status") == "finalized" and winner:
                 payout_cents = int(winner.get("payout_cents") or 0)
-            elif bool(entry.get("eligible_for_payout", True)) and not bool(entry.get("fraud_flag", False)):
+            elif bool(entry.get("eligible_for_payout", True)) and not bool(
+                entry.get("fraud_flag", False)
+            ):
                 rank = int(entry["rank"])
                 if rank in top_payouts:
                     payout_cents = top_payouts[rank]
@@ -5186,7 +5429,9 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
             else:
                 summary["without_payout"] += 1
 
-            wallet_connected = bool(wallet and wallet.get("address") and wallet.get("verified"))
+            wallet_connected = bool(
+                wallet and wallet.get("address") and wallet.get("verified")
+            )
             if wallet_connected:
                 summary["with_wallet"] += 1
             else:
@@ -5201,7 +5446,9 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
             if existing_row:
                 ton_amount_nano = int(existing_row.ton_amount_nano or 0)
             elif wallet_connected and payout_cents > 0 and ton_price_usd > 0:
-                ton_amount_nano = max(0, int(round(((payout_cents / 100.0) / ton_price_usd) * TON_NANO)))
+                ton_amount_nano = max(
+                    0, int(round(((payout_cents / 100.0) / ton_price_usd) * TON_NANO))
+                )
 
             derived_status = "wallet_missing"
             if payout_cents <= 0:
@@ -5211,28 +5458,38 @@ async def build_weekly_ton_payout_view(season_key: str, ton_price_usd: float, le
             elif season.get("status") == "finalized":
                 derived_status = "queued" if wallet_connected else "wallet_missing"
             else:
-                derived_status = "preview_ready" if wallet_connected else "wallet_missing"
+                derived_status = (
+                    "preview_ready" if wallet_connected else "wallet_missing"
+                )
 
-            league_rows.append({
-                "user_id": user_id,
-                "username": entry.get("username"),
-                "league": league_key,
-                "rank": int(entry["rank"]),
-                "display_level": int(entry.get("display_level") or 1),
-                "score": int(entry.get("score") or 0),
-                "eligible_for_payout": bool(entry.get("eligible_for_payout", True)),
-                "fraud_flag": bool(entry.get("fraud_flag", False)),
-                "wallet_connected": wallet_connected,
-                "wallet_address": wallet.get("address") if wallet_connected else None,
-                "masked_wallet": wallet.get("masked_address") if wallet_connected else None,
-                "payout_cents": int(payout_cents),
-                "ton_amount_nano": int(ton_amount_nano),
-                "status": derived_status,
-                "tx_hash": getattr(existing_row, "tx_hash", None),
-                "note": getattr(existing_row, "note", None),
-                "wallet_reminder_sent_at": wallet_reminder_sent_at,
-                "wallet_reminder_hours_until_deadline": wallet_reminder.get("hours_until_deadline"),
-            })
+            league_rows.append(
+                {
+                    "user_id": user_id,
+                    "username": entry.get("username"),
+                    "league": league_key,
+                    "rank": int(entry["rank"]),
+                    "display_level": int(entry.get("display_level") or 1),
+                    "score": int(entry.get("score") or 0),
+                    "eligible_for_payout": bool(entry.get("eligible_for_payout", True)),
+                    "fraud_flag": bool(entry.get("fraud_flag", False)),
+                    "wallet_connected": wallet_connected,
+                    "wallet_address": wallet.get("address")
+                    if wallet_connected
+                    else None,
+                    "masked_wallet": wallet.get("masked_address")
+                    if wallet_connected
+                    else None,
+                    "payout_cents": int(payout_cents),
+                    "ton_amount_nano": int(ton_amount_nano),
+                    "status": derived_status,
+                    "tx_hash": getattr(existing_row, "tx_hash", None),
+                    "note": getattr(existing_row, "note", None),
+                    "wallet_reminder_sent_at": wallet_reminder_sent_at,
+                    "wallet_reminder_hours_until_deadline": wallet_reminder.get(
+                        "hours_until_deadline"
+                    ),
+                }
+            )
 
         leagues_payload[league_key] = league_rows
 
@@ -5259,14 +5516,19 @@ async def recalculate_finalized_weekly_winner_payouts(
 
     winners_by_league: dict[str, list[WeeklyTournamentWinner]] = {}
     for winner in winners:
-        winners_by_league.setdefault((winner.league or "bronze").lower(), []).append(winner)
+        winners_by_league.setdefault((winner.league or "bronze").lower(), []).append(
+            winner
+        )
 
     for league in WEEKLY_LEAGUE_ORDER:
         league_winners = winners_by_league.get(league, [])
         if not league_winners:
             continue
 
-        league_fund_cents = int(max(0, int(total_fund_cents or 0)) * WEEKLY_LEAGUE_FUND_SPLITS.get(league, 0))
+        league_fund_cents = int(
+            max(0, int(total_fund_cents or 0))
+            * WEEKLY_LEAGUE_FUND_SPLITS.get(league, 0)
+        )
         top_payouts = {
             rank: int(league_fund_cents * share)
             for rank, share in WEEKLY_TOP3_PAYOUT_SPLITS.items()
@@ -5278,7 +5540,8 @@ async def recalculate_finalized_weekly_winner_payouts(
             end_rank = int(payout_range["end"])
             pool_cents = int(league_fund_cents * float(payout_range["share"]))
             eligible_winners = [
-                row for row in league_winners
+                row
+                for row in league_winners
                 if start_rank <= int(row.rank or 0) <= end_rank
                 and bool(row.eligible_for_payout)
                 and not bool(row.fraud_flag)
@@ -5288,12 +5551,14 @@ async def recalculate_finalized_weekly_winner_payouts(
             if eligible_winners:
                 share_cents = pool_cents // len(eligible_winners)
                 remainder_cents = pool_cents % len(eligible_winners)
-            range_payouts.append({
-                "start": start_rank,
-                "end": end_rank,
-                "share_cents": share_cents,
-                "remainder_cents": remainder_cents,
-            })
+            range_payouts.append(
+                {
+                    "start": start_rank,
+                    "end": end_rank,
+                    "share_cents": share_cents,
+                    "remainder_cents": remainder_cents,
+                }
+            )
 
         for winner in league_winners:
             payout_cents = 0
@@ -5319,9 +5584,9 @@ async def admin_get_ton_payout_queue(season_key: str, request: Request):
         await require_admin_access(request)
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(WeeklyTournamentTonPayout).where(
-                    WeeklyTournamentTonPayout.season_key == season_key
-                ).order_by(
+                select(WeeklyTournamentTonPayout)
+                .where(WeeklyTournamentTonPayout.season_key == season_key)
+                .order_by(
                     WeeklyTournamentTonPayout.league.asc(),
                     WeeklyTournamentTonPayout.rank.asc(),
                 )
@@ -5341,7 +5606,9 @@ async def admin_get_ton_payout_queue(season_key: str, request: Request):
                     "masked_wallet": mask_ton_wallet(row.wallet_address),
                     "payout_cents": int(row.payout_cents or 0),
                     "ton_amount_nano": int(row.ton_amount_nano or 0),
-                    "ton_price_usd": (int(row.ton_price_usd_micros or 0) / 1_000_000) if row.ton_price_usd_micros else 0,
+                    "ton_price_usd": (int(row.ton_price_usd_micros or 0) / 1_000_000)
+                    if row.ton_price_usd_micros
+                    else 0,
                     "status": row.status,
                     "tx_hash": row.tx_hash,
                     "note": row.note,
@@ -5357,14 +5624,20 @@ async def admin_get_ton_payout_queue(season_key: str, request: Request):
 
 
 @app.post("/api/admin/weekly-tournament/season/{season_key}/ton-queue/preview")
-async def admin_preview_ton_payout_queue(season_key: str, payload: AdminTonPayoutQueueRequest, request: Request):
+async def admin_preview_ton_payout_queue(
+    season_key: str, payload: AdminTonPayoutQueueRequest, request: Request
+):
     try:
         await require_admin_access(request)
         ton_price_usd = float(payload.ton_price_usd or 0)
         if ton_price_usd <= 0:
-            raise HTTPException(status_code=400, detail="ton_price_usd must be greater than zero")
+            raise HTTPException(
+                status_code=400, detail="ton_price_usd must be greater than zero"
+            )
 
-        season, payouts, stats = await build_weekly_ton_payout_candidates(season_key, ton_price_usd)
+        season, payouts, stats = await build_weekly_ton_payout_candidates(
+            season_key, ton_price_usd
+        )
         if not season:
             raise HTTPException(status_code=404, detail="Season not found")
 
@@ -5396,12 +5669,16 @@ async def admin_get_ton_payout_view(
     try:
         await require_admin_access(request)
         if ton_price_usd <= 0:
-            raise HTTPException(status_code=400, detail="ton_price_usd must be greater than zero")
+            raise HTTPException(
+                status_code=400, detail="ton_price_usd must be greater than zero"
+            )
         league_key = (league or "").strip().lower() or None
         if league_key and league_key not in WEEKLY_LEAGUE_ORDER:
             raise HTTPException(status_code=400, detail="Unknown league")
 
-        season, leagues_payload, summary = await build_weekly_ton_payout_view(season_key, float(ton_price_usd), league=league_key)
+        season, leagues_payload, summary = await build_weekly_ton_payout_view(
+            season_key, float(ton_price_usd), league=league_key
+        )
         if not season:
             raise HTTPException(status_code=404, detail="Season not found")
 
@@ -5430,7 +5707,9 @@ async def admin_send_wallet_reminders(
     try:
         await require_admin_access(request)
         season_rows = await list_weekly_tournament_seasons(limit=52)
-        season = next((item for item in season_rows if item["season_key"] == season_key), None)
+        season = next(
+            (item for item in season_rows if item["season_key"] == season_key), None
+        )
         if not season:
             raise HTTPException(status_code=404, detail="Season not found")
         if season.get("status") != "finalized":
@@ -5443,12 +5722,15 @@ async def admin_send_wallet_reminders(
         if league_key and league_key not in WEEKLY_LEAGUE_ORDER:
             raise HTTPException(status_code=400, detail="Unknown league")
 
-        _, leagues_payload, _ = await build_weekly_ton_payout_view(season_key, 1.0, league=league_key)
+        _, leagues_payload, _ = await build_weekly_ton_payout_view(
+            season_key, 1.0, league=league_key
+        )
         rows = [
             row
             for league_rows in leagues_payload.values()
             for row in league_rows
-            if int(row.get("payout_cents") or 0) > 0 and not bool(row.get("wallet_connected"))
+            if int(row.get("payout_cents") or 0) > 0
+            and not bool(row.get("wallet_connected"))
         ]
         if not rows:
             return {
@@ -5466,7 +5748,9 @@ async def admin_send_wallet_reminders(
         cache_ids_to_invalidate: list[int] = []
 
         async with AsyncSessionLocal() as session:
-            users_result = await session.execute(select(User).where(User.user_id.in_(user_ids)))
+            users_result = await session.execute(
+                select(User).where(User.user_id.in_(user_ids))
+            )
             user_map = {int(row.user_id): row for row in users_result.scalars().all()}
 
             for row in rows:
@@ -5536,12 +5820,16 @@ async def admin_send_wallet_reminders(
 
 
 @app.post("/api/admin/weekly-tournament/season/{season_key}/ton-queue")
-async def admin_build_ton_payout_queue(season_key: str, payload: AdminTonPayoutQueueRequest, request: Request):
+async def admin_build_ton_payout_queue(
+    season_key: str, payload: AdminTonPayoutQueueRequest, request: Request
+):
     try:
         await require_admin_access(request)
         ton_price_usd = float(payload.ton_price_usd or 0)
         if ton_price_usd <= 0:
-            raise HTTPException(status_code=400, detail="ton_price_usd must be greater than zero")
+            raise HTTPException(
+                status_code=400, detail="ton_price_usd must be greater than zero"
+            )
 
         winners = await get_weekly_tournament_winners(season_key)
         if not winners:
@@ -5556,7 +5844,9 @@ async def admin_build_ton_payout_queue(season_key: str, payload: AdminTonPayoutQ
 
         user_ids = [int(item["user_id"]) for item in winners]
         async with AsyncSessionLocal() as session:
-            users_result = await session.execute(select(User).where(User.user_id.in_(user_ids)))
+            users_result = await session.execute(
+                select(User).where(User.user_id.in_(user_ids))
+            )
             user_rows = users_result.scalars().all()
             wallet_map = {}
             for row in user_rows:
@@ -5575,7 +5865,9 @@ async def admin_build_ton_payout_queue(season_key: str, payload: AdminTonPayoutQ
                     WeeklyTournamentTonPayout.season_key == season_key
                 )
             )
-            existing_rows = {int(row.user_id): row for row in existing_result.scalars().all()}
+            existing_rows = {
+                int(row.user_id): row for row in existing_result.scalars().all()
+            }
 
             created = 0
             queued = 0
@@ -5587,7 +5879,11 @@ async def admin_build_ton_payout_queue(season_key: str, payload: AdminTonPayoutQ
             for winner in winners:
                 user_id = int(winner["user_id"])
                 payout_cents = int(winner.get("payout_cents") or 0)
-                if payout_cents <= 0 or not bool(winner.get("eligible_for_payout", True)) or bool(winner.get("fraud_flag", False)):
+                if (
+                    payout_cents <= 0
+                    or not bool(winner.get("eligible_for_payout", True))
+                    or bool(winner.get("fraud_flag", False))
+                ):
                     skipped_without_payout += 1
                     continue
 
@@ -5596,7 +5892,9 @@ async def admin_build_ton_payout_queue(season_key: str, payload: AdminTonPayoutQ
                     skipped_without_wallet += 1
                     continue
 
-                ton_amount_nano = max(0, int(round(((payout_cents / 100.0) / ton_price_usd) * TON_NANO)))
+                ton_amount_nano = max(
+                    0, int(round(((payout_cents / 100.0) / ton_price_usd) * TON_NANO))
+                )
                 if ton_amount_nano <= 0:
                     skipped_without_payout += 1
                     continue
@@ -5654,7 +5952,9 @@ async def admin_build_ton_payout_queue(season_key: str, payload: AdminTonPayoutQ
 
 
 @app.post("/api/admin/weekly-tournament/season/{season_key}/ton-payout-status")
-async def admin_update_ton_payout_status(season_key: str, payload: AdminTonPayoutStatusUpdateRequest, request: Request):
+async def admin_update_ton_payout_status(
+    season_key: str, payload: AdminTonPayoutStatusUpdateRequest, request: Request
+):
     try:
         await require_admin_access(request)
         async with AsyncSessionLocal() as session:
@@ -5697,7 +5997,9 @@ async def admin_update_ton_payout_status_bulk(
 ):
     try:
         await require_admin_access(request)
-        user_ids = sorted({int(user_id) for user_id in (payload.user_ids or []) if int(user_id) > 0})
+        user_ids = sorted(
+            {int(user_id) for user_id in (payload.user_ids or []) if int(user_id) > 0}
+        )
         if not user_ids:
             raise HTTPException(status_code=400, detail="user_ids are required")
 
@@ -5755,7 +6057,9 @@ async def admin_confirm_ton_payouts(
             raise HTTPException(status_code=400, detail="Invalid sender_wallet_address")
 
         lookback_minutes = max(5, int(payload.lookback_minutes or 180))
-        requested_user_ids = sorted({int(user_id) for user_id in (payload.user_ids or []) if int(user_id) > 0})
+        requested_user_ids = sorted(
+            {int(user_id) for user_id in (payload.user_ids or []) if int(user_id) > 0}
+        )
 
         async with AsyncSessionLocal() as session:
             query = select(WeeklyTournamentTonPayout).where(
@@ -5763,9 +6067,13 @@ async def admin_confirm_ton_payouts(
                 WeeklyTournamentTonPayout.status.in_(["queued", "submitted"]),
             )
             if requested_user_ids:
-                query = query.where(WeeklyTournamentTonPayout.user_id.in_(requested_user_ids))
+                query = query.where(
+                    WeeklyTournamentTonPayout.user_id.in_(requested_user_ids)
+                )
 
-            result = await session.execute(query.order_by(WeeklyTournamentTonPayout.rank.asc()))
+            result = await session.execute(
+                query.order_by(WeeklyTournamentTonPayout.rank.asc())
+            )
             rows = result.scalars().all()
             if not rows:
                 return {
@@ -5777,16 +6085,32 @@ async def admin_confirm_ton_payouts(
                     "missing_user_ids": [],
                 }
 
-            recipient_accounts = sorted({row.wallet_address for row in rows if row.wallet_address})
-            start_utime = int((datetime.utcnow() - timedelta(minutes=lookback_minutes)).timestamp())
+            recipient_accounts = sorted(
+                {row.wallet_address for row in rows if row.wallet_address}
+            )
+            start_utime = int(
+                (datetime.utcnow() - timedelta(minutes=lookback_minutes)).timestamp()
+            )
             transactions = []
             for index in range(0, len(recipient_accounts), 50):
-                transactions.extend(await fetch_ton_transactions_for_accounts(recipient_accounts[index:index + 50], start_utime))
+                transactions.extend(
+                    await fetch_ton_transactions_for_accounts(
+                        recipient_accounts[index : index + 50], start_utime
+                    )
+                )
 
-            matched_rows, matched_user_ids = match_ton_queue_rows_to_transactions(rows, transactions, sender_wallet_address)
+            matched_rows, matched_user_ids = match_ton_queue_rows_to_transactions(
+                rows, transactions, sender_wallet_address
+            )
             confirmed_user_ids: list[int] = []
-            tx_hash_by_user = {int(item["user_id"]): item.get("tx_hash") or None for item in matched_rows}
-            confirmed_at_by_user = {int(item["user_id"]): item.get("confirmed_at") or 0 for item in matched_rows}
+            tx_hash_by_user = {
+                int(item["user_id"]): item.get("tx_hash") or None
+                for item in matched_rows
+            }
+            confirmed_at_by_user = {
+                int(item["user_id"]): item.get("confirmed_at") or 0
+                for item in matched_rows
+            }
 
             for row in rows:
                 user_id = int(row.user_id)
@@ -5798,13 +6122,21 @@ async def admin_confirm_ton_payouts(
                 note_suffix = ""
                 if confirmed_at:
                     note_suffix = f"confirmed_at={datetime.utcfromtimestamp(int(confirmed_at)).isoformat()}Z"
-                row.note = " | ".join(part for part in [row.note or "", "verified_on_chain", note_suffix] if part)
+                row.note = " | ".join(
+                    part
+                    for part in [row.note or "", "verified_on_chain", note_suffix]
+                    if part
+                )
                 row.updated_at = datetime.utcnow()
                 confirmed_user_ids.append(user_id)
 
             await session.commit()
 
-        missing_user_ids = [int(row.user_id) for row in rows if int(row.user_id) not in set(confirmed_user_ids)]
+        missing_user_ids = [
+            int(row.user_id)
+            for row in rows
+            if int(row.user_id) not in set(confirmed_user_ids)
+        ]
         return {
             "success": True,
             "season_key": season_key,
@@ -5835,7 +6167,9 @@ async def admin_set_weekly_tournament_fund(
         ends_at = starts_at + timedelta(days=7)
 
         async with AsyncSessionLocal() as session:
-            season = await ensure_weekly_tournament_season(session, season_key, starts_at, ends_at)
+            season = await ensure_weekly_tournament_season(
+                session, season_key, starts_at, ends_at
+            )
             season.gross_ad_revenue_cents = int(payload.gross_ad_revenue_cents or 0)
             season.payout_fund_cents = int(payload.payout_fund_cents or 0)
             if season.status == "finalized":
@@ -5862,7 +6196,9 @@ async def admin_set_weekly_tournament_fund(
             },
         }
     except ValueError:
-        raise HTTPException(status_code=400, detail="season_key must use YYYY-MM-DD format")
+        raise HTTPException(
+            status_code=400, detail="season_key must use YYYY-MM-DD format"
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -5887,7 +6223,9 @@ async def admin_set_weekly_tournament_winner_stars(
             )
             winner = winner_result.scalar_one_or_none()
             if not winner:
-                raise HTTPException(status_code=404, detail="Winner not found for this season")
+                raise HTTPException(
+                    status_code=404, detail="Winner not found for this season"
+                )
 
             winner.stars_reward = int(payload.stars_reward or 0)
             await session.commit()
@@ -5933,22 +6271,21 @@ async def create_skin_stars_invoice(payload: SkinRequest, request: Request):
             raise HTTPException(status_code=400, detail="Skin already owned")
 
         invoice_link = await create_telegram_stars_invoice_link(
-            user_id=payload.user_id,
-            skin_id=payload.skin_id,
-            price=price
+            user_id=payload.user_id, skin_id=payload.skin_id, price=price
         )
 
         return {
             "success": True,
             "invoice_link": invoice_link,
             "price": price,
-            "skin_id": payload.skin_id
+            "skin_id": payload.skin_id,
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error creating Stars invoice: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
 
 @app.get("/api/tournament/leaderboard")
 async def get_tournament_leaderboard():
@@ -5958,12 +6295,7 @@ async def get_tournament_leaderboard():
 
         conn = await get_redis_or_none()
         if conn:
-            top_players = await conn.zrevrange(
-                TOURNAMENT_KEY,
-                0,
-                2,
-                withscores=True
-            )
+            top_players = await conn.zrevrange(TOURNAMENT_KEY, 0, 2, withscores=True)
 
             for idx, (user_id_str, score) in enumerate(top_players):
                 try:
@@ -5976,16 +6308,19 @@ async def get_tournament_leaderboard():
                 username = user.get("username") if user else None
                 avatar_url = (
                     f"https://t.me/i/userpic/320/{username}.jpg"
-                    if username else "/imgg/default_avatar.png"
+                    if username
+                    else "/imgg/default_avatar.png"
                 )
 
-                players.append({
-                    "rank": idx + 1,
-                    "user_id": user_id,
-                    "name": mask_username(username),
-                    "avatar": avatar_url,
-                    "score": int(score)
-                })
+                players.append(
+                    {
+                        "rank": idx + 1,
+                        "user_id": user_id,
+                        "name": mask_username(username),
+                        "avatar": avatar_url,
+                        "score": int(score),
+                    }
+                )
 
         now = datetime.utcnow()
         tomorrow = (now + timedelta(days=1)).replace(
@@ -5998,13 +6333,14 @@ async def get_tournament_leaderboard():
             "players": players,
             "prize_pool": TOURNAMENT_PRIZE_POOL,
             "time_left": time_left,
-            "online_now": await get_online_users_count()
+            "online_now": await get_online_users_count(),
         }
 
     except Exception as e:
         logger.error(f"Error getting leaderboard: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-    
+
+
 @app.get("/api/tournament/player-rank/{user_id}")
 async def get_player_rank(user_id: int, request: Request):
     """Get player's rank from Redis leaderboard"""
@@ -6018,13 +6354,14 @@ async def get_player_rank(user_id: int, request: Request):
                 "score": 0,
                 "next_rank_score": 0,
                 "avatar": "/imgg/default_avatar.png",
-                "name": "Player"
+                "name": "Player",
             }
 
         username = user.get("username")
         avatar_url = (
             f"https://t.me/i/userpic/320/{username}.jpg"
-            if username else "/imgg/default_avatar.png"
+            if username
+            else "/imgg/default_avatar.png"
         )
 
         redis_conn = await ensure_redis_available()
@@ -6038,10 +6375,7 @@ async def get_player_rank(user_id: int, request: Request):
         next_rank_score = 0
         if rev_rank is not None and rev_rank > 0:
             higher_player = await redis_conn.zrevrange(
-                TOURNAMENT_KEY,
-                rev_rank - 1,
-                rev_rank - 1,
-                withscores=True
+                TOURNAMENT_KEY, rev_rank - 1, rev_rank - 1, withscores=True
             )
             if higher_player:
                 _, higher_score = higher_player[0]
@@ -6053,16 +6387,18 @@ async def get_player_rank(user_id: int, request: Request):
             "score": score,
             "next_rank_score": next_rank_score,
             "avatar": avatar_url,
-            "name": mask_username(username)
+            "name": mask_username(username),
         }
 
     except Exception as e:
         logger.error(f"Error getting player rank: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 # ==================== Р—РђР”РђР§Р ====================
 
 _task_completion_store = {}
+
 
 @app.get("/api/tasks/{user_id}")
 async def get_tasks(user_id: int, request: Request):
@@ -6071,43 +6407,94 @@ async def get_tasks(user_id: int, request: Request):
         user = await get_user_cached(user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
+
         completed_tasks = await get_completed_tasks(user_id) or []
-        
+
         tasks = [
-            {"id": "daily_bonus", "title": "рџ“… Daily Bonus", "description": "Come back every day", 
-             "reward": "25000 coins", "icon": "рџ“…", "completed": "daily_bonus" in completed_tasks},
-            {"id": "energy_refill", "title": "вљЎ Infinite Energy", "description": "5 minutes of unlimited energy", 
-             "reward": "вљЎ 5 minutes", "icon": "вљЎ", "completed": "energy_refill" in completed_tasks},
-            {"id": "link_click", "title": "рџ”— Follow Link", "description": "Click the link and get reward", 
-             "reward": "25000 coins", "icon": "рџ”—", "completed": "link_click" in completed_tasks},
-            {"id": "telegram_sub", "title": "Telegram Channel", "description": "Subscribe to Telegram channel",
-             "reward": "20000 coins + skin", "icon": "📣", "completed": "telegram_sub" in completed_tasks},
-            {"id": "tiktok_sub", "title": "TikTok", "description": "Subscribe to TikTok",
-             "reward": "20000 coins + skin", "icon": "🎵", "completed": "tiktok_sub" in completed_tasks},
-            {"id": "instagram_sub", "title": "Instagram", "description": "Subscribe to Instagram",
-             "reward": "20000 coins + skin", "icon": "📸", "completed": "instagram_sub" in completed_tasks},
-            {"id": "invite_5_friends", "title": "рџ‘Ґ Invite 5 Friends", "description": "Invite 5 friends", 
-             "reward": "20000 coins", "icon": "рџ‘Ґ", "completed": "invite_5_friends" in completed_tasks, 
-             "progress": min(user.get("referral_count", 0), 5), "total": 5}
+            {
+                "id": "daily_bonus",
+                "title": "рџ“… Daily Bonus",
+                "description": "Come back every day",
+                "reward": "25000 coins",
+                "icon": "рџ“…",
+                "completed": "daily_bonus" in completed_tasks,
+            },
+            {
+                "id": "energy_refill",
+                "title": "вљЎ Infinite Energy",
+                "description": "5 minutes of unlimited energy",
+                "reward": "вљЎ 5 minutes",
+                "icon": "вљЎ",
+                "completed": "energy_refill" in completed_tasks,
+            },
+            {
+                "id": "link_click",
+                "title": "рџ”— Follow Link",
+                "description": "Click the link and get reward",
+                "reward": "25000 coins",
+                "icon": "рџ”—",
+                "completed": "link_click" in completed_tasks,
+            },
+            {
+                "id": "telegram_sub",
+                "title": "Telegram Channel",
+                "description": "Subscribe to Telegram channel",
+                "reward": "20000 coins + skin",
+                "icon": "📣",
+                "completed": "telegram_sub" in completed_tasks,
+            },
+            {
+                "id": "tiktok_sub",
+                "title": "TikTok",
+                "description": "Subscribe to TikTok",
+                "reward": "20000 coins + skin",
+                "icon": "🎵",
+                "completed": "tiktok_sub" in completed_tasks,
+            },
+            {
+                "id": "instagram_sub",
+                "title": "Instagram",
+                "description": "Subscribe to Instagram",
+                "reward": "20000 coins + skin",
+                "icon": "📸",
+                "completed": "instagram_sub" in completed_tasks,
+            },
+            {
+                "id": "invite_5_friends",
+                "title": "рџ‘Ґ Invite 5 Friends",
+                "description": "Invite 5 friends",
+                "reward": "20000 coins",
+                "icon": "рџ‘Ґ",
+                "completed": "invite_5_friends" in completed_tasks,
+                "progress": min(user.get("referral_count", 0), 5),
+                "total": 5,
+            },
         ]
         return tasks
     except Exception as e:
         logger.error(f"Error in get_tasks: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 @app.post("/api/complete-task")
 async def complete_task(payload: TaskCompleteRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("complete_task", request, payload.user_id, RATE_LIMITS["complete_task"][0], RATE_LIMITS["complete_task"][1], ip_limit=RATE_LIMITS["complete_task"][0] * 2)
+        await require_dual_rate_limit(
+            "complete_task",
+            request,
+            payload.user_id,
+            RATE_LIMITS["complete_task"][0],
+            RATE_LIMITS["complete_task"][1],
+            ip_limit=RATE_LIMITS["complete_task"][0] * 2,
+        )
         await require_user_action_lock("complete_task", payload.user_id, ttl=5)
         user = await get_user_cached(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
         task_id = payload.task_id
-        
+
         completed = await get_completed_tasks(payload.user_id) or []
         if task_id in completed:
             raise HTTPException(status_code=400, detail="Task already completed")
@@ -6119,7 +6506,11 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
                 {"coins": int(user.get("coins", 0)) + 25000},
             )
             await invalidate_user_cache(payload.user_id)
-            return {"success": True, "message": "рџ”— +25000 coins!", "coins": int(updated_user.get("coins", 0))}
+            return {
+                "success": True,
+                "message": "рџ”— +25000 coins!",
+                "coins": int(updated_user.get("coins", 0)),
+            }
 
         if task_id == "daily_bonus":
             updated_user = await complete_task_reward_atomically(
@@ -6128,7 +6519,11 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
                 {"coins": int(user.get("coins", 0)) + 25000},
             )
             await invalidate_user_cache(payload.user_id)
-            return {"success": True, "message": "рџЋЃ +25000 coins!", "coins": int(updated_user.get("coins", 0))}
+            return {
+                "success": True,
+                "message": "рџЋЃ +25000 coins!",
+                "coins": int(updated_user.get("coins", 0)),
+            }
 
         elif task_id == "energy_refill":
             await complete_task_reward_atomically(payload.user_id, task_id)
@@ -6143,7 +6538,11 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
                     {"coins": int(user.get("coins", 0)) + 20000},
                 )
                 await invalidate_user_cache(payload.user_id)
-                return {"success": True, "message": "рџ‘Ґ +20000 coins!", "coins": int(updated_user.get("coins", 0))}
+                return {
+                    "success": True,
+                    "message": "рџ‘Ґ +20000 coins!",
+                    "coins": int(updated_user.get("coins", 0)),
+                }
             else:
                 raise HTTPException(status_code=400, detail="Not enough friends")
 
@@ -6155,18 +6554,24 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
                 except Exception:
                     extra = {}
 
-            owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
+            owned_skins = normalize_owned_skins(
+                extra.get("owned_skins", [DEFAULT_SKIN_ID])
+            )
             social_skin_id = SOCIAL_SUB_TASK_SKINS[task_id]
 
             if task_id == "telegram_sub":
-                is_verified = await verify_telegram_channel_subscription(payload.user_id)
+                is_verified = await verify_telegram_channel_subscription(
+                    payload.user_id
+                )
                 if not is_verified:
                     raise HTTPException(
                         status_code=400,
-                        detail="Telegram subscription was not verified yet"
+                        detail="Telegram subscription was not verified yet",
                     )
             else:
-                raise HTTPException(status_code=400, detail="Task verification is not available yet")
+                raise HTTPException(
+                    status_code=400, detail="Task verification is not available yet"
+                )
 
             if social_skin_id not in owned_skins:
                 owned_skins.append(social_skin_id)
@@ -6188,7 +6593,7 @@ async def complete_task(payload: TaskCompleteRequest, request: Request):
                 "skin_id": social_skin_id,
                 "verified": task_id == "telegram_sub",
             }
-        
+
         raise HTTPException(status_code=400, detail="Unknown task")
     except HTTPException:
         raise
@@ -6221,12 +6626,14 @@ async def get_video_tasks_status(user_id: int, request: Request):
                 remaining_seconds = max(0, cooldown_seconds - int(elapsed))
                 available = remaining_seconds <= 0
 
-            tasks.append({
-                "task_id": task_id,
-                "available": available,
-                "remaining_seconds": remaining_seconds,
-                "cooldown_minutes": config["cooldown_minutes"],
-            })
+            tasks.append(
+                {
+                    "task_id": task_id,
+                    "available": available,
+                    "remaining_seconds": remaining_seconds,
+                    "cooldown_minutes": config["cooldown_minutes"],
+                }
+            )
 
         return {"success": True, "tasks": tasks}
     except HTTPException:
@@ -6240,9 +6647,15 @@ async def get_video_tasks_status(user_id: int, request: Request):
 async def claim_video_task(payload: VideoTaskClaimRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("video_task_claim", request, payload.user_id, 20, 60, ip_limit=40)
-        await consume_ad_action_session(payload.user_id, payload.ad_session_id, "video_task")
-        await require_user_action_lock(f"video_task:{payload.task_id}", payload.user_id, ttl=3)
+        await require_dual_rate_limit(
+            "video_task_claim", request, payload.user_id, 20, 60, ip_limit=40
+        )
+        await consume_ad_action_session(
+            payload.user_id, payload.ad_session_id, "video_task"
+        )
+        await require_user_action_lock(
+            f"video_task:{payload.task_id}", payload.user_id, ttl=3
+        )
 
         config = VIDEO_TASK_DEFINITIONS.get(payload.task_id)
         if not config:
@@ -6261,7 +6674,10 @@ async def claim_video_task(payload: VideoTaskClaimRequest, request: Request):
 
         if claimed_at and (now - claimed_at).total_seconds() < cooldown_seconds:
             remaining = cooldown_seconds - int((now - claimed_at).total_seconds())
-            raise HTTPException(status_code=429, detail=f"Task cooldown {remaining // 60}:{remaining % 60:02d}")
+            raise HTTPException(
+                status_code=429,
+                detail=f"Task cooldown {remaining // 60}:{remaining % 60:02d}",
+            )
 
         response = {
             "success": True,
@@ -6277,22 +6693,30 @@ async def claim_video_task(payload: VideoTaskClaimRequest, request: Request):
             response["message"] = f"+{reward} coins"
             updates["coins"] = response["coins"]
         elif config["type"] == "tap_boost":
-            expires_at = (now + timedelta(minutes=config["duration_minutes"])).isoformat()
+            expires_at = (
+                now + timedelta(minutes=config["duration_minutes"])
+            ).isoformat()
             boosts["tap_boost"] = {
                 "expires_at": expires_at,
                 "multiplier": int(config["multiplier"]),
             }
-            response["message"] = f"x{config['multiplier']} tap boost for {config['duration_minutes']} min"
+            response["message"] = (
+                f"x{config['multiplier']} tap boost for {config['duration_minutes']} min"
+            )
             response["task_tap_boost_active"] = True
             response["task_tap_boost_expires_at"] = expires_at
             response["task_tap_boost_multiplier"] = int(config["multiplier"])
         elif config["type"] == "passive_boost":
-            expires_at = (now + timedelta(minutes=config["duration_minutes"])).isoformat()
+            expires_at = (
+                now + timedelta(minutes=config["duration_minutes"])
+            ).isoformat()
             boosts["passive_boost"] = {
                 "expires_at": expires_at,
                 "multiplier": int(config["multiplier"]),
             }
-            response["message"] = f"x{config['multiplier']} passive income for {config['duration_minutes']} min"
+            response["message"] = (
+                f"x{config['multiplier']} passive income for {config['duration_minutes']} min"
+            )
             response["task_passive_boost_active"] = True
             response["task_passive_boost_expires_at"] = expires_at
             response["task_passive_boost_multiplier"] = int(config["multiplier"])
@@ -6306,7 +6730,9 @@ async def claim_video_task(payload: VideoTaskClaimRequest, request: Request):
         await invalidate_user_cache(payload.user_id)
         refreshed_user = await get_user_cached(payload.user_id)
         response["coins"] = int((refreshed_user or {}).get("coins", response["coins"]))
-        await record_rewarded_ad_claim(payload.user_id, "tasks", {"task_id": payload.task_id})
+        await record_rewarded_ad_claim(
+            payload.user_id, "tasks", {"task_id": payload.task_id}
+        )
         return response
     except HTTPException:
         raise
@@ -6314,13 +6740,17 @@ async def claim_video_task(payload: VideoTaskClaimRequest, request: Request):
         logger.error(f"Error in claim_video_task: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 # ==================== РџРђРЎРЎРР’РќР«Р™ Р”РћРҐРћР” ====================
+
 
 @app.post("/api/passive-income")
 async def passive_income(payload: PassiveIncomeRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit("passive_income", request, payload.user_id, 20, 60, ip_limit=40)
+        await require_dual_rate_limit(
+            "passive_income", request, payload.user_id, 20, 60, ip_limit=40
+        )
         await require_user_action_lock("passive_income", payload.user_id, ttl=5)
         user = await get_user(payload.user_id)
         if not user:
@@ -6336,7 +6766,9 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
                 {"last_passive_income": now},
             )
             if initialized_user is None:
-                raise HTTPException(status_code=409, detail="Passive income baseline changed, retry")
+                raise HTTPException(
+                    status_code=409, detail="Passive income baseline changed, retry"
+                )
             await invalidate_user_cache(payload.user_id)
             return {"success": True, "coins": user["coins"], "income": 0, "message": ""}
 
@@ -6345,9 +6777,17 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
 
         extra = parse_extra_data(user.get("extra_data"))
 
-        passive_boost_active, _, passive_boost_multiplier = get_active_video_task_boost(extra, "passive_boost")
-        base_hour_value = int(user.get("profit_per_hour", get_hour_value(user.get("profit_level", 0))))
-        hour_value = base_hour_value * max(1, passive_boost_multiplier) if passive_boost_active else base_hour_value
+        passive_boost_active, _, passive_boost_multiplier = get_active_video_task_boost(
+            extra, "passive_boost"
+        )
+        base_hour_value = int(
+            user.get("profit_per_hour", get_hour_value(user.get("profit_level", 0)))
+        )
+        hour_value = (
+            base_hour_value * max(1, passive_boost_multiplier)
+            if passive_boost_active
+            else base_hour_value
+        )
         if hour_value <= 0 or elapsed_seconds <= 0:
             return {"success": True, "coins": user["coins"], "income": 0, "message": ""}
 
@@ -6371,8 +6811,12 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
             },
         )
         if not updated_user:
-            logger.warning("Atomic passive-income update conflict for user=%s", payload.user_id)
-            raise HTTPException(status_code=409, detail="Passive income state changed, retry")
+            logger.warning(
+                "Atomic passive-income update conflict for user=%s", payload.user_id
+            )
+            raise HTTPException(
+                status_code=409, detail="Passive income state changed, retry"
+            )
 
         await invalidate_user_cache(payload.user_id)
         referral_bonus = await grant_referral_share_bonus(updated_user, total_income)
@@ -6382,7 +6826,7 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
             "coins": int(updated_user.get("coins", new_coins)),
             "income": total_income,
             "referral_bonus_paid": referral_bonus,
-            "message": f"+{total_income} passive income"
+            "message": f"+{total_income} passive income",
         }
     except HTTPException:
         raise
@@ -6390,7 +6834,9 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
         logger.error(f"Error in passive_income: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 # ==================== DAILY REWARDS ====================
+
 
 @app.get("/api/daily-reward/status/{user_id}")
 async def get_daily_reward_status(user_id: int, request: Request):
@@ -6404,9 +6850,13 @@ async def get_daily_reward_status(user_id: int, request: Request):
 
         claimed_days, last_claim_date = get_daily_reward_progress(extra)
         today = datetime.utcnow().date().isoformat()
-        claim_available = claimed_days < DAILY_REWARD_MAX_DAYS and last_claim_date != today
+        claim_available = (
+            claimed_days < DAILY_REWARD_MAX_DAYS and last_claim_date != today
+        )
         next_day = min(claimed_days + 1, DAILY_REWARD_MAX_DAYS)
-        infinite_energy_active, infinite_energy_expires_at = is_daily_infinite_energy_active(user)
+        infinite_energy_active, infinite_energy_expires_at = (
+            is_daily_infinite_energy_active(user)
+        )
 
         return {
             "success": True,
@@ -6433,9 +6883,7 @@ async def claim_daily_reward(payload: UserIdRequest, request: Request):
 
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(User)
-                .where(User.user_id == payload.user_id)
-                .with_for_update()
+                select(User).where(User.user_id == payload.user_id).with_for_update()
             )
             user_row = result.scalar_one_or_none()
             if not user_row:
@@ -6454,7 +6902,9 @@ async def claim_daily_reward(payload: UserIdRequest, request: Request):
                 raise HTTPException(status_code=400, detail="Daily rewards completed")
 
             if last_claim_date == today:
-                raise HTTPException(status_code=400, detail="Reward already claimed today")
+                raise HTTPException(
+                    status_code=400, detail="Reward already claimed today"
+                )
 
             day = claimed_days + 1
             coins_reward = day * DAILY_REWARD_BASE_COINS
@@ -6476,7 +6926,8 @@ async def claim_daily_reward(payload: UserIdRequest, request: Request):
                 if not isinstance(active_boosts, dict):
                     active_boosts = {}
                 expires_at = (
-                    datetime.utcnow() + timedelta(minutes=DAILY_REWARD_INFINITE_ENERGY_MINUTES)
+                    datetime.utcnow()
+                    + timedelta(minutes=DAILY_REWARD_INFINITE_ENERGY_MINUTES)
                 ).isoformat()
                 active_boosts["daily_infinite_energy"] = {
                     "active": True,
@@ -6486,7 +6937,9 @@ async def claim_daily_reward(payload: UserIdRequest, request: Request):
                 response_payload["infinite_energy_expires_at"] = expires_at
 
             if day == DAILY_REWARD_MAX_DAYS:
-                owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
+                owned_skins = normalize_owned_skins(
+                    extra.get("owned_skins", [DEFAULT_SKIN_ID])
+                )
                 if DAILY_REWARD_SKIN_ID not in owned_skins:
                     owned_skins.append(DAILY_REWARD_SKIN_ID)
                 extra["owned_skins"] = normalize_owned_skins(owned_skins)
@@ -6509,8 +6962,8 @@ async def claim_daily_reward(payload: UserIdRequest, request: Request):
         logger.error(f"Error in claim_daily_reward: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# ==================== РЎРљРРќР« ====================
 
+# ==================== РЎРљРРќР« ====================
 
 
 @app.post("/api/select-skin")
@@ -6549,6 +7002,7 @@ async def select_skin(payload: SkinRequest, request: Request):
     except Exception as e:
         logger.error(f"Error in select_skin: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
 
 @app.post("/api/unlock-skin")
 async def unlock_skin(payload: SkinRequest, request: Request):
@@ -6597,10 +7051,9 @@ async def unlock_skin(payload: SkinRequest, request: Request):
         logger.error(f"Unlock skin error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 # ==================== Р—РђРџРЈРЎРљ ====================
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False)
-
-

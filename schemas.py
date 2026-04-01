@@ -23,30 +23,6 @@ class SkinRequest(BaseModel):
     skin_id: str
 
 
-class GameRequest(BaseModel):
-    user_id: int
-    bet: int = Field(..., ge=10, le=1000000)
-    prediction: Optional[str] = None
-    bet_type: Optional[str] = None
-    bet_value: Optional[int] = None
-
-
-class LuckyBoxRequest(BaseModel):
-    user_id: int
-    bet: int = Field(..., ge=10, le=1000000)
-    box_index: int = Field(..., ge=0, le=3)
-
-
-class CrashGameStartRequest(BaseModel):
-    user_id: int
-    bet: int = Field(..., ge=10, le=1000000)
-
-
-class CrashGameCashoutRequest(BaseModel):
-    user_id: int
-    session_id: str
-
-
 class TaskCompleteRequest(BaseModel):
     user_id: int
     task_id: str

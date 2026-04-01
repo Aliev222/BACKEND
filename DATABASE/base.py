@@ -1,6 +1,19 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy import Column, Integer, String, BigInteger, select, DateTime, Index, UniqueConstraint, Boolean, desc, func, update
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    BigInteger,
+    select,
+    DateTime,
+    Index,
+    UniqueConstraint,
+    Boolean,
+    desc,
+    func,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 import json
 from datetime import datetime, timedelta
@@ -36,7 +49,7 @@ WEEKLY_RANGE_PAYOUT_SPLITS = (
 
 # Модель пользователя
 class User(Base):
-    __tablename__ = 'users'
+    __tablename__ = "users"
     __table_args__ = (
         Index("ix_users_referrer_id", "referrer_id"),
         Index("ix_users_created_at", "created_at"),
@@ -64,23 +77,23 @@ class User(Base):
     referrer_id = Column(BigInteger, nullable=True)
     referral_count = Column(Integer, default=0)
     referral_earnings = Column(BigInteger, default=0)
-    
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
     extra_data = Column(String, default="{}")
-    
+
     luck_level = Column(Integer, default=0)
 
 
 # ==================== МОДЕЛЬ ЗАДАНИЙ ====================
 class UserTask(Base):
-    __tablename__ = 'user_tasks'
+    __tablename__ = "user_tasks"
     __table_args__ = (
         UniqueConstraint("user_id", "task_id", name="uq_user_tasks_user_id_task_id"),
         Index("ix_user_tasks_user_id_completed_at", "user_id", "completed_at"),
-        {'extend_existing': True}
+        {"extend_existing": True},
     )
-    
+
     id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, index=True)
     task_id = Column(String)
@@ -88,7 +101,7 @@ class UserTask(Base):
 
 
 class WeeklyTournamentSeason(Base):
-    __tablename__ = 'weekly_tournament_seasons'
+    __tablename__ = "weekly_tournament_seasons"
     __table_args__ = (
         UniqueConstraint("season_key", name="uq_weekly_tournament_seasons_season_key"),
         Index("ix_weekly_tournament_seasons_starts_at", "starts_at"),
@@ -107,10 +120,17 @@ class WeeklyTournamentSeason(Base):
 
 
 class WeeklyTournamentEntry(Base):
-    __tablename__ = 'weekly_tournament_entries'
+    __tablename__ = "weekly_tournament_entries"
     __table_args__ = (
-        UniqueConstraint("season_key", "user_id", name="uq_weekly_tournament_entries_season_user"),
-        Index("ix_weekly_tournament_entries_season_league_score", "season_key", "league", "score"),
+        UniqueConstraint(
+            "season_key", "user_id", name="uq_weekly_tournament_entries_season_user"
+        ),
+        Index(
+            "ix_weekly_tournament_entries_season_league_score",
+            "season_key",
+            "league",
+            "score",
+        ),
         Index("ix_weekly_tournament_entries_user_id", "user_id"),
     )
 
@@ -127,30 +147,17 @@ class WeeklyTournamentEntry(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
-class CrashGhostCashout(Base):
-    """One row per successful crash-ghost cashout; makes payouts idempotent by session_id."""
-    __tablename__ = "crash_ghost_cashouts"
-    __table_args__ = (
-        UniqueConstraint("session_id", name="uq_crash_ghost_cashouts_session_id"),
-        Index("ix_crash_ghost_cashouts_user_id", "user_id"),
-    )
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger, nullable=False)
-    session_id = Column(String(255), nullable=False)
-    bet = Column(BigInteger, nullable=False)
-    payout = Column(BigInteger, nullable=False)
-    multiplier = Column(String(16), nullable=False)
-    profit = Column(BigInteger, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-
 class WeeklyTournamentWinner(Base):
-    __tablename__ = 'weekly_tournament_winners'
+    __tablename__ = "weekly_tournament_winners"
     __table_args__ = (
         Index("ix_weekly_tournament_winners_season_key", "season_key"),
         Index("ix_weekly_tournament_winners_user_id", "user_id"),
-        UniqueConstraint("season_key", "league", "rank", name="uq_weekly_tournament_winners_season_league_rank"),
+        UniqueConstraint(
+            "season_key",
+            "league",
+            "rank",
+            name="uq_weekly_tournament_winners_season_league_rank",
+        ),
     )
 
     id = Column(Integer, primary_key=True)
@@ -173,7 +180,9 @@ class WeeklyTournamentTonPayout(Base):
     __table_args__ = (
         Index("ix_weekly_tournament_ton_payouts_season_key", "season_key"),
         Index("ix_weekly_tournament_ton_payouts_user_id", "user_id"),
-        UniqueConstraint("season_key", "user_id", name="uq_weekly_tournament_ton_payouts_season_user"),
+        UniqueConstraint(
+            "season_key", "user_id", name="uq_weekly_tournament_ton_payouts_season_user"
+        ),
     )
 
     id = Column(Integer, primary_key=True)
@@ -212,7 +221,9 @@ class StarsSkinPurchase(Base):
     __table_args__ = (
         Index("ix_stars_skin_purchases_skin_id_created_at", "skin_id", "created_at"),
         Index("ix_stars_skin_purchases_user_id", "user_id"),
-        UniqueConstraint("telegram_charge_id", name="uq_stars_skin_purchases_charge_id"),
+        UniqueConstraint(
+            "telegram_charge_id", name="uq_stars_skin_purchases_charge_id"
+        ),
     )
 
     id = Column(Integer, primary_key=True)
@@ -243,14 +254,19 @@ class AdminFraudReview(Base):
 
 # ==================== ФУНКЦИИ ====================
 
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
 
-def get_weekly_tournament_season_window(now: datetime | None = None) -> tuple[datetime, datetime]:
+def get_weekly_tournament_season_window(
+    now: datetime | None = None,
+) -> tuple[datetime, datetime]:
     now = now or datetime.utcnow()
-    start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     end = start + timedelta(days=7)
     return start, end
 
@@ -271,9 +287,13 @@ def get_weekly_tournament_league(display_level: int) -> str:
     return "bronze"
 
 
-async def ensure_weekly_tournament_season(session: AsyncSession, season_key: str, starts_at: datetime, ends_at: datetime):
+async def ensure_weekly_tournament_season(
+    session: AsyncSession, season_key: str, starts_at: datetime, ends_at: datetime
+):
     result = await session.execute(
-        select(WeeklyTournamentSeason).where(WeeklyTournamentSeason.season_key == season_key)
+        select(WeeklyTournamentSeason).where(
+            WeeklyTournamentSeason.season_key == season_key
+        )
     )
     season = result.scalar_one_or_none()
     if season:
@@ -324,9 +344,7 @@ def _serialize_user(user: User) -> dict:
 
 async def get_user(user_id: int):
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(User).where(User.user_id == user_id)
-        )
+        result = await session.execute(select(User).where(User.user_id == user_id))
         user = result.scalar_one_or_none()
 
         if user:
@@ -335,6 +353,7 @@ async def get_user(user_id: int):
 
 
 # ==================== РЕФЕРАЛЬНАЯ СИСТЕМА ====================
+
 
 async def add_referral_bonus(referrer_id: int, referral_id: int):
     """Начисление бонуса рефереру за нового реферала"""
@@ -345,17 +364,25 @@ async def add_referral_bonus(referrer_id: int, referral_id: int):
                 select(User).where(User.user_id == referrer_id)
             )
             referrer = result.scalar_one_or_none()
-            
+
             if not referrer or referrer_id == referral_id:
-                logging.error(f"❌ Реферер {referrer_id} не найден при попытке начисления бонуса за реферала {referral_id}")
+                logging.error(
+                    f"❌ Реферер {referrer_id} не найден при попытке начисления бонуса за реферала {referral_id}"
+                )
                 return False
 
             referral_result = await session.execute(
                 select(User).where(User.user_id == referral_id)
             )
             referral = referral_result.scalar_one_or_none()
-            if referral and referral.referrer_id == referrer_id and referrer.referrer_id == referral_id:
-                logging.error(f"вќЊ РћС‚РєР»РѕРЅРµРЅ РІР·Р°РёРјРЅС‹Р№ СЂРµС„РµСЂР°Р»СЊРЅС‹Р№ С†РёРєР»: {referrer_id} <-> {referral_id}")
+            if (
+                referral
+                and referral.referrer_id == referrer_id
+                and referrer.referrer_id == referral_id
+            ):
+                logging.error(
+                    f"вќЊ РћС‚РєР»РѕРЅРµРЅ РІР·Р°РёРјРЅС‹Р№ СЂРµС„РµСЂР°Р»СЊРЅС‹Р№ С†РёРєР»: {referrer_id} <-> {referral_id}"
+                )
                 return False
 
             extra_data = {}
@@ -380,15 +407,21 @@ async def add_referral_bonus(referrer_id: int, referral_id: int):
             referrer.referral_count += 1
             referrer.referral_earnings += REFERRAL_SIGNUP_BONUS
             referrer.extra_data = json.dumps(extra_data)
-            
+
             await session.commit()
-            logging.info(f"✅ Реферер {referrer_id} получил +{REFERRAL_SIGNUP_BONUS} монет за реферала {referral_id}")
-            logging.info(f"📊 Теперь у реферера {referrer_id}: coins={referrer.coins}, count={referrer.referral_count}")
-            
+            logging.info(
+                f"✅ Реферер {referrer_id} получил +{REFERRAL_SIGNUP_BONUS} монет за реферала {referral_id}"
+            )
+            logging.info(
+                f"📊 Теперь у реферера {referrer_id}: coins={referrer.coins}, count={referrer.referral_count}"
+            )
+
             return True
-            
+
     except Exception as e:
-        logging.error(f"❌ Ошибка начисления бонуса рефереру {referrer_id} за реферала {referral_id}: {e}")
+        logging.error(
+            f"❌ Ошибка начисления бонуса рефереру {referrer_id} за реферала {referral_id}: {e}"
+        )
         return False
 
 
@@ -396,19 +429,17 @@ async def get_referral_stats(user_id: int):
     """Получение реферальной статистики пользователя"""
     try:
         async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(User).where(User.user_id == user_id)
-            )
+            result = await session.execute(select(User).where(User.user_id == user_id))
             user = result.scalar_one_or_none()
-            
+
             if not user:
                 return {"count": 0, "earnings": 0}
-            
+
             return {
                 "count": user.referral_count or 0,
-                "earnings": user.referral_earnings or 0
+                "earnings": user.referral_earnings or 0,
             }
-            
+
     except Exception as e:
         logging.error(f"❌ Ошибка получения реферальной статистики для {user_id}: {e}")
         return {"count": 0, "earnings": 0}
@@ -422,17 +453,17 @@ async def get_referrals_list(user_id: int):
                 select(User).where(User.referrer_id == user_id)
             )
             referrals = result.scalars().all()
-            
+
             return [
                 {
                     "user_id": ref.user_id,
                     "username": ref.username,
                     "joined_at": ref.created_at.isoformat() if ref.created_at else None,
-                    "earned": REFERRAL_SIGNUP_BONUS
+                    "earned": REFERRAL_SIGNUP_BONUS,
                 }
                 for ref in referrals
             ]
-            
+
     except Exception as e:
         logging.error(f"❌ Ошибка получения списка рефералов для {user_id}: {e}")
         return []
@@ -451,18 +482,14 @@ async def add_completed_task(user_id: int, task_id: str):
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(UserTask).where(
-                UserTask.user_id == user_id,
-                UserTask.task_id == task_id
+                UserTask.user_id == user_id, UserTask.task_id == task_id
             )
         )
         existing = result.scalar_one_or_none()
         if existing:
             return False
-        
-        new_task = UserTask(
-            user_id=user_id,
-            task_id=task_id
-        )
+
+        new_task = UserTask(user_id=user_id, task_id=task_id)
         session.add(new_task)
         await session.commit()
         return True
@@ -470,13 +497,11 @@ async def add_completed_task(user_id: int, task_id: str):
 
 async def add_user(user_id: int, username: str = None, referrer_id: int = None):
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(User).where(User.user_id == user_id)
-        )
+        result = await session.execute(select(User).where(User.user_id == user_id))
         existing = result.scalar_one_or_none()
         if existing:
             return existing
-        
+
         new_user = User(
             user_id=user_id,
             username=username or f"user_{user_id}",
@@ -495,83 +520,105 @@ async def add_user(user_id: int, username: str = None, referrer_id: int = None):
             referrer_id=referrer_id,
             referral_count=0,
             referral_earnings=0,
-            extra_data=json.dumps({"owned_skins": ["default.pngSP"], "selected_skin": "default.pngSP", "ads_watched": 0})
+            extra_data=json.dumps(
+                {
+                    "owned_skins": ["default.pngSP"],
+                    "selected_skin": "default.pngSP",
+                    "ads_watched": 0,
+                }
+            ),
         )
-        
+
         session.add(new_user)
         await session.commit()
         logging.info(f"✅ Пользователь {user_id} создан, referrer_id={referrer_id}")
-        
+
         if referrer_id:
-            logging.info(f"🎯 Попытка начисления бонуса: реферер {referrer_id} за реферала {user_id}")
+            logging.info(
+                f"🎯 Попытка начисления бонуса: реферер {referrer_id} за реферала {user_id}"
+            )
             await add_referral_bonus(referrer_id, user_id)
-        
+
         return new_user
 
 
 async def update_user(user_id: int, data: dict):
     allowed_fields = {
-        'username', 'coins', 'profit_per_hour', 'profit_per_tap', 'energy',
-        'max_energy', 'level', 'multitap_level', 'profit_level', 'energy_level',
-        'boost_level', 'last_passive_income', 'last_energy_update', 'referrer_id',
-        'referral_count', 'referral_earnings', 'extra_data', 'luck_level'
+        "username",
+        "coins",
+        "profit_per_hour",
+        "profit_per_tap",
+        "energy",
+        "max_energy",
+        "level",
+        "multitap_level",
+        "profit_level",
+        "energy_level",
+        "boost_level",
+        "last_passive_income",
+        "last_energy_update",
+        "referrer_id",
+        "referral_count",
+        "referral_earnings",
+        "extra_data",
+        "luck_level",
     }
     unknown_fields = set(data) - allowed_fields
     if unknown_fields:
         raise ValueError(f"Unsupported update_user fields: {sorted(unknown_fields)}")
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(User).where(User.user_id == user_id)
-        )
+        result = await session.execute(select(User).where(User.user_id == user_id))
         user = result.scalar_one_or_none()
 
         if not user:
             return None
 
-        if 'coins' in data:
-            user.coins = data['coins']
-        if 'username' in data:
-            user.username = data['username']
-        if 'energy' in data:
-            user.energy = data['energy']
-        if 'profit_per_hour' in data:
-            user.profit_per_hour = data['profit_per_hour']
-        if 'profit_per_tap' in data:
-            user.profit_per_tap = data['profit_per_tap']
-        if 'max_energy' in data:
-            user.max_energy = data['max_energy']
-        if 'level' in data:
-            user.level = data['level']
-        if 'multitap_level' in data:
-            user.multitap_level = data['multitap_level']
-        if 'profit_level' in data:
-            user.profit_level = data['profit_level']
-        if 'energy_level' in data:
-            user.energy_level = data['energy_level']
-        if 'boost_level' in data:
-            user.boost_level = data['boost_level']
-        if 'last_passive_income' in data:
-            user.last_passive_income = data['last_passive_income']
-        if 'last_energy_update' in data:
-            user.last_energy_update = data['last_energy_update']
-        if 'referrer_id' in data:
-            user.referrer_id = data['referrer_id']
-        if 'referral_count' in data:
-            user.referral_count = data['referral_count']
-        if 'referral_earnings' in data:
-            user.referral_earnings = data['referral_earnings']
-        if 'luck_level' in data:
-            user.luck_level = data['luck_level']
-        if 'extra_data' in data:
-            user.extra_data = json.dumps(data['extra_data'])
+        if "coins" in data:
+            user.coins = data["coins"]
+        if "username" in data:
+            user.username = data["username"]
+        if "energy" in data:
+            user.energy = data["energy"]
+        if "profit_per_hour" in data:
+            user.profit_per_hour = data["profit_per_hour"]
+        if "profit_per_tap" in data:
+            user.profit_per_tap = data["profit_per_tap"]
+        if "max_energy" in data:
+            user.max_energy = data["max_energy"]
+        if "level" in data:
+            user.level = data["level"]
+        if "multitap_level" in data:
+            user.multitap_level = data["multitap_level"]
+        if "profit_level" in data:
+            user.profit_level = data["profit_level"]
+        if "energy_level" in data:
+            user.energy_level = data["energy_level"]
+        if "boost_level" in data:
+            user.boost_level = data["boost_level"]
+        if "last_passive_income" in data:
+            user.last_passive_income = data["last_passive_income"]
+        if "last_energy_update" in data:
+            user.last_energy_update = data["last_energy_update"]
+        if "referrer_id" in data:
+            user.referrer_id = data["referrer_id"]
+        if "referral_count" in data:
+            user.referral_count = data["referral_count"]
+        if "referral_earnings" in data:
+            user.referral_earnings = data["referral_earnings"]
+        if "luck_level" in data:
+            user.luck_level = data["luck_level"]
+        if "extra_data" in data:
+            user.extra_data = json.dumps(data["extra_data"])
 
         await session.commit()
 
         return await get_user(user_id)
 
 
-async def _crash_ghost_cashout_idempotent_response(user_id: int, session_id: str) -> dict | None:
+async def _crash_ghost_cashout_idempotent_response(
+    user_id: int, session_id: str
+) -> dict | None:
     async with AsyncSessionLocal() as session:
         row_result = await session.execute(
             select(CrashGhostCashout).where(
@@ -661,7 +708,9 @@ async def record_crash_ghost_cashout(
     }
 
 
-async def add_weekly_tournament_score(user_id: int, username: str | None, display_level: int, gained: int):
+async def add_weekly_tournament_score(
+    user_id: int, username: str | None, display_level: int, gained: int
+):
     if int(gained or 0) <= 0:
         return None
 
@@ -729,42 +778,54 @@ async def add_weekly_tournament_score(user_id: int, username: str | None, displa
     }
 
 
-async def get_weekly_tournament_leaderboard(*, season_key: str | None = None, league: str | None = None, limit: int = 50):
+async def get_weekly_tournament_leaderboard(
+    *, season_key: str | None = None, league: str | None = None, limit: int = 50
+):
     season_key = season_key or get_weekly_tournament_season_key()
     limit = max(1, min(200, int(limit or 50)))
 
     async with AsyncSessionLocal() as session:
-        query = select(WeeklyTournamentEntry).where(WeeklyTournamentEntry.season_key == season_key)
+        query = select(WeeklyTournamentEntry).where(
+            WeeklyTournamentEntry.season_key == season_key
+        )
         if league:
             query = query.where(WeeklyTournamentEntry.league == league)
-        query = query.order_by(desc(WeeklyTournamentEntry.score), WeeklyTournamentEntry.updated_at.asc()).limit(limit)
+        query = query.order_by(
+            desc(WeeklyTournamentEntry.score), WeeklyTournamentEntry.updated_at.asc()
+        ).limit(limit)
         result = await session.execute(query)
         entries = result.scalars().all()
 
         rows = []
         for idx, entry in enumerate(entries, start=1):
-            rows.append({
-                "rank": idx,
-                "user_id": entry.user_id,
-                "username": entry.username,
-                "display_level": int(entry.display_level or 1),
-                "league": entry.league,
-                "score": int(entry.score or 0),
-                "eligible_for_payout": bool(entry.eligible_for_payout),
-                "fraud_flag": bool(entry.fraud_flag),
-                "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
-            })
+            rows.append(
+                {
+                    "rank": idx,
+                    "user_id": entry.user_id,
+                    "username": entry.username,
+                    "display_level": int(entry.display_level or 1),
+                    "league": entry.league,
+                    "score": int(entry.score or 0),
+                    "eligible_for_payout": bool(entry.eligible_for_payout),
+                    "fraud_flag": bool(entry.fraud_flag),
+                    "updated_at": entry.updated_at.isoformat()
+                    if entry.updated_at
+                    else None,
+                }
+            )
         return rows
 
 
-async def get_weekly_tournament_player_entry(user_id: int, season_key: str | None = None):
+async def get_weekly_tournament_player_entry(
+    user_id: int, season_key: str | None = None
+):
     season_key = season_key or get_weekly_tournament_season_key()
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(WeeklyTournamentEntry).where(
                 WeeklyTournamentEntry.season_key == season_key,
-                WeeklyTournamentEntry.user_id == user_id
+                WeeklyTournamentEntry.user_id == user_id,
             )
         )
         entry = result.scalar_one_or_none()
@@ -775,7 +836,7 @@ async def get_weekly_tournament_player_entry(user_id: int, season_key: str | Non
             select(func.count()).where(
                 WeeklyTournamentEntry.season_key == season_key,
                 WeeklyTournamentEntry.league == entry.league,
-                WeeklyTournamentEntry.score > entry.score
+                WeeklyTournamentEntry.score > entry.score,
             )
         )
         rank = int(rank_query.scalar() or 0) + 1
@@ -796,7 +857,9 @@ async def get_weekly_tournament_player_entry(user_id: int, season_key: str | Non
 async def finalize_weekly_tournament_season(season_key: str):
     async with AsyncSessionLocal() as session:
         season_result = await session.execute(
-            select(WeeklyTournamentSeason).where(WeeklyTournamentSeason.season_key == season_key)
+            select(WeeklyTournamentSeason).where(
+                WeeklyTournamentSeason.season_key == season_key
+            )
         )
         season = season_result.scalar_one_or_none()
         if not season or season.status == "finalized":
@@ -806,13 +869,21 @@ async def finalize_weekly_tournament_season(season_key: str):
 
         for league in WEEKLY_LEAGUE_ORDER:
             result = await session.execute(
-                select(WeeklyTournamentEntry).where(
+                select(WeeklyTournamentEntry)
+                .where(
                     WeeklyTournamentEntry.season_key == season_key,
-                    WeeklyTournamentEntry.league == league
-                ).order_by(desc(WeeklyTournamentEntry.score), WeeklyTournamentEntry.updated_at.asc()).limit(50)
+                    WeeklyTournamentEntry.league == league,
+                )
+                .order_by(
+                    desc(WeeklyTournamentEntry.score),
+                    WeeklyTournamentEntry.updated_at.asc(),
+                )
+                .limit(50)
             )
             entries = result.scalars().all()
-            league_fund_cents = int(total_fund_cents * WEEKLY_LEAGUE_FUND_SPLITS.get(league, 0))
+            league_fund_cents = int(
+                total_fund_cents * WEEKLY_LEAGUE_FUND_SPLITS.get(league, 0)
+            )
 
             top_payouts = {
                 rank: int(league_fund_cents * share)
@@ -822,7 +893,8 @@ async def finalize_weekly_tournament_season(season_key: str):
             for (start_rank, end_rank), share in WEEKLY_RANGE_PAYOUT_SPLITS:
                 pool_cents = int(league_fund_cents * share)
                 eligible_entries = [
-                    entry for index, entry in enumerate(entries, start=1)
+                    entry
+                    for index, entry in enumerate(entries, start=1)
                     if start_rank <= index <= end_rank
                     and bool(entry.eligible_for_payout)
                     and not bool(entry.fraud_flag)
@@ -832,12 +904,14 @@ async def finalize_weekly_tournament_season(season_key: str):
                 if eligible_entries:
                     share_cents = pool_cents // len(eligible_entries)
                     remainder_cents = pool_cents % len(eligible_entries)
-                range_payouts.append({
-                    "start": start_rank,
-                    "end": end_rank,
-                    "share_cents": share_cents,
-                    "remainder_cents": remainder_cents,
-                })
+                range_payouts.append(
+                    {
+                        "start": start_rank,
+                        "end": end_rank,
+                        "share_cents": share_cents,
+                        "remainder_cents": remainder_cents,
+                    }
+                )
 
             for idx, entry in enumerate(entries, start=1):
                 payout_cents = 0
@@ -889,7 +963,9 @@ async def list_weekly_tournament_seasons(limit: int = 12):
                 "status": season.status,
                 "gross_ad_revenue_cents": int(season.gross_ad_revenue_cents or 0),
                 "payout_fund_cents": int(season.payout_fund_cents or 0),
-                "settled_at": season.settled_at.isoformat() if season.settled_at else None,
+                "settled_at": season.settled_at.isoformat()
+                if season.settled_at
+                else None,
             }
             for season in seasons
         ]
@@ -897,10 +973,14 @@ async def list_weekly_tournament_seasons(limit: int = 12):
 
 async def get_weekly_tournament_winners(season_key: str, league: str | None = None):
     async with AsyncSessionLocal() as session:
-        query = select(WeeklyTournamentWinner).where(WeeklyTournamentWinner.season_key == season_key)
+        query = select(WeeklyTournamentWinner).where(
+            WeeklyTournamentWinner.season_key == season_key
+        )
         if league:
             query = query.where(WeeklyTournamentWinner.league == league)
-        query = query.order_by(WeeklyTournamentWinner.league.asc(), WeeklyTournamentWinner.rank.asc())
+        query = query.order_by(
+            WeeklyTournamentWinner.league.asc(), WeeklyTournamentWinner.rank.asc()
+        )
         result = await session.execute(query)
         winners = result.scalars().all()
         return [
@@ -916,13 +996,17 @@ async def get_weekly_tournament_winners(season_key: str, league: str | None = No
                 "payout_cents": int(winner.payout_cents or 0),
                 "eligible_for_payout": bool(winner.eligible_for_payout),
                 "fraud_flag": bool(winner.fraud_flag),
-                "created_at": winner.created_at.isoformat() if winner.created_at else None,
+                "created_at": winner.created_at.isoformat()
+                if winner.created_at
+                else None,
             }
             for winner in winners
         ]
 
 
-async def record_rewarded_ad_claim(user_id: int, action: str, metadata: dict | None = None):
+async def record_rewarded_ad_claim(
+    user_id: int, action: str, metadata: dict | None = None
+):
     async with AsyncSessionLocal() as session:
         row = RewardedAdClaim(
             user_id=user_id,
@@ -941,11 +1025,14 @@ async def get_rewarded_ads_admin_summary(hours: int = 24):
     async with AsyncSessionLocal() as session:
         total_result = await session.execute(select(func.count(RewardedAdClaim.id)))
         recent_result = await session.execute(
-            select(func.count(RewardedAdClaim.id)).where(RewardedAdClaim.created_at >= since)
+            select(func.count(RewardedAdClaim.id)).where(
+                RewardedAdClaim.created_at >= since
+            )
         )
         grouped_total_result = await session.execute(
-            select(RewardedAdClaim.action, func.count(RewardedAdClaim.id))
-            .group_by(RewardedAdClaim.action)
+            select(RewardedAdClaim.action, func.count(RewardedAdClaim.id)).group_by(
+                RewardedAdClaim.action
+            )
         )
         grouped_recent_result = await session.execute(
             select(RewardedAdClaim.action, func.count(RewardedAdClaim.id))
@@ -953,8 +1040,12 @@ async def get_rewarded_ads_admin_summary(hours: int = 24):
             .group_by(RewardedAdClaim.action)
         )
 
-        grouped_total = {action: int(count or 0) for action, count in grouped_total_result.all()}
-        grouped_recent = {action: int(count or 0) for action, count in grouped_recent_result.all()}
+        grouped_total = {
+            action: int(count or 0) for action, count in grouped_total_result.all()
+        }
+        grouped_recent = {
+            action: int(count or 0) for action, count in grouped_recent_result.all()
+        }
 
         return {
             "total_claims": int(total_result.scalar() or 0),
@@ -976,7 +1067,9 @@ async def record_stars_skin_purchase(
     async with AsyncSessionLocal() as session:
         if telegram_charge_id:
             existing_result = await session.execute(
-                select(StarsSkinPurchase).where(StarsSkinPurchase.telegram_charge_id == telegram_charge_id)
+                select(StarsSkinPurchase).where(
+                    StarsSkinPurchase.telegram_charge_id == telegram_charge_id
+                )
             )
             if existing_result.scalar_one_or_none():
                 return False
@@ -998,7 +1091,9 @@ async def get_stars_skin_sales_admin_summary(limit: int = 20):
     limit = max(1, min(100, int(limit or 20)))
     async with AsyncSessionLocal() as session:
         total_result = await session.execute(select(func.count(StarsSkinPurchase.id)))
-        total_stars_result = await session.execute(select(func.coalesce(func.sum(StarsSkinPurchase.stars_amount), 0)))
+        total_stars_result = await session.execute(
+            select(func.coalesce(func.sum(StarsSkinPurchase.stars_amount), 0))
+        )
         grouped_result = await session.execute(
             select(
                 StarsSkinPurchase.skin_id,
@@ -1006,7 +1101,10 @@ async def get_stars_skin_sales_admin_summary(limit: int = 20):
                 func.coalesce(func.sum(StarsSkinPurchase.stars_amount), 0),
             )
             .group_by(StarsSkinPurchase.skin_id)
-            .order_by(desc(func.count(StarsSkinPurchase.id)), desc(func.coalesce(func.sum(StarsSkinPurchase.stars_amount), 0)))
+            .order_by(
+                desc(func.count(StarsSkinPurchase.id)),
+                desc(func.coalesce(func.sum(StarsSkinPurchase.stars_amount), 0)),
+            )
         )
         recent_result = await session.execute(
             select(StarsSkinPurchase)
@@ -1032,14 +1130,18 @@ async def get_stars_skin_sales_admin_summary(limit: int = 20):
                     "skin_id": row.skin_id,
                     "stars_amount": int(row.stars_amount or 0),
                     "currency": row.currency,
-                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "created_at": row.created_at.isoformat()
+                    if row.created_at
+                    else None,
                 }
                 for row in recent_result.scalars().all()
             ],
         }
 
 
-async def upsert_admin_fraud_review(user_id: int, status: str, reason: str | None, disqualify_from_payout: bool):
+async def upsert_admin_fraud_review(
+    user_id: int, status: str, reason: str | None, disqualify_from_payout: bool
+):
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(AdminFraudReview).where(AdminFraudReview.user_id == user_id)
