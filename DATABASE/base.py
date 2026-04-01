@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy import Column, Integer, String, BigInteger, select, DateTime, Index, UniqueConstraint, Boolean, desc, func
+from sqlalchemy import Column, Integer, String, BigInteger, select, DateTime, Index, UniqueConstraint, Boolean, desc, func, update
+from sqlalchemy.exc import IntegrityError
 import json
 from datetime import datetime, timedelta
 import logging
@@ -124,6 +125,24 @@ class WeeklyTournamentEntry(Base):
     fraud_flag = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CrashGhostCashout(Base):
+    """One row per successful crash-ghost cashout; makes payouts idempotent by session_id."""
+    __tablename__ = "crash_ghost_cashouts"
+    __table_args__ = (
+        UniqueConstraint("session_id", name="uq_crash_ghost_cashouts_session_id"),
+        Index("ix_crash_ghost_cashouts_user_id", "user_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    session_id = Column(String(255), nullable=False)
+    bet = Column(BigInteger, nullable=False)
+    payout = Column(BigInteger, nullable=False)
+    multiplier = Column(String(16), nullable=False)
+    profit = Column(BigInteger, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class WeeklyTournamentWinner(Base):
@@ -552,6 +571,96 @@ async def update_user(user_id: int, data: dict):
         return await get_user(user_id)
 
 
+async def _crash_ghost_cashout_idempotent_response(user_id: int, session_id: str) -> dict | None:
+    async with AsyncSessionLocal() as session:
+        row_result = await session.execute(
+            select(CrashGhostCashout).where(
+                CrashGhostCashout.session_id == session_id,
+                CrashGhostCashout.user_id == user_id,
+            )
+        )
+        cashout = row_result.scalar_one_or_none()
+        if not cashout:
+            return None
+        user_result = await session.execute(select(User).where(User.user_id == user_id))
+        user_row = user_result.scalar_one_or_none()
+        coins = int(user_row.coins) if user_row else 0
+        return {
+            "idempotent": True,
+            "payout": int(cashout.payout),
+            "profit": int(cashout.profit),
+            "multiplier": float(cashout.multiplier),
+            "bet": int(cashout.bet),
+            "coins": coins,
+        }
+
+
+async def record_crash_ghost_cashout(
+    user_id: int,
+    session_id: str,
+    bet: int,
+    payout: int,
+    multiplier: float,
+    profit: int,
+) -> dict | None:
+    """
+    Credit crash-ghost payout and persist a dedupe row in one transaction.
+    Idempotency is by unique session_id only (no required coins snapshot).
+    INSERT journal first, then coins += payout; both commit or neither.
+    Returns None only if the user row is missing at commit time (rare).
+    """
+    bet_i = int(bet)
+    payout_i = int(payout)
+    profit_i = int(profit)
+    mult_str = f"{round(float(multiplier), 2):.2f}"
+
+    idem = await _crash_ghost_cashout_idempotent_response(user_id, session_id)
+    if idem:
+        return idem
+
+    async with AsyncSessionLocal() as session:
+        session.add(
+            CrashGhostCashout(
+                user_id=user_id,
+                session_id=session_id,
+                bet=bet_i,
+                payout=payout_i,
+                multiplier=mult_str,
+                profit=profit_i,
+            )
+        )
+        try:
+            await session.flush()
+        except IntegrityError:
+            await session.rollback()
+            return await _crash_ghost_cashout_idempotent_response(user_id, session_id)
+
+        result = await session.execute(
+            update(User)
+            .where(User.user_id == user_id)
+            .values(coins=User.coins + payout_i)
+        )
+        if result.rowcount != 1:
+            await session.rollback()
+            return None
+
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            return await _crash_ghost_cashout_idempotent_response(user_id, session_id)
+
+    fresh = await get_user(user_id)
+    return {
+        "idempotent": False,
+        "payout": payout_i,
+        "profit": profit_i,
+        "multiplier": float(mult_str),
+        "bet": bet_i,
+        "coins": int(fresh.get("coins", 0)) if fresh else payout_i,
+    }
+
+
 async def add_weekly_tournament_score(user_id: int, username: str | None, display_level: int, gained: int):
     if int(gained or 0) <= 0:
         return None
@@ -560,42 +669,64 @@ async def add_weekly_tournament_score(user_id: int, username: str | None, displa
     season_key = get_weekly_tournament_season_key(starts_at)
     league = get_weekly_tournament_league(display_level)
     now = datetime.utcnow()
+    display_level_i = max(1, int(display_level or 1))
+    gained_i = int(gained)
+
+    dialect_name = engine.dialect.name
+    if dialect_name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as dialect_insert
+    elif dialect_name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as dialect_insert
+    else:
+        raise RuntimeError(
+            "add_weekly_tournament_score requires PostgreSQL or SQLite "
+            f"(got dialect {dialect_name!r})"
+        )
+
+    table = WeeklyTournamentEntry.__table__
+    insert_stmt = dialect_insert(table).values(
+        season_key=season_key,
+        user_id=user_id,
+        username=username,
+        display_level=display_level_i,
+        league=league,
+        score=gained_i,
+        eligible_for_payout=True,
+        fraud_flag=False,
+        created_at=now,
+        updated_at=now,
+    )
+    upsert_stmt = insert_stmt.on_conflict_do_update(
+        index_elements=[table.c.season_key, table.c.user_id],
+        set_={
+            "score": table.c.score + insert_stmt.excluded.score,
+            "username": func.coalesce(
+                func.nullif(insert_stmt.excluded.username, ""),
+                table.c.username,
+            ),
+            "display_level": insert_stmt.excluded.display_level,
+            "league": insert_stmt.excluded.league,
+            "updated_at": insert_stmt.excluded.updated_at,
+        },
+    )
 
     async with AsyncSessionLocal() as session:
         await ensure_weekly_tournament_season(session, season_key, starts_at, ends_at)
-
-        result = await session.execute(
-            select(WeeklyTournamentEntry).where(
+        await session.execute(upsert_stmt)
+        score_row = await session.execute(
+            select(WeeklyTournamentEntry.score).where(
                 WeeklyTournamentEntry.season_key == season_key,
-                WeeklyTournamentEntry.user_id == user_id
+                WeeklyTournamentEntry.user_id == user_id,
             )
         )
-        entry = result.scalar_one_or_none()
-
-        if not entry:
-            entry = WeeklyTournamentEntry(
-                season_key=season_key,
-                user_id=user_id,
-                username=username,
-                display_level=max(1, int(display_level or 1)),
-                league=league,
-                score=int(gained),
-                updated_at=now,
-            )
-            session.add(entry)
-        else:
-            entry.username = username or entry.username
-            entry.display_level = max(1, int(display_level or 1))
-            entry.league = league
-            entry.score = int(entry.score or 0) + int(gained)
-            entry.updated_at = now
-
+        final_score = int(score_row.scalar_one())
         await session.commit()
-        return {
-            "season_key": season_key,
-            "league": league,
-            "score": int(entry.score or 0),
-        }
+
+    return {
+        "season_key": season_key,
+        "league": league,
+        "score": final_score,
+    }
 
 
 async def get_weekly_tournament_leaderboard(*, season_key: str | None = None, league: str | None = None, limit: int = 50):

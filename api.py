@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 # Sync marker for VS Code source control
 from fastapi.responses import JSONResponse, Response
@@ -30,6 +30,7 @@ from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_
 from DATABASE.base import (
     get_user, add_user as create_user, update_user, add_referral_bonus,
     init_db, get_completed_tasks, add_completed_task,
+    record_crash_ghost_cashout,
     add_weekly_tournament_score, get_weekly_tournament_leaderboard,
     get_weekly_tournament_player_entry, get_weekly_tournament_season_key,
     get_weekly_tournament_season_window, get_weekly_tournament_league,
@@ -4013,25 +4014,31 @@ async def cashout_crash_ghost_round(payload: CrashGameCashoutRequest, request: R
 
         bet = int(session.get("bet", 0))
         payout = max(0, int(bet * runtime["multiplier"]))
-        new_coins = int(user.get("coins", 0)) + payout
+        profit = payout - bet
 
-        updated_user = await apply_atomic_user_updates(
+        cashout_result = await record_crash_ghost_cashout(
             payload.user_id,
-            user,
-            {"coins": new_coins},
-            expected_fields=("coins",),
-            conflict_detail="Crash cashout state changed, retry",
+            payload.session_id,
+            bet,
+            payout,
+            runtime["multiplier"],
+            profit,
         )
+        if cashout_result is None:
+            raise HTTPException(status_code=409, detail="Crash cashout state changed, retry")
+
+        await invalidate_user_cache(payload.user_id)
         await redis_conn.delete(session_key)
 
+        paid = int(cashout_result["payout"])
         return {
             "success": True,
             "crashed": False,
-            "coins": int(updated_user.get("coins", new_coins)),
-            "payout": payout,
-            "profit": payout - bet,
-            "multiplier": runtime["multiplier"],
-            "message": f"Ghost paid {payout} coins. Profit: +{payout - bet}",
+            "coins": int(cashout_result["coins"]),
+            "payout": paid,
+            "profit": int(cashout_result["profit"]),
+            "multiplier": cashout_result["multiplier"],
+            "message": f"Ghost paid {paid} coins. Profit: +{cashout_result['profit']}",
         }
     except HTTPException:
         raise
