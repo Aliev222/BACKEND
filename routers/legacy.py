@@ -2400,6 +2400,12 @@ async def get_user_data(user_id: int, request: Request):
             raise HTTPException(status_code=404, detail="User not found")
         await touch_user_activity(user_id, user)
 
+        redis_conn = await get_redis_or_none()
+        if redis_conn:
+            await ensure_coins_hot_initialized(
+                user_id, int(user.get("coins", 0)), redis_conn
+            )
+
         now = datetime.utcnow()
         current_energy = calculate_current_energy(user, now)
         max_energy = resolve_max_energy(user)
@@ -3719,6 +3725,71 @@ async def can_unlock_skin(user: dict, skin_id: str) -> bool:
     return False
 
 
+async def ensure_coins_hot_initialized(user_id: int, db_coins: int, redis_conn) -> None:
+    """
+    Ensure coins_hot:{user_id} exists in Redis, initializing it if missing.
+
+    Called from profile/auth endpoints (NOT from the hot click path) to
+    safely bootstrap the hot balance key outside the increment pipeline.
+
+    baseline = DB_coins + coins_pending + SUM(coins_flushing:{user_id}:*)
+
+    This does NOT double-count because:
+    - flushing keys are deleted ONLY after DB commit succeeds
+    - once deleted, the amount is in DB_coins for future boots
+    - SET is conditional on EXISTS, so we never overwrite an existing key
+
+    Race-safe: the Lua script atomically checks EXISTS and SETs baseline.
+    If flush worker is running concurrently, worst case is a tiny stale
+    read (pending already moved to flushing), which self-corrects on next
+    profile load after flush commits to DB.
+    """
+    coins_hot_key = f"coins_hot:{user_id}"
+
+    try:
+        exists = await redis_conn.exists(coins_hot_key)
+        if exists:
+            return
+
+        baseline = db_coins
+
+        try:
+            pending = await redis_conn.get(f"coins_pending:{user_id}")
+            if pending:
+                baseline += int(pending)
+        except Exception:
+            pass
+
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = await redis_conn.scan(
+                    cursor, match=f"coins_flushing:{user_id}:*", count=100
+                )
+                for key in keys:
+                    val = await redis_conn.get(key)
+                    if val:
+                        baseline += int(val)
+                if cursor == 0:
+                    break
+        except Exception:
+            pass
+
+        init_lua = """
+        local hot_key = KEYS[1]
+        local baseline = ARGV[1]
+
+        if redis.call('EXISTS', hot_key) == 0 then
+            redis.call('SET', hot_key, baseline)
+            return 1
+        end
+        return 0
+        """
+        await redis_conn.eval(init_lua, 1, coins_hot_key, str(baseline))
+    except Exception:
+        pass
+
+
 @router.post("/api/clicks")
 async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
     try:
@@ -3893,15 +3964,62 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             )
             await redis_conn.expire(energy_key, 300)
 
-        # === ATOMIC COINS + RETURNING (one session, one commit) ===
-        async with AsyncSessionLocal() as session:
-            new_coins = await add_coins_atomic_returning(
-                session, payload.user_id, gained
+        # === REDIS COINS (atomic Lua script, no DB write per click) ===
+        if redis_conn:
+            coins_hot_key = f"coins_hot:{payload.user_id}"
+            coins_pending_key = f"coins_pending:{payload.user_id}"
+
+            # Lua script returns -1 sentinel if hot_key is missing.
+            # The handler must initialize it first, then retry.
+            coins_lua = """
+            local hot_key = KEYS[1]
+            local pending_key = KEYS[2]
+            local delta = tonumber(ARGV[1])
+
+            if redis.call('EXISTS', hot_key) == 0 then
+                return -1
+            end
+
+            redis.call('INCRBY', hot_key, delta)
+            redis.call('INCRBY', pending_key, delta)
+            return redis.call('GET', hot_key)
+            """
+
+            new_coins = int(
+                await redis_conn.eval(
+                    coins_lua,
+                    2,
+                    coins_hot_key,
+                    coins_pending_key,
+                    str(gained),
+                )
             )
-            if new_coins is None:
-                logger.error("Atomic coins update failed for user=%s", payload.user_id)
-                raise HTTPException(status_code=500, detail="Coin update failed")
-            await session.commit()
+
+            if new_coins == -1:
+                await ensure_coins_hot_initialized(
+                    payload.user_id, int(user.get("coins", 0)), redis_conn
+                )
+                new_coins = int(
+                    await redis_conn.eval(
+                        coins_lua,
+                        2,
+                        coins_hot_key,
+                        coins_pending_key,
+                        str(gained),
+                    )
+                )
+        else:
+            # Fallback: DB write if Redis unavailable
+            async with AsyncSessionLocal() as session:
+                new_coins = await add_coins_atomic_returning(
+                    session, payload.user_id, gained
+                )
+                if new_coins is None:
+                    logger.error(
+                        "Atomic coins update failed for user=%s", payload.user_id
+                    )
+                    raise HTTPException(status_code=500, detail="Coin update failed")
+                await session.commit()
 
         # === REDIS ACTIVITY (best-effort, no DB write) ===
         if redis_conn:
