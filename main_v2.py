@@ -13,35 +13,65 @@ from workers import referral_flush, tournament_flush, coins_flush
 logger = logging.getLogger(__name__)
 
 BOT_MODE = os.getenv("BOT_MODE", "api")
-FLUSH_TASK = None
+WORKER_TASKS = []
+
+
+def _worker_done_callback(task: asyncio.Task) -> None:
+    """Called immediately when a worker task finishes."""
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+    except BaseException:
+        return
+
+    if exc is not None:
+        logger.critical(
+            "WORKER_CRASH name=%s exception=%s: %s",
+            task.get_name(),
+            type(exc).__name__,
+            exc,
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global FLUSH_TASK
+    global WORKER_TASKS
 
     logger.info("Starting SPIRIT API (legacy endpoints)")
 
     await init_redis()
 
     if BOT_MODE == "api":
-        FLUSH_TASK = asyncio.gather(
-            coins_flush.coins_flush_loop(),
-            referral_flush.referral_flush_loop(),
-            tournament_flush.tournament_flush_loop(),
-            return_exceptions=True,
-        )
+        WORKER_TASKS = [
+            asyncio.create_task(coins_flush.coins_flush_loop(), name="coins_flush"),
+            asyncio.create_task(
+                referral_flush.referral_flush_loop(), name="referral_flush"
+            ),
+            asyncio.create_task(
+                tournament_flush.tournament_flush_loop(), name="tournament_flush"
+            ),
+        ]
+        for task in WORKER_TASKS:
+            task.add_done_callback(_worker_done_callback)
         logger.info("Background flush workers started (coins, referrals, tournament)")
 
     logger.info("SPIRIT API ready")
     yield
 
-    if FLUSH_TASK:
-        FLUSH_TASK.cancel()
-        try:
-            await FLUSH_TASK
-        except asyncio.CancelledError:
-            pass
+    # Shutdown: cancel all workers and wait for cleanup
+    for task in WORKER_TASKS:
+        task.cancel()
+
+    if WORKER_TASKS:
+        results = await asyncio.gather(*WORKER_TASKS, return_exceptions=True)
+        for task, result in zip(WORKER_TASKS, results):
+            if isinstance(result, asyncio.CancelledError):
+                logger.info("Worker %s cancelled cleanly", task.get_name())
+            elif isinstance(result, Exception):
+                logger.error("Worker %s exited with error: %s", task.get_name(), result)
+            else:
+                logger.info("Worker %s exited normally", task.get_name())
 
     await close_redis()
     await engine.dispose()
@@ -74,9 +104,24 @@ async def health():
     redis_conn = await get_redis_or_none()
     redis_ok = redis_conn is not None
 
+    # Check worker health from Redis heartbeats
+    worker_health = {}
+    if redis_conn:
+        try:
+            from workers.worker_health import get_flush_lag, HEALTH_KEY_PREFIX
+
+            lag = await get_flush_lag(redis_conn)
+            for worker in ["coins_flush", "referral_flush", "tournament_flush"]:
+                hkey = f"{HEALTH_KEY_PREFIX}{worker}"
+                hdata = await redis_conn.hgetall(hkey)
+                worker_health[worker] = hdata if hdata else {"status": "unknown"}
+        except Exception:
+            pass
+
     status = "ok" if (db_ok and redis_ok) else "degraded"
     return {
         "status": status,
         "db": "ok" if db_ok else "error",
         "redis": "ok" if redis_ok else "unavailable",
+        "workers": worker_health,
     }

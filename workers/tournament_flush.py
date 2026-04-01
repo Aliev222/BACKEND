@@ -1,16 +1,17 @@
 """
 Tournament Flush Worker
-Периодически snapshot'ит Redis leaderboard в PostgreSQL.
+Periodically snapshots Redis leaderboard to PostgreSQL.
 
 Safety:
 - Upsert: INSERT ... ON CONFLICT DO UPDATE — idempotent
-- Если worker падает — следующий запуск повторит snapshot
-- Redis ZINCRBY всегда увеличивается, snapshot только читает
-- Потеря данных: максимум FLUSH_INTERVAL секунд leaderboard данных
+- If worker crashes — next run repeats snapshot
+- Redis ZINCRBY always increases, snapshot only reads
+- Data loss: maximum FLUSH_INTERVAL seconds of leaderboard data
 """
 
 import asyncio
 import logging
+import time
 import redis.asyncio as redis
 
 from DATABASE.base import (
@@ -24,19 +25,28 @@ from core.game_config import TOURNAMENT_KEY
 from infrastructure.redis import init_redis, close_redis
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from datetime import datetime
+from workers.worker_health import (
+    worker_heartbeat,
+    worker_heartbeat_init,
+    worker_heartbeat_stop,
+    log_worker_start,
+    log_worker_stop,
+    log_worker_loop,
+    log_worker_error,
+)
 
 logger = logging.getLogger(__name__)
 
 FLUSH_INTERVAL = 60  # seconds
 LEADERBOARD_LIMIT = 1000
+WORKER_NAME = "tournament_flush"
 
 
 async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
     """
-    Snapshot Redis ZSET leaderboard → PostgreSQL.
-    Возвращает количество записей.
+    Snapshot Redis ZSET leaderboard to PostgreSQL.
+    Returns number of entries flushed.
     """
-    # Получить топ-N из Redis leaderboard
     entries = await redis_conn.zrevrange(
         TOURNAMENT_KEY, 0, LEADERBOARD_LIMIT - 1, withscores=True
     )
@@ -53,7 +63,6 @@ async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
 
         flushed = 0
         for entry_data in entries:
-            # zrevrange withscores returns (member, score) tuples
             if isinstance(entry_data, tuple):
                 user_id_str, score = entry_data
             else:
@@ -65,7 +74,6 @@ async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
             if score <= 0:
                 continue
 
-            # Upsert: INSERT ... ON CONFLICT DO UPDATE
             insert_stmt = pg_insert(WeeklyTournamentEntry).values(
                 season_key=season_key,
                 user_id=user_id,
@@ -97,17 +105,69 @@ async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
 
 
 async def tournament_flush_loop():
-    logger.info("Tournament flush worker started (interval=%ds)", FLUSH_INTERVAL)
-    while True:
-        try:
-            redis_conn = await init_redis()
-            if redis_conn:
+    log_worker_start(WORKER_NAME, FLUSH_INTERVAL)
+
+    redis_conn = None
+    try:
+        redis_conn = await init_redis()
+        if not redis_conn:
+            log_worker_error(WORKER_NAME, "Redis unavailable at startup", fatal=True)
+            return
+
+        await worker_heartbeat_init(redis_conn, WORKER_NAME)
+
+        while True:
+            loop_start = time.monotonic()
+            error = None
+            flushed = 0
+
+            try:
                 flushed = await flush_tournament_to_db(redis_conn)
                 if flushed > 0:
                     logger.info("Flushed %d tournament entries to DB", flushed)
-        except Exception as e:
-            logger.error("Tournament flush error: %s", e)
-        await asyncio.sleep(FLUSH_INTERVAL)
+            except Exception as e:
+                error = str(e)
+                log_worker_error(WORKER_NAME, error)
+
+            loop_ms = (time.monotonic() - loop_start) * 1000
+
+            # Leaderboard size for lag visibility
+            pending_count = 0
+            try:
+                pending_count = await redis_conn.zcard(TOURNAMENT_KEY)
+            except Exception:
+                pass
+
+            log_worker_loop(
+                WORKER_NAME,
+                duration_ms=loop_ms,
+                flushed=flushed,
+                pending_count=pending_count,
+            )
+
+            await worker_heartbeat(
+                redis_conn,
+                WORKER_NAME,
+                loop_duration_ms=loop_ms,
+                flushed=flushed,
+                error=error,
+            )
+
+            await asyncio.sleep(FLUSH_INTERVAL)
+
+    except asyncio.CancelledError:
+        if redis_conn:
+            await worker_heartbeat_stop(redis_conn, WORKER_NAME)
+        log_worker_stop(WORKER_NAME, reason="cancelled")
+        raise
+    except Exception as e:
+        if redis_conn:
+            await worker_heartbeat_stop(redis_conn, WORKER_NAME)
+        log_worker_error(WORKER_NAME, str(e), fatal=True)
+        raise
+    finally:
+        if redis_conn:
+            await close_redis()
 
 
 if __name__ == "__main__":

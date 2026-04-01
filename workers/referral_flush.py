@@ -17,10 +17,22 @@ import redis.asyncio as redis
 from DATABASE.base import AsyncSessionLocal, User
 from infrastructure.redis import init_redis, close_redis
 from sqlalchemy import update, text
+from workers.worker_health import (
+    worker_heartbeat,
+    worker_heartbeat_init,
+    worker_heartbeat_stop,
+    detect_stuck_keys,
+    log_worker_start,
+    log_worker_stop,
+    log_worker_loop,
+    log_worker_error,
+    log_worker_recovery,
+)
 
 logger = logging.getLogger(__name__)
 
 FLUSH_INTERVAL = 30  # seconds
+WORKER_NAME = "referral_flush"
 
 
 async def _ensure_flush_log_table():
@@ -126,6 +138,9 @@ async def flush_referral_pending(redis_conn: redis.Redis) -> int:
             if coins > 0:
                 moved_data.append((proc_key, referrer_id, coins, batch_id))
 
+    if recovery_keys:
+        log_worker_recovery(WORKER_NAME, len(recovery_keys))
+
     # Phase 3: PROCESS (DB) — each batch in its own transaction
     flushed = 0
     for proc_key, referrer_id, coins, batch_id in moved_data:
@@ -186,34 +201,90 @@ async def flush_referral_pending(redis_conn: redis.Redis) -> int:
             )
         flushed += 1
 
-    # Phase 4: CLEANUP (DEL processing keys after successful commit)
-    for proc_key, referrer_id, coins, batch_id in moved_data:
-        try:
-            await redis_conn.delete(proc_key)
-        except Exception as e:
-            logger.warning(
-                "Failed to cleanup processing key %s: %s (data flushed, safe to retry)",
-                proc_key,
-                e,
-            )
-
     return flushed
 
 
 async def referral_flush_loop():
-    logger.info("Referral flush worker started (interval=%ds)", FLUSH_INTERVAL)
-    # Ensure table exists
+    log_worker_start(WORKER_NAME, FLUSH_INTERVAL)
     await _ensure_flush_log_table()
-    while True:
-        try:
-            redis_conn = await init_redis()
-            if redis_conn:
+
+    redis_conn = None
+    try:
+        redis_conn = await init_redis()
+        if not redis_conn:
+            log_worker_error(WORKER_NAME, "Redis unavailable at startup", fatal=True)
+            return
+
+        await worker_heartbeat_init(redis_conn, WORKER_NAME)
+
+        while True:
+            loop_start = time.monotonic()
+            error = None
+            flushed = 0
+
+            try:
                 flushed = await flush_referral_pending(redis_conn)
                 if flushed > 0:
                     logger.info("Flushed referral bonuses for %d users", flushed)
-        except Exception as e:
-            logger.error("Referral flush error: %s", e)
-        await asyncio.sleep(FLUSH_INTERVAL)
+            except Exception as e:
+                error = str(e)
+                log_worker_error(WORKER_NAME, error)
+
+            # Stuck key detection
+            stuck = await detect_stuck_keys(
+                redis_conn,
+                "referral_processing:*",
+                WORKER_NAME,
+                max_age_seconds=FLUSH_INTERVAL * 3,
+            )
+
+            loop_ms = (time.monotonic() - loop_start) * 1000
+
+            # Count pending keys for lag visibility
+            pending_count = 0
+            try:
+                cursor = 0
+                while True:
+                    cursor, keys = await redis_conn.scan(
+                        cursor, match="referral_pending:*", count=500
+                    )
+                    pending_count += len(keys)
+                    if cursor == 0:
+                        break
+            except Exception:
+                pass
+
+            log_worker_loop(
+                WORKER_NAME,
+                duration_ms=loop_ms,
+                flushed=flushed,
+                pending_count=pending_count,
+                stuck_count=len(stuck),
+            )
+
+            await worker_heartbeat(
+                redis_conn,
+                WORKER_NAME,
+                loop_duration_ms=loop_ms,
+                flushed=flushed,
+                error=error,
+            )
+
+            await asyncio.sleep(FLUSH_INTERVAL)
+
+    except asyncio.CancelledError:
+        if redis_conn:
+            await worker_heartbeat_stop(redis_conn, WORKER_NAME)
+        log_worker_stop(WORKER_NAME, reason="cancelled")
+        raise
+    except Exception as e:
+        if redis_conn:
+            await worker_heartbeat_stop(redis_conn, WORKER_NAME)
+        log_worker_error(WORKER_NAME, str(e), fatal=True)
+        raise
+    finally:
+        if redis_conn:
+            await close_redis()
 
 
 if __name__ == "__main__":

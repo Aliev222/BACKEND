@@ -29,10 +29,22 @@ import redis.asyncio as redis
 from DATABASE.base import AsyncSessionLocal, User
 from infrastructure.redis import init_redis, close_redis
 from sqlalchemy import update, text
+from workers.worker_health import (
+    worker_heartbeat,
+    worker_heartbeat_init,
+    worker_heartbeat_stop,
+    detect_stuck_keys,
+    log_worker_start,
+    log_worker_stop,
+    log_worker_loop,
+    log_worker_error,
+    log_worker_recovery,
+)
 
 logger = logging.getLogger(__name__)
 
 FLUSH_INTERVAL = 30  # seconds
+WORKER_NAME = "coins_flush"
 
 
 async def _ensure_flush_log_table():
@@ -114,6 +126,9 @@ async def flush_coins_to_db(redis_conn: redis.Redis) -> int:
         if delta and int(delta) > 0:
             moved_data.append((flush_key, user_id, int(delta), batch_id))
 
+    if flushing_keys:
+        log_worker_recovery(WORKER_NAME, len(flushing_keys))
+
     # Phase 3: PROCESS (DB) — each batch in its own transaction
     flushed = 0
     for flush_key, user_id, delta, batch_id in moved_data:
@@ -174,18 +189,86 @@ async def flush_coins_to_db(redis_conn: redis.Redis) -> int:
 
 
 async def coins_flush_loop():
-    logger.info("Coins flush worker started (interval=%ds)", FLUSH_INTERVAL)
+    log_worker_start(WORKER_NAME, FLUSH_INTERVAL)
     await _ensure_flush_log_table()
-    while True:
-        try:
-            redis_conn = await init_redis()
-            if redis_conn:
+
+    redis_conn = None
+    try:
+        redis_conn = await init_redis()
+        if not redis_conn:
+            log_worker_error(WORKER_NAME, "Redis unavailable at startup", fatal=True)
+            return
+
+        await worker_heartbeat_init(redis_conn, WORKER_NAME)
+
+        while True:
+            loop_start = time.monotonic()
+            error = None
+            flushed = 0
+
+            try:
                 flushed = await flush_coins_to_db(redis_conn)
                 if flushed > 0:
                     logger.info("Flushed coins for %d users", flushed)
-        except Exception as e:
-            logger.error("Coins flush error: %s", e)
-        await asyncio.sleep(FLUSH_INTERVAL)
+            except Exception as e:
+                error = str(e)
+                log_worker_error(WORKER_NAME, error)
+
+            # Stuck key detection
+            stuck = await detect_stuck_keys(
+                redis_conn,
+                "coins_flushing:*",
+                WORKER_NAME,
+                max_age_seconds=FLUSH_INTERVAL * 3,
+            )
+
+            loop_ms = (time.monotonic() - loop_start) * 1000
+
+            # Count pending keys for lag visibility
+            pending_count = 0
+            try:
+                cursor = 0
+                while True:
+                    cursor, keys = await redis_conn.scan(
+                        cursor, match="coins_pending:*", count=500
+                    )
+                    pending_count += len(keys)
+                    if cursor == 0:
+                        break
+            except Exception:
+                pass
+
+            log_worker_loop(
+                WORKER_NAME,
+                duration_ms=loop_ms,
+                flushed=flushed,
+                pending_count=pending_count,
+                stuck_count=len(stuck),
+            )
+
+            await worker_heartbeat(
+                redis_conn,
+                WORKER_NAME,
+                loop_duration_ms=loop_ms,
+                flushed=flushed,
+                error=error,
+            )
+
+            await asyncio.sleep(FLUSH_INTERVAL)
+
+    except asyncio.CancelledError:
+        if redis_conn:
+            await worker_heartbeat_stop(redis_conn, WORKER_NAME)
+        log_worker_stop(WORKER_NAME, reason="cancelled")
+        raise
+    except Exception as e:
+        if redis_conn:
+            await worker_heartbeat_stop(redis_conn, WORKER_NAME)
+        log_worker_error(WORKER_NAME, str(e), fatal=True)
+        raise
+    finally:
+        if redis_conn:
+            await close_redis()
 
 
 if __name__ == "__main__":
