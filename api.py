@@ -2891,6 +2891,16 @@ async def apply_global_upgrade_for_user(user_id: int, user: dict) -> dict:
     new_max_energy = get_max_energy(new_level)
     new_coins = current_coins - price
 
+    ml = int(user.get("multitap_level", 0))
+    pl = int(user.get("profit_level", 0))
+    el = int(user.get("energy_level", 0))
+
+    expected = {
+        "coins": current_coins,
+        "multitap_level": ml,
+        "profit_level": pl,
+        "energy_level": el,
+    }
     updates = {
         "coins": new_coins,
         "multitap_level": new_level,
@@ -2902,13 +2912,15 @@ async def apply_global_upgrade_for_user(user_id: int, user: dict) -> dict:
         "energy": new_max_energy,
     }
 
-    await update_user(user_id, updates)
+    updated_user = await update_user_if_matches(user_id, expected, updates)
+    if not updated_user:
+        raise HTTPException(status_code=409, detail="Upgrade state changed, retry")
     await invalidate_user_cache(user_id)
 
     next_cost = GLOBAL_UPGRADE_PRICES[new_level] if new_level < len(GLOBAL_UPGRADE_PRICES) else 0
     return {
         "success": True,
-        "coins": new_coins,
+        "coins": int(updated_user.get("coins", new_coins)),
         "new_level": new_level,
         "levels": {
             "multitap": new_level,
@@ -6417,62 +6429,78 @@ async def claim_daily_reward(payload: UserIdRequest, request: Request):
         await require_telegram_user(request, payload.user_id)
         await require_redis_rate_limit("claim_daily_reward", payload.user_id, 10, 60)
         await require_user_action_lock("claim_daily_reward", payload.user_id, ttl=5)
-        user = await get_user_cached(payload.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        extra = parse_extra_data(user.get("extra_data"))
-
-        claimed_days, last_claim_date = get_daily_reward_progress(extra)
         today = datetime.utcnow().date().isoformat()
 
-        if claimed_days >= DAILY_REWARD_MAX_DAYS:
-            raise HTTPException(status_code=400, detail="Daily rewards completed")
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(User)
+                .where(User.user_id == payload.user_id)
+                .with_for_update()
+            )
+            user_row = result.scalar_one_or_none()
+            if not user_row:
+                raise HTTPException(status_code=404, detail="User not found")
 
-        if last_claim_date == today:
-            raise HTTPException(status_code=400, detail="Reward already claimed today")
+            extra = {}
+            if user_row.extra_data:
+                try:
+                    extra = json.loads(user_row.extra_data)
+                except json.JSONDecodeError:
+                    extra = {}
 
-        day = claimed_days + 1
-        coins_reward = day * DAILY_REWARD_BASE_COINS
-        new_coins = int(user.get("coins", 0)) + coins_reward
+            claimed_days, last_claim_date = get_daily_reward_progress(extra)
 
-        extra["daily_reward_claimed_days"] = day
-        extra["daily_reward_last_claim_date"] = today
+            if claimed_days >= DAILY_REWARD_MAX_DAYS:
+                raise HTTPException(status_code=400, detail="Daily rewards completed")
 
-        response_payload = {
-            "success": True,
-            "day": day,
-            "coins_reward": coins_reward,
-            "coins": new_coins,
-            "claim_available": False,
-        }
+            if last_claim_date == today:
+                raise HTTPException(status_code=400, detail="Reward already claimed today")
 
-        if day % 7 == 0 and day < DAILY_REWARD_MAX_DAYS:
-            active_boosts = extra.get("active_boosts", {})
-            if not isinstance(active_boosts, dict):
-                active_boosts = {}
-            expires_at = (datetime.utcnow() + timedelta(minutes=DAILY_REWARD_INFINITE_ENERGY_MINUTES)).isoformat()
-            active_boosts["daily_infinite_energy"] = {
-                "active": True,
-                "expires_at": expires_at
+            day = claimed_days + 1
+            coins_reward = day * DAILY_REWARD_BASE_COINS
+            new_coins = int(user_row.coins or 0) + coins_reward
+
+            extra["daily_reward_claimed_days"] = day
+            extra["daily_reward_last_claim_date"] = today
+
+            response_payload = {
+                "success": True,
+                "day": day,
+                "coins_reward": coins_reward,
+                "coins": new_coins,
+                "claim_available": False,
             }
-            extra["active_boosts"] = active_boosts
-            response_payload["infinite_energy_expires_at"] = expires_at
 
-        if day == DAILY_REWARD_MAX_DAYS:
-            owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
-            if DAILY_REWARD_SKIN_ID not in owned_skins:
-                owned_skins.append(DAILY_REWARD_SKIN_ID)
-            extra["owned_skins"] = normalize_owned_skins(owned_skins)
-            response_payload["skin_id"] = DAILY_REWARD_SKIN_ID
+            if day % 7 == 0 and day < DAILY_REWARD_MAX_DAYS:
+                active_boosts = extra.get("active_boosts", {})
+                if not isinstance(active_boosts, dict):
+                    active_boosts = {}
+                expires_at = (
+                    datetime.utcnow() + timedelta(minutes=DAILY_REWARD_INFINITE_ENERGY_MINUTES)
+                ).isoformat()
+                active_boosts["daily_infinite_energy"] = {
+                    "active": True,
+                    "expires_at": expires_at,
+                }
+                extra["active_boosts"] = active_boosts
+                response_payload["infinite_energy_expires_at"] = expires_at
 
-        await update_user(payload.user_id, {
-            "coins": new_coins,
-            "extra_data": extra,
-        })
+            if day == DAILY_REWARD_MAX_DAYS:
+                owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
+                if DAILY_REWARD_SKIN_ID not in owned_skins:
+                    owned_skins.append(DAILY_REWARD_SKIN_ID)
+                extra["owned_skins"] = normalize_owned_skins(owned_skins)
+                response_payload["skin_id"] = DAILY_REWARD_SKIN_ID
+
+            user_row.coins = new_coins
+            user_row.extra_data = json.dumps(extra)
+            await session.commit()
+
         await invalidate_user_cache(payload.user_id)
         refreshed_user = await get_user_cached(payload.user_id)
-        response_payload["coins"] = int((refreshed_user or {}).get("coins", new_coins))
+        response_payload["coins"] = int(
+            (refreshed_user or {}).get("coins", response_payload["coins"])
+        )
 
         return response_payload
     except HTTPException:
