@@ -2038,9 +2038,10 @@ app.add_middleware(
 )
 
 
-
 from fastapi import APIRouter
+
 router = APIRouter()
+
 
 @router.post("/api/auth/session")
 async def create_api_session(request: Request):
@@ -2057,7 +2058,6 @@ async def create_api_session(request: Request):
         "expires_at": expires_at,
         "user_id": int(telegram_user.get("id", 0)),
     }
-
 
 
 @router.get("/metrics")
@@ -3745,7 +3745,34 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         now = datetime.utcnow()
 
         max_energy = resolve_max_energy(user)
-        current_energy = calculate_current_energy(user, now)
+
+        # === REDIS ENERGY CACHE ===
+        redis_conn = await get_redis_or_none()
+        energy_key = f"energy:v2:{payload.user_id}"
+        if redis_conn:
+            cached = await redis_conn.hgetall(energy_key)
+            if cached:
+                elapsed = now.timestamp() - float(
+                    cached.get("updated_at", now.timestamp())
+                )
+                regen = int(elapsed // ENERGY_REGEN_SECONDS)
+                current_energy = min(
+                    int(cached.get("max_energy", max_energy)),
+                    int(cached.get("value", 0)) + regen,
+                )
+            else:
+                current_energy = calculate_current_energy(user, now)
+                await redis_conn.hset(
+                    energy_key,
+                    mapping={
+                        "value": str(current_energy),
+                        "updated_at": str(now.timestamp()),
+                        "max_energy": str(max_energy),
+                    },
+                )
+                await redis_conn.expire(energy_key, 300)
+        else:
+            current_energy = calculate_current_energy(user, now)
 
         multitap_level = int(user.get("multitap_level", 0))
         tap_value = get_tap_value(multitap_level)
@@ -3854,34 +3881,24 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         write_click_guard_state(extra, click_guard)
         update_data["extra_data"] = extra
 
-        if free_energy_clicks:
-            stored_energy = int(user.get("energy", 0))
-            last_update = normalize_dt(user.get("last_energy_update"))
+        # === REDIS ENERGY (вместо БД) ===
+        # Пишем энергию в Redis кэш — мгновенно, без race conditions
+        if redis_conn:
+            await redis_conn.hset(
+                energy_key,
+                mapping={
+                    "value": str(new_energy),
+                    "updated_at": str(now.timestamp()),
+                    "max_energy": str(max_energy),
+                },
+            )
+            await redis_conn.expire(energy_key, 300)
 
-            if stored_energy != current_energy:
-                update_data["energy"] = current_energy
-
-            if last_update:
-                seconds_passed = max(0, int((now - last_update).total_seconds()))
-                gained_energy = seconds_passed // ENERGY_REGEN_SECONDS
-                if gained_energy > 0:
-                    update_data["last_energy_update"] = last_update + timedelta(
-                        seconds=gained_energy * ENERGY_REGEN_SECONDS
-                    )
-            elif "energy" in update_data:
-                update_data["last_energy_update"] = now
-        else:
-            update_data["energy"] = new_energy
-            update_data["last_energy_update"] = now
-
-        # РЎРѕС…СЂР°РЅСЏРµРј СЌРЅРµСЂРіРёСЋ Рё Р±Р°Р»Р°РЅСЃ РѕРґРЅРёРј atomic update, С‡С‚РѕР±С‹ РіРѕРЅРєРё
-        # РјРµР¶РґСѓ РєР»РёРєР°РјРё/РїР°СЃСЃРёРІРєРѕР№/СЌРЅРµСЂРіРёРµР№ РЅРµ РїРµСЂРµС‚РёСЂР°Р»Рё СЃРѕСЃС‚РѕСЏРЅРёРµ.
+        # В БД пишем только coins и extra_data (без energy — энергия в Redis)
         updated_user = await update_user_if_matches(
             payload.user_id,
             {
                 "coins": int(user.get("coins", 0)),
-                "energy": int(user.get("energy", 0)),
-                "last_energy_update": normalize_dt(user.get("last_energy_update")),
             },
             update_data,
         )
@@ -3891,8 +3908,14 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
 
         conn = await get_redis_or_none()
         if conn and gained > 0:
-            # РўСѓСЂРЅРёСЂ РѕСЃС‚Р°РІР»СЏРµРј РІ Redis РєР°Рє Р±С‹СЃС‚СЂС‹Р№ leaderboard СЃР»РѕР№.
+            # Турнир оставляем в Redis как быстрый leaderboard слой.
             await conn.zincrby(TOURNAMENT_KEY, gained, str(payload.user_id))
+            # Буферизуем клики для фонового flush в БД
+            await conn.hincrby(f"click_buf:{payload.user_id}", "coins", gained)
+            await conn.hincrby(
+                f"click_buf:{payload.user_id}", "clicks", effective_clicks
+            )
+            await conn.expire(f"click_buf:{payload.user_id}", 300)
         if gained > 0:
             current_display_level = (
                 max(
