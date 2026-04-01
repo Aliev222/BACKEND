@@ -22,7 +22,14 @@ from CONFIG.settings import DATABASE_URL
 from core.game_config import BASE_MAX_ENERGY
 from core.game_logic import get_hour_value, get_max_energy, get_tap_value
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+import ssl
+
+_ssl_context = ssl.create_default_context()
+_ssl_context.check_hostname = False
+_ssl_context.verify_mode = ssl.CERT_NONE
+engine = create_async_engine(
+    DATABASE_URL, echo=False, connect_args={"ssl": _ssl_context}
+)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 

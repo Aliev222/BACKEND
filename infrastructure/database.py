@@ -1,6 +1,10 @@
 import os
+from dotenv import load_dotenv
+from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import select
+
+load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -24,6 +28,7 @@ engine = create_async_engine(
     pool_recycle=POOL_RECYCLE,
     pool_timeout=POOL_TIMEOUT,
     pool_pre_ping=True,
+    connect_args={"ssl": True},
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -33,7 +38,7 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
-async def get_db_session() -> AsyncSession:
+async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     async with AsyncSessionLocal() as session:
         try:
             yield session

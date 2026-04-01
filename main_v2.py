@@ -174,10 +174,8 @@ async def lifespan(app: FastAPI):
 
     logger.info("Starting SPIRIT API v2")
 
-    from DATABASE.base import init_db
-
-    await init_db()
-    logger.info("Database initialized")
+    # Tables already exist on Render PostgreSQL — skip init_db()
+    logger.info("Skipping init_db — tables exist on Render")
 
     await init_redis()
 
