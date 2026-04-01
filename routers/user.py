@@ -163,3 +163,72 @@ async def get_user_data(request: Request):
         "regen_seconds": ENERGY_REGEN_SECONDS,
         "server_time": now.isoformat(),
     }
+
+
+@router.post("/user")
+async def register_user(request: Request):
+    telegram_user = await require_telegram_user(request)
+    user_id = int(telegram_user.get("id", 0))
+    username = telegram_user.get("username")
+
+    body = await request.json()
+    referrer_id = body.get("referrer_id")
+
+    async with AsyncSessionLocal() as session:
+        existing = await get_user_by_id(session, user_id)
+        if existing:
+            return {
+                "user_id": existing["user_id"],
+                "coins": existing.get("coins", 0),
+                "energy": existing.get("energy", 500),
+                "max_energy": existing.get("max_energy", 500),
+                "profit_per_tap": existing.get("profit_per_tap", 1),
+                "profit_per_hour": existing.get("profit_per_hour", 100),
+                "multitap_level": existing.get("multitap_level", 0),
+                "profit_level": existing.get("profit_level", 0),
+                "energy_level": existing.get("energy_level", 0),
+                "level": existing.get("level", 0),
+                "owned_skins": _get_owned_skins(
+                    _parse_extra(existing.get("extra_data", {}))
+                ),
+                "selected_skin": _get_selected_skin(
+                    _parse_extra(existing.get("extra_data", {})),
+                    _get_owned_skins(_parse_extra(existing.get("extra_data", {}))),
+                ),
+                "ads_watched": _parse_extra(existing.get("extra_data", {})).get(
+                    "ads_watched", 0
+                ),
+                "skin_ad_progress": _get_skin_ad_progress(
+                    _parse_extra(existing.get("extra_data", {}))
+                ),
+                "ton_wallet": _get_ton_wallet(
+                    _parse_extra(existing.get("extra_data", {}))
+                ),
+                "referrer_id": existing.get("referrer_id"),
+                "referral_count": existing.get("referral_count", 0),
+                "referral_earnings": existing.get("referral_earnings", 0),
+            }
+
+        user = await create_user(session, user_id, username, referrer_id)
+        await session.commit()
+
+        return {
+            "user_id": user.user_id,
+            "coins": user.coins,
+            "energy": user.energy,
+            "max_energy": user.max_energy,
+            "profit_per_tap": user.profit_per_tap,
+            "profit_per_hour": user.profit_per_hour,
+            "multitap_level": user.multitap_level,
+            "profit_level": user.profit_level,
+            "energy_level": user.energy_level,
+            "level": user.level,
+            "owned_skins": ["default.pngSP"],
+            "selected_skin": "default.pngSP",
+            "ads_watched": 0,
+            "skin_ad_progress": {},
+            "ton_wallet": {},
+            "referrer_id": user.referrer_id,
+            "referral_count": 0,
+            "referral_earnings": 0,
+        }
