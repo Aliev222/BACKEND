@@ -94,6 +94,10 @@ async def update_user_atomic(
     if expected_energy is not None:
         conditions.append(User.energy == expected_energy)
 
+    # Serialize extra_data dict to JSON string (DB column is VARCHAR)
+    if "extra_data" in updates and isinstance(updates["extra_data"], dict):
+        updates["extra_data"] = json.dumps(updates["extra_data"])
+
     result = await session.execute(update(User).where(*conditions).values(**updates))
     return result.rowcount == 1
 
