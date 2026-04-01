@@ -61,7 +61,7 @@ OLD_TO_NEW_PATHS = {
 
 
 class PathRewriteMiddleware(BaseHTTPMiddleware):
-    """Переписывает старые /api/... пути на /api/v2/..."""
+    """Переписывает старые /api/... пути на новые (/api/v2/...)"""
 
     async def dispatch(self, request: StarletteRequest, call_next):
         path = request.url.path
@@ -69,6 +69,109 @@ class PathRewriteMiddleware(BaseHTTPMiddleware):
         # Уже /api/v2/ или /health — пропускаем
         if path.startswith("/api/v2/") or path == "/health":
             return await call_next(request)
+
+        # Точное совпадение
+        if path in OLD_TO_NEW_PATHS:
+            request.scope["path"] = OLD_TO_NEW_PATHS[path]
+            request.scope["raw_path"] = OLD_TO_NEW_PATHS[path].encode()
+            return await call_next(request)
+
+        # ВАЖНО: более специфичные паттерны — первыми!
+
+        # /api/ton/wallet/proof-payload/{id} → /api/v2/ton/proof
+        if path.startswith("/api/ton/wallet/proof-payload/"):
+            request.scope["path"] = "/api/v2/ton/proof"
+            return await call_next(request)
+
+        # /api/ton/wallet/connect, disconnect
+        if path.startswith("/api/ton/wallet/connect"):
+            request.scope["path"] = "/api/v2/ton/connect"
+            return await call_next(request)
+        if path.startswith("/api/ton/wallet/disconnect"):
+            request.scope["path"] = "/api/v2/ton/disconnect"
+            return await call_next(request)
+
+        # /api/ton/wallet/{id} → /api/v2/ton/wallet
+        if path.startswith("/api/ton/wallet/"):
+            request.scope["path"] = "/api/v2/ton/wallet"
+            return await call_next(request)
+
+        # /api/weekly-tournament/results/{league} → /api/v2/tournament/weekly/league/{league}
+        if path.startswith("/api/weekly-tournament/results/"):
+            league = path.split("/")[-1]
+            request.scope["path"] = f"/api/v2/tournament/weekly/league/{league}"
+            return await call_next(request)
+
+        # /api/weekly-tournament/leaderboard/{league} → /api/v2/tournament/weekly/league/{league}
+        if path.startswith("/api/weekly-tournament/leaderboard/"):
+            league = path.split("/")[-1]
+            request.scope["path"] = f"/api/v2/tournament/weekly/league/{league}"
+            return await call_next(request)
+
+        # /api/weekly-tournament/overview/{id} → /api/v2/tournament/weekly
+        if path.startswith("/api/weekly-tournament/overview/"):
+            request.scope["path"] = "/api/v2/tournament/weekly"
+            return await call_next(request)
+
+        # /api/video-tasks/claim → /api/v2/tasks/complete
+        if path == "/api/video-tasks/claim":
+            request.scope["path"] = "/api/v2/tasks/complete"
+            return await call_next(request)
+
+        # /api/video-tasks/status/{id} → /api/v2/tasks
+        if path.startswith("/api/video-tasks/status/"):
+            request.scope["path"] = "/api/v2/tasks"
+            return await call_next(request)
+
+        # /api/ghost-boost-status/{id} → /api/v2/boost/ghost
+        if path.startswith("/api/ghost-boost-status/"):
+            request.scope["path"] = "/api/v2/boost/ghost"
+            return await call_next(request)
+
+        # /api/mega-boost-status/{id} → /api/v2/boost/mega
+        if path.startswith("/api/mega-boost-status/"):
+            request.scope["path"] = "/api/v2/boost/mega"
+            return await call_next(request)
+
+        # /api/daily-reward/status/{id} → /api/v2/daily-reward
+        if path.startswith("/api/daily-reward/status/"):
+            request.scope["path"] = "/api/v2/daily-reward"
+            return await call_next(request)
+
+        # /api/upgrade-prices/{id} → /api/v2/upgrade-prices
+        if path.startswith("/api/upgrade-prices/"):
+            request.scope["path"] = "/api/v2/upgrade-prices"
+            return await call_next(request)
+
+        # /api/referral-data/{id} → /api/v2/referrals
+        if path.startswith("/api/referral-data/"):
+            request.scope["path"] = "/api/v2/referrals"
+            return await call_next(request)
+
+        # /api/tasks/{id} → /api/v2/tasks
+        if path.startswith("/api/tasks/"):
+            request.scope["path"] = "/api/v2/tasks"
+            return await call_next(request)
+
+        # /api/user/{id} → /api/v2/user
+        if path.startswith("/api/user/"):
+            request.scope["path"] = "/api/v2/user"
+            return await call_next(request)
+
+        # /api/admin/... → /api/v2/admin/...
+        if path.startswith("/api/admin/"):
+            request.scope["path"] = path.replace("/api/admin/", "/api/v2/admin/", 1)
+            return await call_next(request)
+
+        # Мини-игры — удалены, возвращаем 404
+        if path.startswith("/api/game/"):
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                status_code=404, content={"detail": "Mini-games removed"}
+            )
+
+        return await call_next(request)
 
         # Точное совпадение
         if path in OLD_TO_NEW_PATHS:

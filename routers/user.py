@@ -5,7 +5,7 @@ from fastapi import APIRouter, Request, HTTPException
 
 from infrastructure.database import AsyncSessionLocal
 from infrastructure.redis import get_redis
-from repositories.user_repo import get_user_by_id
+from repositories.user_repo import get_user_by_id, create_user
 from routers.auth import require_telegram_user
 from core.game_logic import (
     calculate_current_energy,

@@ -25,7 +25,17 @@ async def touch_online_user(redis_conn: redis.Redis, user_id: int) -> int:
 
 @router.post("/online/heartbeat")
 async def online_heartbeat(request: Request):
-    telegram_user = request.headers.get("X-Telegram-Init-Data", "")
+    telegram_user_raw = request.headers.get("X-Telegram-Init-Data", "")
+    telegram_user = {}
+
+    if telegram_user_raw:
+        from core.telegram_auth import verify_telegram_init_data
+
+        try:
+            telegram_user = verify_telegram_init_data(telegram_user_raw)
+        except Exception:
+            pass
+
     if not telegram_user:
         bearer = request.headers.get("Authorization", "")
         if bearer:
@@ -34,9 +44,7 @@ async def online_heartbeat(request: Request):
             try:
                 telegram_user = verify_session_token(bearer.split(" ", 1)[1])
             except Exception:
-                telegram_user = {}
-        else:
-            telegram_user = {}
+                pass
 
     user_id = int(telegram_user.get("id", 0))
     if user_id <= 0:
