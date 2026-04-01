@@ -8,7 +8,7 @@ from infrastructure.database import AsyncSessionLocal
 from infrastructure.redis import get_redis, get_redis_or_none
 from repositories.user_repo import get_user_by_id
 from services.click_service import process_clicks
-from core.telegram_auth import verify_telegram_init_data
+from routers.auth import require_telegram_user
 from core.game_config import MAX_CLICK_BATCH_SIZE
 
 router = APIRouter(prefix="/api/v2", tags=["clicks"])
@@ -19,9 +19,7 @@ logger = logging.getLogger(__name__)
 async def submit_clicks(request: Request):
     redis_conn = await get_redis()
 
-    telegram_user = verify_telegram_init_data(
-        request.headers.get("X-Telegram-Init-Data", "")
-    )
+    telegram_user = await require_telegram_user(request)
     user_id = int(telegram_user.get("id", 0))
     if user_id <= 0:
         raise HTTPException(status_code=401, detail="Invalid user")
@@ -69,9 +67,7 @@ async def submit_clicks(request: Request):
 async def sync_energy(request: Request):
     redis_conn = await get_redis()
 
-    telegram_user = verify_telegram_init_data(
-        request.headers.get("X-Telegram-Init-Data", "")
-    )
+    telegram_user = await require_telegram_user(request)
     user_id = int(telegram_user.get("id", 0))
     if user_id <= 0:
         raise HTTPException(status_code=401, detail="Invalid user")
