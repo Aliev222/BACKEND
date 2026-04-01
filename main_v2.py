@@ -2,6 +2,8 @@ import os
 import logging
 import asyncio
 from contextlib import asynccontextmanager
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -28,6 +30,142 @@ logger = logging.getLogger(__name__)
 BOT_MODE = os.getenv("BOT_MODE", "api")
 
 FLUSH_TASK = None
+
+# Маппинг старых путей (/api/...) на новые (/api/v2/...)
+# Фронт шлёт старые пути — middleware автоматически переписывает
+OLD_TO_NEW_PATHS = {
+    "/api/auth/session": "/api/v2/auth/session",
+    "/api/register": "/api/v2/user",
+    "/api/clicks": "/api/v2/clicks",
+    "/api/sync-energy": "/api/v2/energy/sync",
+    "/api/update-energy": "/api/v2/energy/sync",
+    "/api/upgrade": "/api/v2/upgrade",
+    "/api/upgrade-all": "/api/v2/upgrade",
+    "/api/passive-income": "/api/v2/upgrade",
+    "/api/ad-action/start": "/api/v2/ads/start",
+    "/api/ads/adsgram/complete": "/api/v2/ads/complete",
+    "/api/ads/increment": "/api/v2/ads/complete",
+    "/api/activate-mega-boost": "/api/v2/boost/mega",
+    "/api/activate-ghost-boost": "/api/v2/boost/ghost",
+    "/api/autoclicker/activate": "/api/v2/boost/autoclicker",
+    "/api/select-skin": "/api/v2/skins/select",
+    "/api/unlock-skin": "/api/v2/skins/unlock-level",
+    "/api/skins/stars-invoice": "/api/v2/skins/stars-invoice",
+    "/api/complete-task": "/api/v2/tasks/complete",
+    "/api/daily-reward/claim": "/api/v2/daily-reward/claim",
+    "/api/ton/wallet/connect": "/api/v2/ton/connect",
+    "/api/ton/wallet/disconnect": "/api/v2/ton/disconnect",
+    "/api/online/heartbeat": "/api/v2/online/heartbeat",
+    "/api/online/count": "/api/v2/online/count",
+}
+
+
+class PathRewriteMiddleware(BaseHTTPMiddleware):
+    """Переписывает старые /api/... пути на /api/v2/..."""
+
+    async def dispatch(self, request: StarletteRequest, call_next):
+        path = request.url.path
+
+        # Уже /api/v2/ или /health — пропускаем
+        if path.startswith("/api/v2/") or path == "/health":
+            return await call_next(request)
+
+        # Точное совпадение
+        if path in OLD_TO_NEW_PATHS:
+            request.scope["path"] = OLD_TO_NEW_PATHS[path]
+            request.scope["raw_path"] = OLD_TO_NEW_PATHS[path].encode()
+            return await call_next(request)
+
+        # Паттерн: /api/user/{id} → /api/v2/user
+        if path.startswith("/api/user/"):
+            request.scope["path"] = "/api/v2/user"
+            return await call_next(request)
+
+        # Паттерн: /api/upgrade-prices/{id} → /api/v2/upgrade-prices
+        if path.startswith("/api/upgrade-prices/"):
+            request.scope["path"] = "/api/v2/upgrade-prices"
+            return await call_next(request)
+
+        # Паттерн: /api/ghost-boost-status/{id} → /api/v2/boost/ghost
+        if path.startswith("/api/ghost-boost-status/"):
+            request.scope["path"] = "/api/v2/boost/ghost"
+            return await call_next(request)
+
+        # Паттерн: /api/mega-boost-status/{id} → /api/v2/boost/mega
+        if path.startswith("/api/mega-boost-status/"):
+            request.scope["path"] = "/api/v2/boost/mega"
+            return await call_next(request)
+
+        # Паттерн: /api/daily-reward/status/{id} → /api/v2/daily-reward
+        if path.startswith("/api/daily-reward/status/"):
+            request.scope["path"] = "/api/v2/daily-reward"
+            return await call_next(request)
+
+        # Паттерн: /api/tasks/{id} → /api/v2/tasks
+        if path.startswith("/api/tasks/"):
+            request.scope["path"] = "/api/v2/tasks"
+            return await call_next(request)
+
+        # Паттерн: /api/video-tasks/status/{id} → /api/v2/tasks
+        if path.startswith("/api/video-tasks/status/"):
+            request.scope["path"] = "/api/v2/tasks"
+            return await call_next(request)
+
+        # Паттерн: /api/video-tasks/claim → /api/v2/tasks/complete
+        if path == "/api/video-tasks/claim":
+            request.scope["path"] = "/api/v2/tasks/complete"
+            return await call_next(request)
+
+        # Паттерн: /api/referral-data/{id} → /api/v2/referrals
+        if path.startswith("/api/referral-data/"):
+            request.scope["path"] = "/api/v2/referrals"
+            return await call_next(request)
+
+        # Паттерн: /api/ton/wallet/{id} → /api/v2/ton/wallet
+        if (
+            path.startswith("/api/ton/wallet/")
+            and not path.startswith("/api/ton/wallet/connect")
+            and not path.startswith("/api/ton/wallet/disconnect")
+        ):
+            request.scope["path"] = "/api/v2/ton/wallet"
+            return await call_next(request)
+
+        # Паттерн: /api/ton/wallet/proof-payload/{id} → /api/v2/ton/proof
+        if path.startswith("/api/ton/wallet/proof-payload/"):
+            request.scope["path"] = "/api/v2/ton/proof"
+            return await call_next(request)
+
+        # Паттерн: /api/weekly-tournament/results/{league} → /api/v2/tournament/weekly/league/{league}
+        if path.startswith("/api/weekly-tournament/results/"):
+            league = path.split("/")[-1]
+            request.scope["path"] = f"/api/v2/tournament/weekly/league/{league}"
+            return await call_next(request)
+
+        # Паттерн: /api/weekly-tournament/overview/{id} → /api/v2/tournament/weekly
+        if path.startswith("/api/weekly-tournament/overview/"):
+            request.scope["path"] = "/api/v2/tournament/weekly"
+            return await call_next(request)
+
+        # Паттерн: /api/weekly-tournament/leaderboard/{league} → /api/v2/tournament/weekly/league/{league}
+        if path.startswith("/api/weekly-tournament/leaderboard/"):
+            league = path.split("/")[-1]
+            request.scope["path"] = f"/api/v2/tournament/weekly/league/{league}"
+            return await call_next(request)
+
+        # Паттерн: /api/admin/... → /api/v2/admin/...
+        if path.startswith("/api/admin/"):
+            request.scope["path"] = path.replace("/api/admin/", "/api/v2/admin/", 1)
+            return await call_next(request)
+
+        # Мини-игры — удалены, возвращаем 404
+        if path.startswith("/api/game/"):
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                status_code=404, content={"detail": "Mini-games removed"}
+            )
+
+        return await call_next(request)
 
 
 @asynccontextmanager
@@ -76,6 +214,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(PathRewriteMiddleware)
 
 app.include_router(auth.router)
 app.include_router(clicks.router)
