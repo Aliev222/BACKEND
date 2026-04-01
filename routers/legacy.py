@@ -3925,31 +3925,26 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
 
         conn = await get_redis_or_none()
         if conn and gained > 0:
+            # Tournament: Redis only (no DB write per click)
             await conn.zincrby(TOURNAMENT_KEY, gained, str(payload.user_id))
+            # Click buffer for coins flush
             await conn.hincrby(f"click_buf:{payload.user_id}", "coins", gained)
             await conn.hincrby(
                 f"click_buf:{payload.user_id}", "clicks", effective_clicks
             )
             await conn.expire(f"click_buf:{payload.user_id}", 300)
-        if gained > 0:
-            current_display_level = (
-                max(
-                    int(user.get("multitap_level", 0)),
-                    int(user.get("profit_level", 0)),
-                    int(user.get("energy_level", 0)),
-                )
-                + 1
-            )
-            await add_weekly_tournament_score(
-                payload.user_id,
-                user.get("username"),
-                current_display_level,
-                gained,
-            )
+            # Referral bonus buffer: accumulate in Redis, flush async later
+            referrer_id = user.get("referrer_id")
+            if referrer_id:
+                bonus = max(1, int(gained * 0.05))  # 5% of gained
+                await conn.hincrby(f"referral_pending:{referrer_id}", "coins", bonus)
+                await conn.hincrby(f"referral_pending:{referrer_id}", "clicks", 1)
+                await conn.expire(f"referral_pending:{referrer_id}", 300)
 
-        # ✅ инвалидируем кэш
-        await invalidate_user_cache(payload.user_id)
-        referral_bonus = await grant_referral_share_bonus(new_coins, gained)
+        # REMOVED from sync path:
+        # - add_weekly_tournament_score (tournament in Redis only, ZINCRBY above)
+        # - grant_referral_share_bonus (buffered in Redis above, flush async later)
+        # - invalidate_user_cache (cache invalidation on explicit state changes only)
 
         return {
             "success": True,
