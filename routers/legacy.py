@@ -1,3 +1,2044 @@
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+
+# Sync marker for VS Code source control
+from fastapi.responses import JSONResponse, Response
+import asyncio
+import base64
+import uvicorn
+import random
+import time
+import json
+import os
+import logging
+import httpx
+import hmac
+import hashlib
+import secrets
+import re
+import struct
+from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
+from urllib.parse import urlparse
+from sqlalchemy import select, func, update, or_
+from sqlalchemy.ext.asyncio import AsyncSession
+from DATABASE.base import (
+    User,
+    UserTask,
+    AsyncSessionLocal,
+    WeeklyTournamentEntry,
+    WeeklyTournamentWinner,
+    WeeklyTournamentTonPayout,
+    RewardedAdClaim,
+    StarsSkinPurchase,
+)
+from collections import defaultdict, deque
+from dataclasses import dataclass
+import redis.asyncio as redis
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
+from DATABASE.base import (
+    get_user,
+    add_user as create_user,
+    update_user,
+    add_referral_bonus,
+    init_db,
+    get_completed_tasks,
+    add_completed_task,
+    record_crash_ghost_cashout,
+    add_weekly_tournament_score,
+    get_weekly_tournament_leaderboard,
+    get_weekly_tournament_player_entry,
+    get_weekly_tournament_season_key,
+    get_weekly_tournament_season_window,
+    get_weekly_tournament_league,
+    list_weekly_tournament_seasons,
+    get_weekly_tournament_winners,
+    finalize_weekly_tournament_season,
+    ensure_weekly_tournament_season,
+    get_rewarded_ads_admin_summary,
+    get_stars_skin_sales_admin_summary,
+    get_admin_fraud_reviews,
+    upsert_admin_fraud_review,
+    record_rewarded_ad_claim,
+    get_referral_stats,
+    get_referrals_list,
+)
+from schemas import (
+    AdActionClaimRequest,
+    AdActionStartRequest,
+    ClicksBatchRequest,
+    EnergySyncRequest,
+    PassiveIncomeRequest,
+    RegisterRequest,
+    RewardVideoClaimRequest,
+    RewardVideoStartRequest,
+    SkinRequest,
+    TaskCompleteRequest,
+    TournamentData,
+    UpgradeRequest,
+    UserIdRequest,
+    VideoTaskClaimRequest,
+    AdminFraudUpdateRequest,
+    AdminTonPayoutConfirmRequest,
+    AdminTonPayoutQueueRequest,
+    AdminTonPayoutBulkStatusUpdateRequest,
+    AdminTonPayoutStatusUpdateRequest,
+    AdminWalletReminderRequest,
+    AdminWinnerStarsUpdateRequest,
+    TonProofRequest,
+    TonWalletConnectRequest,
+    TonWalletDisconnectRequest,
+    WeeklyTournamentFundRequest,
+)
+from core.game_config import (
+    BASE_MAX_ENERGY,
+    CLICK_BURST_ALLOWANCE,
+    CLICK_BUFFER_KEY,
+    CLICK_FLUSH_INTERVAL,
+    CLICK_SUSPICIOUS_OVERSHOOT,
+    CLICK_SUSPICION_SOFT_LIMIT,
+    ENERGY_REGEN_SECONDS,
+    MAX_BET,
+    MAX_CLICK_BATCH_SIZE,
+    MAX_UPGRADE_LEVEL,
+    MAX_REAL_CLICKS_PER_SECOND,
+    MAX_REWARD_PER_VIDEO,
+    MIN_BET,
+    RATE_LIMITS,
+    TOURNAMENT_KEY,
+    TOURNAMENT_PRIZE_POOL,
+    GLOBAL_UPGRADE_PRICES,
+    UPGRADE_PRICES,
+    USER_CACHE_PREFIX,
+    USER_CACHE_TTL,
+)
+from core.game_logic import (
+    build_energy_payload,
+    calculate_current_energy,
+    get_allowed_clicks,
+    get_hour_value,
+    get_max_energy,
+    get_tap_value,
+    mask_username,
+    normalize_dt,
+    resolve_max_energy,
+)
+from core.telegram_auth import verify_telegram_init_data
+from core.stars_skins import get_stars_skin_price
+from CONFIG.settings import BOT_TOKEN
+
+
+REDIS_URL = os.getenv("REDIS_URL")
+redis_client = None
+LOCAL_LOCKS: dict[str, float] = {}
+LOCAL_IDEMPOTENCY_KEYS: dict[str, float] = {}
+LOCAL_RATE_LIMITS_STATE: dict[str, deque[float]] = defaultdict(deque)
+LOCAL_TON_PROOF_PAYLOADS: dict[str, dict] = {}
+DIAGNOSTICS_DURATION_WINDOW = 240
+ENDPOINT_DIAGNOSTICS: dict[tuple[str, str], dict] = {}
+RECENT_DIAGNOSTIC_ERRORS: deque[dict] = deque(maxlen=120)
+APP_ENV = (os.getenv("APP_ENV", "production") or "production").strip().lower()
+ONLINE_USERS_KEY = "online:users"
+ONLINE_WINDOW_SECONDS = 75
+REFERRAL_SHARE_RATE = 0.05
+REFERRAL_DAILY_SHARE_LIMIT = 50000
+REFERRAL_SPECIAL_SKIN_ID = "refferal.pngSP"
+TELEGRAM_VERIFY_CHANNEL = os.getenv("TELEGRAM_VERIFY_CHANNEL", "@Spirit_cliker")
+TELEGRAM_MEMBER_STATUSES = {"member", "administrator", "creator", "restricted"}
+TELEGRAM_BOT_USERNAME = (
+    (os.getenv("TELEGRAM_BOT_USERNAME", "Ryoho_bot") or "Ryoho_bot").strip().lstrip("@")
+)
+GAME_WEBAPP_URL = (
+    os.getenv("GAME_WEBAPP_URL", "https://spirix.vercel.app")
+    or "https://spirix.vercel.app"
+).strip()
+ADMIN_DASHBOARD_TOKEN = (os.getenv("ADMIN_DASHBOARD_TOKEN", "") or "").strip()
+ADMIN_TELEGRAM_IDS = {
+    int(item.strip())
+    for item in (os.getenv("ADMIN_TELEGRAM_IDS", "") or "").split(",")
+    if item.strip().isdigit()
+}
+MONETAG_POSTBACK_SECRET = (os.getenv("MONETAG_POSTBACK_SECRET", "") or "").strip()
+MONETAG_POSTBACK_ENFORCED = (
+    os.getenv("MONETAG_POSTBACK_ENFORCED", "1" if MONETAG_POSTBACK_SECRET else "0")
+    or "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+ADSGRAM_REWARD_SECRET = (os.getenv("ADSGRAM_REWARD_SECRET", "") or "").strip()
+ADSGRAM_REWARD_ENFORCED = (
+    os.getenv("ADSGRAM_REWARD_ENFORCED", "1" if ADSGRAM_REWARD_SECRET else "0") or "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+SESSION_TOKEN_SECRET = (
+    os.getenv("SESSION_TOKEN_SECRET", "") or ""
+).strip() or hashlib.sha256(f"{BOT_TOKEN}:session-token".encode("utf-8")).hexdigest()
+SESSION_TOKEN_TTL_SECONDS = max(
+    900, int((os.getenv("SESSION_TOKEN_TTL_SECONDS", "3600") or "3600").strip())
+)
+DAILY_REWARD_MAX_DAYS = 30
+DAILY_REWARD_BASE_COINS = 500
+DAILY_REWARD_INFINITE_ENERGY_MINUTES = 10
+DAILY_REWARD_SKIN_ID = "retro.pngSP"
+MEGA_BOOST_MINUTES = 1
+MEGA_BOOST_COOLDOWN_MIN_MINUTES = 10
+MEGA_BOOST_COOLDOWN_MAX_MINUTES = 10
+GHOST_BOOST_MULTIPLIER = 5
+GHOST_BOOST_MINUTES = 1
+AUTOCLICKER_COOLDOWN_MINUTES = 10
+SKIN_AD_COOLDOWN_MINUTES = 10
+ENERGY_REFILL_COOLDOWN_MINUTES = 10
+AD_ACTION_SESSION_TTL_SECONDS = 180
+AD_SESSION_MIN_WAIT_SECONDS = 8
+AD_ACTIONS_ALLOWED = {
+    "energy_refill_max",
+    "mega_boost",
+    "ghost_boost",
+    "ads_increment",
+    "video_task",
+    "autoclicker",
+}
+CRASH_GHOST_SESSION_TTL_SECONDS = 90
+CRASH_GHOST_MULTIPLIER_SPEED = 0.68
+MONETAG_POSTBACK_ID_KEYS = (
+    "ad_session_id",
+    "subid",
+    "sub_id",
+    "click_id",
+    "clickid",
+    "cid",
+    "transaction_id",
+    "txid",
+    "tid",
+    "session_id",
+    "s1",
+    "s2",
+    "s3",
+    "ymid",
+    "request_var",
+)
+MONETAG_POSTBACK_SECRET_KEYS = ("token", "secret", "key")
+MONETAG_POSTBACK_NEGATIVE_VALUES = {
+    "0",
+    "false",
+    "failed",
+    "cancelled",
+    "canceled",
+    "rejected",
+    "deny",
+    "denied",
+}
+ADSGRAM_REWARD_USER_KEYS = (
+    "user_id",
+    "userid",
+    "userId",
+    "telegram_id",
+    "telegramId",
+    "tg_user_id",
+    "tgUserId",
+)
+ADSGRAM_REWARD_SESSION_KEYS = (
+    "ad_session_id",
+    "session_id",
+    "request_var",
+    "click_id",
+    "cid",
+    "payload",
+    "custom_data",
+)
+ADSGRAM_REWARD_SECRET_KEYS = ("token", "secret", "key")
+VIDEO_TASK_DEFINITIONS = {
+    "tap_surge": {
+        "type": "tap_boost",
+        "cooldown_minutes": 75,
+        "duration_minutes": 5,
+        "multiplier": 2,
+    },
+    "passive_hour": {
+        "type": "passive_boost",
+        "cooldown_minutes": 240,
+        "duration_minutes": 60,
+        "multiplier": 2,
+    },
+    "coin_drop": {
+        "type": "coin_drop",
+        "cooldown_minutes": 60,
+    },
+}
+
+VIDEO_SKIN_IDS = {
+    "video.pngSP",
+    "video2.pngSP",
+    "video3.pngSP",
+    "video4.pngSP",
+    "video5.pngSP",
+    "video6.pngSP",
+    "video7.pngSP",
+    "video8.pngSP",
+}
+WEEKLY_LEAGUE_ORDER = ("diamond", "gold", "silver", "bronze")
+WEEKLY_LEAGUE_LEVEL_RANGES = {
+    "bronze": {"min_level": 1, "max_level": 32},
+    "silver": {"min_level": 33, "max_level": 65},
+    "gold": {"min_level": 66, "max_level": 99},
+    "diamond": {"min_level": 100, "max_level": None},
+}
+WEEKLY_LEAGUE_FUND_SPLITS = {
+    "diamond": 0.50,
+    "gold": 0.30,
+    "silver": 0.15,
+    "bronze": 0.05,
+}
+WEEKLY_TOP3_PAYOUT_SPLITS = {
+    1: 0.30,
+    2: 0.20,
+    3: 0.13,
+}
+WEEKLY_RANGE_PAYOUT_SPLITS = [
+    {"start": 4, "end": 10, "share": 0.22},
+    {"start": 11, "end": 20, "share": 0.10},
+    {"start": 21, "end": 50, "share": 0.05},
+]
+TON_NANO = 1_000_000_000
+TON_WALLET_ALLOWED_CHARS = set(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-:"
+)
+TON_VERIFIER_API_BASE = (
+    (os.getenv("TON_VERIFIER_API_BASE", "https://toncenter.com/api/v3") or "")
+    .strip()
+    .rstrip("/")
+)
+TON_VERIFIER_API_KEY = (os.getenv("TON_VERIFIER_API_KEY", "") or "").strip()
+TON_VERIFIER_TIMEOUT_SECONDS = max(
+    5.0, float(os.getenv("TON_VERIFIER_TIMEOUT_SECONDS", "15") or "15")
+)
+TON_PROOF_TTL_SECONDS = max(
+    120, int((os.getenv("TON_PROOF_TTL_SECONDS", "900") or "900").strip())
+)
+TON_PROOF_ALLOWED_DOMAINS = tuple(
+    item.strip().lower()
+    for item in (os.getenv("TON_PROOF_ALLOWED_DOMAINS", "") or "").split(",")
+    if item.strip()
+)
+
+
+def is_valid_ton_wallet_address(value: str) -> bool:
+    address = (value or "").strip()
+    if not 32 <= len(address) <= 128:
+        return False
+    return all(char in TON_WALLET_ALLOWED_CHARS for char in address)
+
+
+def mask_ton_wallet(address: str | None) -> str:
+    raw = (address or "").strip()
+    if len(raw) < 12:
+        return raw
+    return f"{raw[:6]}...{raw[-6:]}"
+
+
+def get_ton_wallet_from_user(user: dict | None) -> dict:
+    extra_data = (user or {}).get("extra_data") or {}
+    wallet = extra_data.get("ton_wallet") or {}
+    if not isinstance(wallet, dict):
+        wallet = {}
+    address = (wallet.get("address") or "").strip()
+    connected = bool(address and is_valid_ton_wallet_address(address))
+    return {
+        "connected": connected,
+        "address": address if connected else "",
+        "masked_address": mask_ton_wallet(address) if connected else "",
+        "provider": (wallet.get("provider") or "").strip(),
+        "app_name": (wallet.get("app_name") or "").strip(),
+        "connected_at": wallet.get("connected_at"),
+        "verified": bool(connected and wallet.get("verified")),
+        "verified_at": wallet.get("verified_at"),
+        "verification_error": (wallet.get("verification_error") or "").strip(),
+    }
+
+
+def parse_extra_data_object(raw_extra) -> dict:
+    if isinstance(raw_extra, dict):
+        return raw_extra
+    if isinstance(raw_extra, str):
+        try:
+            parsed = json.loads(raw_extra)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def parse_json_object(raw_value) -> dict:
+    if isinstance(raw_value, dict):
+        return raw_value
+    if isinstance(raw_value, str):
+        try:
+            parsed = json.loads(raw_value)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def get_ton_proof_storage_key(user_id: int, payload: str) -> str:
+    return f"ton:proof:{int(user_id)}:{payload}"
+
+
+def ton_proof_allowed_domains(request: Request | None = None) -> set[str]:
+    allowed: set[str] = set(TON_PROOF_ALLOWED_DOMAINS)
+    game_host = (urlparse(GAME_WEBAPP_URL).netloc or "").strip().lower()
+    if game_host:
+        allowed.add(game_host)
+    if request:
+        for header_name in ("origin", "referer"):
+            header_value = (request.headers.get(header_name) or "").strip()
+            if not header_value:
+                continue
+            header_host = (urlparse(header_value).netloc or "").strip().lower()
+            if header_host:
+                allowed.add(header_host)
+    return {item for item in allowed if item}
+
+
+def crc16_xmodem(data: bytes) -> int:
+    crc = 0
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc
+
+
+def parse_ton_address_parts(address: str) -> tuple[int, bytes, str]:
+    value = (address or "").strip()
+    if ":" in value:
+        workchain_raw, account_id = value.split(":", 1)
+        workchain = int(workchain_raw.strip())
+        account_id = account_id.strip().lower()
+        if len(account_id) != 64 or not re.fullmatch(r"[0-9a-f]{64}", account_id):
+            raise ValueError("Invalid raw TON address")
+        return workchain, bytes.fromhex(account_id), f"{workchain}:{account_id}"
+
+    normalized = value.replace("-", "+").replace("_", "/")
+    padding = (-len(normalized)) % 4
+    if padding:
+        normalized += "=" * padding
+    decoded = base64.b64decode(normalized)
+    if len(decoded) != 36:
+        raise ValueError("Invalid friendly TON address")
+    body, checksum = decoded[:34], decoded[34:]
+    expected_checksum = crc16_xmodem(body).to_bytes(2, "big")
+    if checksum != expected_checksum:
+        raise ValueError("Invalid TON address checksum")
+    workchain = struct.unpack("b", body[1:2])[0]
+    account_bytes = body[2:]
+    return workchain, account_bytes, f"{workchain}:{account_bytes.hex()}"
+
+
+def decode_base64_any(value: str) -> bytes:
+    raw = (value or "").strip()
+    if not raw:
+        raise ValueError("Empty base64 value")
+    normalized = raw.replace("-", "+").replace("_", "/")
+    padding = (-len(normalized)) % 4
+    if padding:
+        normalized += "=" * padding
+    return base64.b64decode(normalized)
+
+
+async def issue_ton_proof_payload(user_id: int) -> tuple[str, int]:
+    payload = secrets.token_urlsafe(24)
+    expires_at = int(time.time()) + TON_PROOF_TTL_SECONDS
+    storage_key = get_ton_proof_storage_key(user_id, payload)
+    payload_data = {"user_id": int(user_id), "expires_at": expires_at}
+    redis_conn = await get_redis_or_none()
+    if redis_conn:
+        await redis_conn.setex(
+            storage_key, TON_PROOF_TTL_SECONDS, json.dumps(payload_data)
+        )
+    else:
+        LOCAL_TON_PROOF_PAYLOADS[storage_key] = payload_data
+    return payload, expires_at
+
+
+async def consume_ton_proof_payload(user_id: int, payload: str) -> bool:
+    storage_key = get_ton_proof_storage_key(user_id, payload)
+    now_ts = int(time.time())
+    redis_conn = await get_redis_or_none()
+    if redis_conn:
+        raw = await redis_conn.get(storage_key)
+        if not raw:
+            return False
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            data = {}
+        await redis_conn.delete(storage_key)
+        return (
+            int(data.get("user_id") or 0) == int(user_id)
+            and int(data.get("expires_at") or 0) >= now_ts
+        )
+
+    payload_data = LOCAL_TON_PROOF_PAYLOADS.pop(storage_key, None)
+    if not payload_data:
+        return False
+    return (
+        int(payload_data.get("user_id") or 0) == int(user_id)
+        and int(payload_data.get("expires_at") or 0) >= now_ts
+    )
+
+
+async def fetch_wallet_public_key_from_chain(raw_address: str) -> bytes | None:
+    headers = {}
+    if TON_VERIFIER_API_KEY:
+        headers["X-API-Key"] = TON_VERIFIER_API_KEY
+    payload = {
+        "address": raw_address,
+        "method": "get_public_key",
+        "stack": [],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=TON_VERIFIER_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"{TON_VERIFIER_API_BASE}/runGetMethod", json=payload, headers=headers
+            )
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        logger.warning(f"TON public key lookup failed for {raw_address}: {exc}")
+        return None
+
+    stack = data.get("stack") or data.get("result", {}).get("stack") or []
+    if not stack:
+        return None
+    value = stack[0].get("value")
+    if value is None:
+        return None
+    try:
+        key_int = int(str(value), 0)
+        if key_int < 0:
+            return None
+        return key_int.to_bytes(32, "big")
+    except Exception:
+        return None
+
+
+def decode_ton_wallet_public_key(value: str | None) -> bytes | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    normalized = raw.lower()
+    if normalized.startswith("0x"):
+        normalized = normalized[2:]
+    if re.fullmatch(r"[0-9a-f]{64}", normalized):
+        try:
+            return bytes.fromhex(normalized)
+        except ValueError:
+            return None
+    try:
+        decoded = decode_base64_any(raw)
+        return decoded if len(decoded) == 32 else None
+    except Exception:
+        return None
+
+
+def ton_addresses_match(left: str | None, right: str | None) -> bool:
+    left_value = (left or "").strip()
+    right_value = (right or "").strip()
+    if not left_value or not right_value:
+        return False
+    try:
+        return (
+            parse_ton_address_parts(left_value)[2]
+            == parse_ton_address_parts(right_value)[2]
+        )
+    except Exception:
+        return left_value == right_value
+
+
+async def verify_ton_wallet_proof(
+    user_id: int,
+    wallet_address: str,
+    ton_proof: TonProofRequest,
+    request: Request,
+    wallet_public_key: str | None = None,
+    wallet_state_init: str | None = None,
+) -> tuple[bool, str | None]:
+    try:
+        from nacl.exceptions import BadSignatureError
+        from nacl.signing import VerifyKey
+    except ImportError:
+        logger.error("PyNaCl is not installed; TON proof verification is unavailable")
+        raise HTTPException(
+            status_code=500, detail="TON proof verification is unavailable"
+        )
+
+    payload = (ton_proof.payload or "").strip()
+    if not payload:
+        return False, "Missing ton proof payload"
+    if not await consume_ton_proof_payload(user_id, payload):
+        return False, "TON proof payload expired or invalid"
+
+    proof_domain_raw = (ton_proof.domain.value or "").strip()
+    proof_domain = proof_domain_raw.lower()
+    if not proof_domain or proof_domain not in ton_proof_allowed_domains(request):
+        return False, "TON proof domain is not allowed"
+
+    domain_bytes = proof_domain_raw.encode("utf-8")
+    if int(ton_proof.domain.lengthBytes) != len(domain_bytes):
+        return False, "TON proof domain length mismatch"
+
+    now_ts = int(time.time())
+    proof_ts = int(ton_proof.timestamp or 0)
+    if proof_ts <= 0 or abs(now_ts - proof_ts) > TON_PROOF_TTL_SECONDS:
+        return False, "TON proof expired"
+
+    try:
+        workchain, account_bytes, raw_address = parse_ton_address_parts(wallet_address)
+    except ValueError:
+        return False, "Invalid TON wallet address"
+
+    client_public_key = decode_ton_wallet_public_key(wallet_public_key)
+    chain_public_key = await fetch_wallet_public_key_from_chain(raw_address)
+    if not client_public_key and not chain_public_key:
+        return False, "Unable to verify wallet public key"
+
+    candidate_keys: list[bytes] = []
+    if client_public_key:
+        candidate_keys.append(client_public_key)
+    if chain_public_key and all(
+        existing != chain_public_key for existing in candidate_keys
+    ):
+        candidate_keys.append(chain_public_key)
+
+    try:
+        signature_bytes = decode_base64_any(ton_proof.signature)
+    except Exception:
+        return False, "Invalid TON proof signature"
+
+    message = b"".join(
+        [
+            b"ton-proof-item-v2/",
+            struct.pack(">i", int(workchain)),
+            account_bytes,
+            struct.pack("<I", len(domain_bytes)),
+            domain_bytes,
+            struct.pack("<Q", proof_ts),
+            payload.encode("utf-8"),
+        ]
+    )
+    message_hash = hashlib.sha256(message).digest()
+    full_message = b"\xff\xff" + b"ton-connect" + message_hash
+    verify_hash = hashlib.sha256(full_message).digest()
+
+    for public_key in candidate_keys:
+        try:
+            VerifyKey(public_key).verify(verify_hash, signature_bytes)
+            if (
+                client_public_key
+                and chain_public_key
+                and client_public_key != chain_public_key
+            ):
+                logger.warning(
+                    "TON wallet proof verified with client key that differs from chain key for user %s (address=%s, has_state_init=%s)",
+                    user_id,
+                    wallet_address,
+                    bool((wallet_state_init or "").strip()),
+                )
+            return True, None
+        except BadSignatureError:
+            continue
+        except Exception:
+            continue
+
+    return False, "Invalid TON proof signature"
+
+
+async def get_pending_ton_wallet_notice(user_id: int) -> dict | None:
+    user = await get_user_cached(user_id)
+    if not user:
+        return None
+
+    extra_data = parse_extra_data(user.get("extra_data"))
+    wallet = get_ton_wallet_from_user({"extra_data": extra_data})
+    if wallet.get("connected") and wallet.get("verified"):
+        return None
+
+    async with AsyncSessionLocal() as session:
+        winner_result = await session.execute(
+            select(WeeklyTournamentWinner)
+            .where(
+                WeeklyTournamentWinner.user_id == user_id,
+                WeeklyTournamentWinner.eligible_for_payout == True,
+                WeeklyTournamentWinner.fraud_flag == False,
+                WeeklyTournamentWinner.payout_cents > 0,
+            )
+            .order_by(WeeklyTournamentWinner.created_at.desc())
+            .limit(1)
+        )
+        winner_row = winner_result.scalars().first()
+        if not winner_row:
+            return None
+
+        payout_result = await session.execute(
+            select(WeeklyTournamentTonPayout)
+            .where(
+                WeeklyTournamentTonPayout.season_key == winner_row.season_key,
+                WeeklyTournamentTonPayout.user_id == user_id,
+            )
+            .limit(1)
+        )
+        payout_row = payout_result.scalars().first()
+
+    if payout_row and str(getattr(payout_row, "status", "") or "").lower() in {
+        "queued",
+        "submitted",
+        "sent",
+    }:
+        return None
+
+    reminders_by_season = extra_data.get("ton_wallet_reminders") or {}
+    reminder = (
+        reminders_by_season.get(winner_row.season_key)
+        if isinstance(reminders_by_season, dict)
+        else {}
+    )
+    if not isinstance(reminder, dict):
+        reminder = {}
+
+    reminder_sent_at = reminder.get("sent_at")
+    hours_until_deadline = int(reminder.get("hours_until_deadline") or 72)
+    deadline_at = None
+    parsed_sent_at = parse_iso_datetime(reminder_sent_at)
+    if parsed_sent_at:
+        deadline_at = (
+            parsed_sent_at + timedelta(hours=hours_until_deadline)
+        ).isoformat()
+
+    return {
+        "season_key": winner_row.season_key,
+        "league": winner_row.league,
+        "rank": int(winner_row.rank or 0),
+        "payout_cents": int(winner_row.payout_cents or 0),
+        "wallet_connected": False,
+        "reminder_sent_at": reminder_sent_at,
+        "hours_until_deadline": hours_until_deadline,
+        "deadline_at": deadline_at,
+    }
+
+
+def ton_wallet_normalized_variants(address: str | None) -> set[str]:
+    raw = (address or "").strip()
+    if not raw:
+        return set()
+    lowered = raw.lower()
+    variants = {raw, lowered}
+    if raw.startswith("0:"):
+        variants.add(raw[2:])
+        variants.add(raw[2:].lower())
+    return {item for item in variants if item}
+
+
+def ton_wallets_equal(left: str | None, right: str | None) -> bool:
+    left_variants = ton_wallet_normalized_variants(left)
+    right_variants = ton_wallet_normalized_variants(right)
+    return bool(
+        left_variants and right_variants and left_variants.intersection(right_variants)
+    )
+
+
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    raw = (os.getenv(name, "1" if default else "0") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _parse_csv_env(name: str, default: list[str]) -> list[str]:
+    raw = (os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+PROD_CORS_ORIGINS = [
+    "https://spirix.vercel.app",
+    "https://web.telegram.org",
+    "https://telegram.org",
+]
+DEV_CORS_ORIGINS = PROD_CORS_ORIGINS + [
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+]
+ALLOWED_CORS_ORIGINS = _parse_csv_env(
+    "CORS_ALLOWED_ORIGINS",
+    DEV_CORS_ORIGINS if APP_ENV != "production" else PROD_CORS_ORIGINS,
+)
+ALLOW_NULL_ORIGIN = _parse_bool_env("CORS_ALLOW_NULL_ORIGIN", APP_ENV != "production")
+MOBILE_ONLY_ENFORCED = _parse_bool_env("MOBILE_ONLY_ENFORCED", True)
+MOBILE_TELEGRAM_PLATFORMS = {"android", "ios", "ipados"}
+DESKTOP_TELEGRAM_PLATFORMS = {
+    "tdesktop",
+    "weba",
+    "webk",
+    "web",
+    "macos",
+    "windows",
+    "linux",
+    "unigram",
+}
+MOBILE_USER_AGENT_RE = re.compile(
+    r"(android|iphone|ipad|ipod|mobile|windows phone)", re.IGNORECASE
+)
+DESKTOP_USER_AGENT_RE = re.compile(
+    r"(windows nt|macintosh|x11|cros|linux x86_64)", re.IGNORECASE
+)
+
+
+# Single lightweight reconnect helper to avoid code duplication
+async def try_reconnect_redis() -> None:
+    global redis_client
+    if not REDIS_URL or redis_client is not None:
+        return
+    client = redis.from_url(
+        REDIS_URL,
+        encoding="utf-8",
+        decode_responses=True,
+        socket_timeout=2,
+        socket_connect_timeout=2,
+        retry_on_timeout=True,
+    )
+    try:
+        await client.ping()
+        redis_client = client
+        logger.info("вњ“ Redis reconnected")
+    except Exception as e:
+        logger.warning(f"Redis reconnect failed: {e}")
+        redis_client = None
+
+
+async def get_redis_or_none() -> redis.Redis | None:
+    """
+    Best-effort Redis with single reconnect attempt. No exceptions.
+    """
+    if redis_client is None:
+        await try_reconnect_redis()
+    return redis_client
+
+
+async def redis_or_503() -> redis.Redis:
+    """
+    Strong guarantee: return redis connection or raise 503.
+    """
+    conn = await get_redis_or_none()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+    return conn
+
+
+async def touch_online_user(user_id: int) -> int:
+    conn = await get_redis_or_none()
+    if conn is None:
+        return 0
+
+    now_ts = int(time.time())
+    cutoff = now_ts - ONLINE_WINDOW_SECONDS
+    try:
+        await conn.zadd(ONLINE_USERS_KEY, {str(user_id): now_ts})
+        await conn.zremrangebyscore(ONLINE_USERS_KEY, 0, cutoff)
+        online_now = await conn.zcount(ONLINE_USERS_KEY, cutoff, "+inf")
+        await conn.expire(ONLINE_USERS_KEY, ONLINE_WINDOW_SECONDS * 2)
+        return int(online_now or 0)
+    except Exception as e:
+        logger.warning(f"Online heartbeat failed: {e}")
+        return 0
+
+
+async def get_online_users_count() -> int:
+    conn = await get_redis_or_none()
+    if conn is None:
+        return 0
+
+    now_ts = int(time.time())
+    cutoff = now_ts - ONLINE_WINDOW_SECONDS
+    try:
+        await conn.zremrangebyscore(ONLINE_USERS_KEY, 0, cutoff)
+        online_now = await conn.zcount(ONLINE_USERS_KEY, cutoff, "+inf")
+        return int(online_now or 0)
+    except Exception as e:
+        logger.warning(f"Online count fetch failed: {e}")
+        return 0
+
+
+async def create_telegram_stars_invoice_link(
+    *, user_id: int, skin_id: str, price: int
+) -> str:
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=500, detail="Bot token not configured")
+
+    payload = f"stars_skin:{user_id}:{skin_id}"
+    request_body = {
+        "title": f"Skin {skin_id}",
+        "description": f"Unlock premium skin {skin_id}",
+        "payload": payload,
+        "currency": "XTR",
+        "prices": [{"label": skin_id, "amount": price}],
+        "provider_token": "",
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink",
+            json=request_body,
+        )
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail="Telegram invoice creation failed")
+
+    data = response.json()
+    if not data.get("ok") or not data.get("result"):
+        raise HTTPException(status_code=502, detail="Telegram invoice creation failed")
+
+    return data["result"]
+
+
+async def verify_telegram_channel_subscription(user_id: int) -> bool:
+    if not BOT_TOKEN or not TELEGRAM_VERIFY_CHANNEL:
+        logger.warning("Telegram subscription verification is not configured")
+        return False
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember",
+                params={
+                    "chat_id": TELEGRAM_VERIFY_CHANNEL,
+                    "user_id": user_id,
+                },
+            )
+    except Exception as exc:
+        logger.warning(
+            "Telegram subscription verification request failed for %s: %s", user_id, exc
+        )
+        return False
+
+    if response.status_code != 200:
+        logger.warning(
+            "Telegram subscription verification HTTP error for %s: %s",
+            user_id,
+            response.status_code,
+        )
+        return False
+
+    try:
+        payload = response.json()
+    except Exception:
+        logger.warning(
+            "Telegram subscription verification returned invalid JSON for %s", user_id
+        )
+        return False
+
+    if not payload.get("ok"):
+        logger.warning(
+            "Telegram subscription verification failed for %s: %s", user_id, payload
+        )
+        return False
+
+    status = ((payload.get("result") or {}).get("status") or "").lower()
+    return status in TELEGRAM_MEMBER_STATUSES
+
+
+async def send_telegram_wallet_reminder_message(
+    *,
+    user_id: int,
+    season_key: str,
+    league: str,
+    hours_until_deadline: int,
+) -> tuple[bool, str | None]:
+    if not BOT_TOKEN:
+        return False, "Bot token not configured"
+
+    league_label = league.title()
+    deadline_text = f"{int(hours_until_deadline)} часов"
+    reminder_text = (
+        "Ты попал в турнирные выплаты.\n\n"
+        f"Лига: {league_label}\n"
+        f"Сезон: {season_key}\n\n"
+        f"Подключи TON-кошелёк в течение {deadline_text}, иначе выплата не будет отправлена."
+    )
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Открыть игру",
+                    "web_app": {"url": GAME_WEBAPP_URL},
+                }
+            ],
+            [
+                {
+                    "text": "Открыть бота",
+                    "url": f"https://t.me/{TELEGRAM_BOT_USERNAME}",
+                }
+            ],
+        ]
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": int(user_id),
+                    "text": reminder_text,
+                    "reply_markup": reply_markup,
+                },
+            )
+        payload = response.json() if response.content else {}
+        if response.status_code != 200 or not payload.get("ok"):
+            return False, str(
+                (payload or {}).get("description") or f"HTTP {response.status_code}"
+            )
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+async def create_ad_action_session(user_id: int, action: str) -> str:
+    if action not in AD_ACTIONS_ALLOWED:
+        raise HTTPException(status_code=400, detail="Unknown ad action")
+
+    redis_conn = await ensure_redis_available()
+    ad_session_id = (
+        f"{action}:{user_id}:{int(time.time())}:{random.randint(100000, 999999)}"
+    )
+    session_key = f"adsession:action:{ad_session_id}"
+
+    await redis_conn.setex(
+        session_key,
+        AD_ACTION_SESSION_TTL_SECONDS,
+        json.dumps(
+            {
+                "user_id": user_id,
+                "action": action,
+                "claimed": False,
+                "verified": False,
+                "verified_at": None,
+                "created_at": time.time(),
+            }
+        ),
+    )
+    user_index_key = f"adsession:user:{user_id}"
+    active_session_key = get_ad_action_active_session_key(user_id)
+    try:
+        await redis_conn.zadd(user_index_key, {ad_session_id: time.time()})
+        await redis_conn.expire(user_index_key, max(AD_ACTION_SESSION_TTL_SECONDS, 600))
+        await redis_conn.setex(
+            active_session_key, AD_ACTION_SESSION_TTL_SECONDS, ad_session_id
+        )
+    except Exception:
+        pass
+    return ad_session_id
+
+
+def extract_first_value(source: dict, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = source.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+async def mark_ad_action_session_verified(
+    ad_session_id: str, postback_payload: dict
+) -> bool:
+    redis_conn = await ensure_redis_available()
+    session_key = f"adsession:action:{ad_session_id}"
+    raw = await redis_conn.get(session_key)
+    if not raw:
+        return False
+
+    try:
+        session = json.loads(raw)
+    except Exception:
+        return False
+
+    session["verified"] = True
+    session["verified_at"] = time.time()
+    session["postback_payload"] = postback_payload
+
+    ttl = await redis_conn.ttl(session_key)
+    ttl = max(int(ttl or 0), 300)
+    await redis_conn.setex(session_key, ttl, json.dumps(session))
+    return True
+
+
+async def mark_ad_action_session_verified_for_user(
+    user_id: int,
+    ad_session_id: str,
+    verification_payload: dict | None = None,
+) -> bool:
+    redis_conn = await ensure_redis_available()
+    session_key = f"adsession:action:{ad_session_id}"
+    raw = await redis_conn.get(session_key)
+    if not raw:
+        return False
+
+    try:
+        session = json.loads(raw)
+    except Exception:
+        return False
+
+    if int(session.get("user_id", 0)) != int(user_id):
+        return False
+
+    if session.get("claimed") is True:
+        return False
+
+    created_at = float(session.get("created_at") or 0)
+    if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
+        return False
+
+    return await mark_ad_action_session_verified(
+        ad_session_id, verification_payload or {}
+    )
+
+
+async def find_latest_ad_action_session_for_user(user_id: int) -> str | None:
+    redis_conn = await ensure_redis_available()
+    user_index_key = f"adsession:user:{user_id}"
+    active_session_key = get_ad_action_active_session_key(user_id)
+    active_session_id = await redis_conn.get(active_session_key)
+    if active_session_id:
+        session_key = f"adsession:action:{active_session_id}"
+        raw = await redis_conn.get(session_key)
+        if raw:
+            try:
+                session = json.loads(raw)
+                if (
+                    int(session.get("user_id", 0)) == int(user_id)
+                    and session.get("claimed") is not True
+                ):
+                    return active_session_id
+            except Exception:
+                pass
+        try:
+            await redis_conn.delete(active_session_key)
+        except Exception:
+            pass
+    session_ids = await redis_conn.zrevrange(user_index_key, 0, 24)
+    stale_ids: list[str] = []
+
+    for session_id in session_ids:
+        session_key = f"adsession:action:{session_id}"
+        raw = await redis_conn.get(session_key)
+        if not raw:
+            stale_ids.append(session_id)
+            continue
+
+        try:
+            session = json.loads(raw)
+        except Exception:
+            stale_ids.append(session_id)
+            continue
+
+        if int(session.get("user_id", 0)) != int(user_id):
+            stale_ids.append(session_id)
+            continue
+
+        if session.get("claimed") is True:
+            continue
+
+        return session_id
+
+    if stale_ids:
+        try:
+            await redis_conn.zrem(user_index_key, *stale_ids)
+        except Exception:
+            pass
+    return None
+
+
+async def mark_latest_ad_action_session_verified_for_user(
+    user_id: int, postback_payload: dict
+) -> str | None:
+    ad_session_id = await find_latest_ad_action_session_for_user(user_id)
+    if not ad_session_id:
+        return None
+    verified = await mark_ad_action_session_verified(ad_session_id, postback_payload)
+    if not verified:
+        return None
+    return ad_session_id
+
+
+async def consume_ad_action_session(
+    user_id: int, ad_session_id: str, expected_action: str
+) -> dict:
+    redis_conn = await ensure_redis_available()
+    session_key = f"adsession:action:{ad_session_id}"
+    active_session_key = get_ad_action_active_session_key(user_id)
+    raw = await redis_conn.get(session_key)
+    if not raw:
+        raise HTTPException(status_code=400, detail="Invalid or expired ad session")
+
+    try:
+        session = json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid ad session payload")
+
+    if int(session.get("user_id", 0)) != int(user_id):
+        raise HTTPException(
+            status_code=400, detail="Ad session does not belong to user"
+        )
+
+    if session.get("action") != expected_action:
+        raise HTTPException(status_code=400, detail="Ad session action mismatch")
+
+    if session.get("claimed") is True:
+        raise HTTPException(status_code=409, detail="Reward already claimed")
+
+    if MONETAG_POSTBACK_ENFORCED or ADSGRAM_REWARD_ENFORCED:
+        if session.get("verified") is not True:
+            raise HTTPException(
+                status_code=400, detail="Ad completion was not confirmed yet"
+            )
+    else:
+        created_at = float(session.get("created_at") or 0)
+        if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
+            raise HTTPException(status_code=400, detail="Ad watch is not completed yet")
+
+    session["claimed"] = True
+    await redis_conn.setex(session_key, 60, json.dumps(session))
+    try:
+        active_session_id = await redis_conn.get(active_session_key)
+        if active_session_id == ad_session_id:
+            await redis_conn.delete(active_session_key)
+    except Exception:
+        pass
+    return session
+
+
+def build_crash_ghost_session(bet: int, user_id: int) -> dict:
+    crash_at = round(1.85 + random.random() * 4.15, 2)
+    if random.random() < 0.1:
+        crash_at = round(5.8 + random.random() * 2.6, 2)
+
+    now_ts = time.time()
+    crash_after_seconds = max(0.85, (crash_at - 1.0) / CRASH_GHOST_MULTIPLIER_SPEED)
+
+    return {
+        "user_id": user_id,
+        "bet": bet,
+        "started_at": now_ts,
+        "crash_at": crash_at,
+        "crash_after_seconds": crash_after_seconds,
+        "claimed": False,
+    }
+
+
+def get_crash_ghost_runtime(session: dict, now_ts: float | None = None) -> dict:
+    now_ts = now_ts or time.time()
+    started_at = float(session.get("started_at") or now_ts)
+    crash_after_seconds = float(session.get("crash_after_seconds") or 0)
+    crash_at = float(session.get("crash_at") or 1.0)
+    elapsed = max(0.0, now_ts - started_at)
+    crashed = elapsed >= crash_after_seconds
+    multiplier = (
+        crash_at if crashed else round(1.0 + elapsed * CRASH_GHOST_MULTIPLIER_SPEED, 2)
+    )
+    multiplier = max(1.0, min(multiplier, crash_at))
+
+    return {
+        "elapsed_seconds": elapsed,
+        "crashed": crashed,
+        "multiplier": multiplier,
+        "crash_at": crash_at,
+    }
+
+
+# ==================== METRICS ====================
+HTTP_REQUESTS_TOTAL = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "path", "status"],
+)
+HTTP_REQUEST_DURATION = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ["method", "path"],
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10),
+)
+REDIS_ERRORS = Counter("redis_errors_total", "Redis operation errors")
+DB_ERRORS = Counter("db_errors_total", "Database operation errors")
+RATE_LIMIT_REJECTS = Counter(
+    "rate_limit_rejects_total",
+    "Rate-limit rejections",
+    ["namespace"],
+)
+# ==================== LOGGING ====================
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+
+
+def issue_session_token(telegram_user: dict) -> tuple[str, int]:
+    now_ts = int(time.time())
+    expires_at = now_ts + SESSION_TOKEN_TTL_SECONDS
+    payload = {
+        "uid": int(telegram_user.get("id", 0)),
+        "username": telegram_user.get("username"),
+        "iat": now_ts,
+        "exp": expires_at,
+        "jti": secrets.token_hex(8),
+    }
+    payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode(
+        "utf-8"
+    )
+    payload_part = _b64url_encode(payload_json)
+    signature = hmac.new(
+        SESSION_TOKEN_SECRET.encode("utf-8"),
+        payload_part.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{payload_part}.{signature}", expires_at
+
+
+def verify_session_token(token: str) -> dict:
+    if not token or "." not in token:
+        raise HTTPException(status_code=401, detail="Invalid session token")
+
+    payload_part, signature = token.rsplit(".", 1)
+    expected_signature = hmac.new(
+        SESSION_TOKEN_SECRET.encode("utf-8"),
+        payload_part.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        raise HTTPException(status_code=401, detail="Invalid session signature")
+
+    try:
+        payload = json.loads(_b64url_decode(payload_part).decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid session payload") from exc
+
+    now_ts = int(time.time())
+    if int(payload.get("exp", 0) or 0) <= now_ts:
+        raise HTTPException(status_code=401, detail="Session expired")
+
+    user_id = int(payload.get("uid", 0) or 0)
+    if user_id <= 0:
+        raise HTTPException(status_code=401, detail="Invalid session user")
+
+    return {
+        "id": user_id,
+        "username": payload.get("username"),
+        "iat": int(payload.get("iat", 0) or 0),
+        "exp": int(payload.get("exp", 0) or 0),
+        "jti": payload.get("jti"),
+        "auth": "session",
+    }
+
+
+def read_bearer_token(request: Request) -> str:
+    authorization = (request.headers.get("Authorization", "") or "").strip()
+    if not authorization:
+        return ""
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return ""
+    return parts[1].strip()
+
+
+def is_mobile_game_client_request(request: Request) -> bool:
+    platform = (request.headers.get("X-Telegram-Platform", "") or "").strip().lower()
+    if platform in DESKTOP_TELEGRAM_PLATFORMS:
+        return False
+    if platform in MOBILE_TELEGRAM_PLATFORMS:
+        return True
+
+    sec_mobile = (request.headers.get("sec-ch-ua-mobile", "") or "").strip().lower()
+    if sec_mobile == "?1":
+        return True
+
+    client_mobile_header = (
+        (request.headers.get("X-Client-Mobile", "") or "").strip().lower()
+    )
+    client_mobile = client_mobile_header in {"1", "true", "yes", "on"}
+
+    user_agent = request.headers.get("user-agent", "") or ""
+    ua_is_mobile = bool(MOBILE_USER_AGENT_RE.search(user_agent))
+    ua_is_desktop = bool(DESKTOP_USER_AGENT_RE.search(user_agent))
+
+    if client_mobile and not ua_is_desktop:
+        return True
+
+    return ua_is_mobile and not ua_is_desktop
+
+
+def ensure_mobile_only_game_access(request: Request) -> None:
+    if not MOBILE_ONLY_ENFORCED:
+        return
+    if is_mobile_game_client_request(request):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="This game is available only on mobile devices inside Telegram",
+    )
+
+
+async def require_telegram_user(
+    request: Request, expected_user_id: int | None = None
+) -> dict:
+    ensure_mobile_only_game_access(request)
+    bearer_token = read_bearer_token(request)
+    if bearer_token:
+        telegram_user = verify_session_token(bearer_token)
+    else:
+        telegram_user = verify_telegram_init_data(
+            request.headers.get("X-Telegram-Init-Data", "")
+        )
+
+    if expected_user_id is not None and int(telegram_user.get("id", 0)) != int(
+        expected_user_id
+    ):
+        raise HTTPException(status_code=403, detail="Telegram user mismatch")
+
+    return telegram_user
+
+
+async def require_admin_access(request: Request) -> dict:
+    admin_token = (request.headers.get("X-Admin-Token", "") or "").strip()
+    if ADMIN_DASHBOARD_TOKEN and admin_token == ADMIN_DASHBOARD_TOKEN:
+        return {"auth": "token"}
+
+    telegram_user = verify_telegram_init_data(
+        request.headers.get("X-Telegram-Init-Data", "")
+    )
+    telegram_user_id = int(telegram_user.get("id", 0))
+    if telegram_user_id not in ADMIN_TELEGRAM_IDS:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return telegram_user
+
+
+def format_int(value: int) -> str:
+    return f"{int(value or 0):,}".replace(",", " ")
+
+
+async def get_rewarded_ad_user_counts(
+    user_ids: list[int], *, hours: int
+) -> dict[int, int]:
+    if not user_ids:
+        return {}
+    since = datetime.utcnow() - timedelta(hours=max(1, int(hours or 1)))
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(RewardedAdClaim.user_id, func.count(RewardedAdClaim.id))
+            .where(
+                RewardedAdClaim.user_id.in_(user_ids),
+                RewardedAdClaim.created_at >= since,
+            )
+            .group_by(RewardedAdClaim.user_id)
+        )
+        return {int(user_id): int(count or 0) for user_id, count in result.all()}
+
+
+async def build_admin_fraud_overview(season_key: str) -> list[dict]:
+    now = datetime.utcnow()
+    async with AsyncSessionLocal() as session:
+        entries_result = await session.execute(
+            select(WeeklyTournamentEntry)
+            .where(WeeklyTournamentEntry.season_key == season_key)
+            .order_by(
+                WeeklyTournamentEntry.fraud_flag.desc(),
+                WeeklyTournamentEntry.score.desc(),
+            )
+            .limit(200)
+        )
+        entries = entries_result.scalars().all()
+
+        user_ids = [int(entry.user_id) for entry in entries]
+        if not user_ids:
+            return []
+
+        users_result = await session.execute(
+            select(User).where(User.user_id.in_(user_ids))
+        )
+        users_map = {int(user.user_id): user for user in users_result.scalars().all()}
+
+        referrer_ids = sorted(
+            {
+                int(user.referrer_id)
+                for user in users_map.values()
+                if getattr(user, "referrer_id", None)
+            }
+        )
+        referrer_cluster_counts: dict[int, int] = {}
+        if referrer_ids:
+            cluster_result = await session.execute(
+                select(User.referrer_id, func.count(User.id))
+                .where(User.referrer_id.in_(referrer_ids))
+                .group_by(User.referrer_id)
+            )
+            referrer_cluster_counts = {
+                int(referrer_id): int(count or 0)
+                for referrer_id, count in cluster_result.all()
+                if referrer_id is not None
+            }
+
+    reviews_map = await get_admin_fraud_reviews(user_ids)
+    recent_ads_1h = await get_rewarded_ad_user_counts(user_ids, hours=1)
+    recent_ads_24h = await get_rewarded_ad_user_counts(user_ids, hours=24)
+
+    suspicious_rows = []
+    for entry in entries:
+        user = users_map.get(int(entry.user_id))
+        if user is None:
+            continue
+
+        account_age_hours = max(
+            0.0, (now - (user.created_at or now)).total_seconds() / 3600
+        )
+        review = reviews_map.get(int(entry.user_id), {})
+        reasons: list[str] = []
+        extra = parse_extra_data(getattr(user, "extra_data", {}))
+        click_guard = get_click_guard_state(extra)
+
+        if review.get("status") == "fraud":
+            reasons.append(review.get("reason") or "Manual fraud review")
+
+        if entry.display_level >= 100 and account_age_hours < 72:
+            reasons.append("Too fast level growth to Diamond")
+        elif entry.display_level >= 66 and account_age_hours < 24:
+            reasons.append("Too fast level growth to Gold")
+        elif entry.display_level >= 33 and account_age_hours < 8:
+            reasons.append("Too fast level growth to Silver")
+
+        ads_1h = int(recent_ads_1h.get(int(entry.user_id), 0))
+        ads_24h = int(recent_ads_24h.get(int(entry.user_id), 0))
+        if ads_1h >= 25 or ads_24h >= 120:
+            reasons.append(
+                f"Too many rewarded ads in a short period ({ads_1h}/1h, {ads_24h}/24h)"
+            )
+
+        score_per_hour = int((entry.score or 0) / max(account_age_hours, 1))
+        if score_per_hour >= 500000:
+            reasons.append(
+                f"Unusually fast click income velocity ({format_int(score_per_hour)} per hour)"
+            )
+
+        click_suspicion_score = int(click_guard.get("suspicion_score", 0) or 0)
+        hard_rejections = int(click_guard.get("hard_rejections", 0) or 0)
+        if click_suspicion_score >= CLICK_SUSPICION_SOFT_LIMIT:
+            reasons.append(
+                f"Suspicious click batches detected (score {click_suspicion_score})"
+            )
+        if hard_rejections > 0:
+            reasons.append(
+                f"Server rejected suspicious click bursts ({hard_rejections})"
+            )
+
+        referrer_id = getattr(user, "referrer_id", None)
+        if (
+            referrer_id
+            and referrer_cluster_counts.get(int(referrer_id), 0) >= 5
+            and account_age_hours <= 72
+        ):
+            reasons.append("Possible multi-account referral cluster")
+
+        is_flagged = (
+            bool(entry.fraud_flag) or review.get("status") == "fraud" or bool(reasons)
+        )
+        if not is_flagged:
+            continue
+
+        suspicious_rows.append(
+            {
+                "user_id": int(entry.user_id),
+                "username": entry.username or getattr(user, "username", None),
+                "display_level": int(entry.display_level or 1),
+                "league": entry.league,
+                "score": int(entry.score or 0),
+                "eligible_for_payout": bool(entry.eligible_for_payout),
+                "fraud_flag": bool(entry.fraud_flag) or review.get("status") == "fraud",
+                "manual_status": review.get("status", "ok"),
+                "manual_reason": review.get("reason"),
+                "disqualify_from_payout": bool(review.get("disqualify_from_payout")),
+                "account_age_hours": round(account_age_hours, 1),
+                "rewarded_ads_1h": ads_1h,
+                "rewarded_ads_24h": ads_24h,
+                "reasons": reasons,
+            }
+        )
+
+    suspicious_rows.sort(
+        key=lambda item: (
+            not item["fraud_flag"],
+            not item["disqualify_from_payout"],
+            -item["score"],
+        )
+    )
+    return suspicious_rows
+
+
+# ==================== РўРЈР РќРР РќР«Р• Р”РђРќРќР«Р• ==================
+
+
+async def get_user_cached(user_id: int) -> dict | None:
+    conn = await get_redis_or_none()
+    if conn:
+        cached = await conn.get(f"{USER_CACHE_PREFIX}{user_id}")
+        if cached:
+            try:
+                return json.loads(cached)
+            except Exception:
+                pass
+
+    user = await get_user(user_id)
+    if not user:
+        return None
+
+    conn = await get_redis_or_none()
+    if conn:
+        await conn.setex(
+            f"{USER_CACHE_PREFIX}{user_id}",
+            USER_CACHE_TTL,
+            json.dumps(user, default=str),
+        )
+
+    return user
+
+
+# ==================== Р’СЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Рµ С„СѓРЅРєС†РёРё Р°РЅС‚РёСЃРїР°РјР° ====================
+
+
+async def invalidate_user_cache(user_id: int):
+    conn = await get_redis_or_none()
+    if conn:
+        await conn.delete(f"{USER_CACHE_PREFIX}{user_id}")
+
+
+def parse_extra_data(extra_raw) -> dict:
+    if isinstance(extra_raw, dict):
+        return extra_raw
+    if isinstance(extra_raw, str) and extra_raw:
+        try:
+            return json.loads(extra_raw)
+        except Exception:
+            return {}
+    return {}
+
+
+def parse_iso_datetime(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def get_click_guard_state(extra: dict) -> dict:
+    click_guard = extra.get("click_guard", {})
+    if not isinstance(click_guard, dict):
+        click_guard = {}
+    return click_guard
+
+
+def write_click_guard_state(extra: dict, click_guard: dict) -> dict:
+    extra["click_guard"] = click_guard
+    return extra
+
+
+def get_skin_ad_progress(extra: dict) -> dict:
+    value = extra.get("skin_ad_progress", {})
+    return value if isinstance(value, dict) else {}
+
+
+def get_skin_ad_last_watch(extra: dict) -> dict:
+    value = extra.get("skin_ad_last_watch", {})
+    return value if isinstance(value, dict) else {}
+
+
+def serialize_db_field(field: str, value):
+    if field == "extra_data" and value is not None and not isinstance(value, str):
+        return json.dumps(value)
+    return value
+
+
+def get_ad_action_active_session_key(user_id: int) -> str:
+    return f"adsession:user:active:{int(user_id)}"
+
+
+async def update_user_if_matches(user_id: int, expected: dict, data: dict):
+    allowed_fields = {
+        "username",
+        "coins",
+        "profit_per_hour",
+        "profit_per_tap",
+        "energy",
+        "max_energy",
+        "level",
+        "multitap_level",
+        "profit_level",
+        "energy_level",
+        "boost_level",
+        "last_passive_income",
+        "last_energy_update",
+        "referrer_id",
+        "referral_count",
+        "referral_earnings",
+        "extra_data",
+        "luck_level",
+    }
+    unknown_fields = (set(expected) | set(data)) - allowed_fields
+    if unknown_fields:
+        raise ValueError(f"Unsupported atomic update fields: {sorted(unknown_fields)}")
+
+    where_clauses = [User.user_id == user_id]
+    for field, raw_value in expected.items():
+        value = serialize_db_field(field, raw_value)
+        column = getattr(User, field)
+        if value is None:
+            where_clauses.append(column.is_(None))
+        else:
+            where_clauses.append(column == value)
+
+    values = {
+        field: serialize_db_field(field, raw_value) for field, raw_value in data.items()
+    }
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(User).where(*where_clauses).values(**values)
+        )
+        if result.rowcount != 1:
+            await session.rollback()
+            return None
+        await session.commit()
+
+    return await get_user(user_id)
+
+
+async def apply_atomic_user_updates(
+    user_id: int,
+    current_user: dict,
+    updates: dict,
+    *,
+    expected_fields: tuple[str, ...] | None = None,
+    conflict_detail: str = "User state changed, retry",
+):
+    fields = expected_fields or tuple(
+        field
+        for field in (
+            "coins",
+            "energy",
+            "last_energy_update",
+            "extra_data",
+            "last_passive_income",
+            "referral_earnings",
+        )
+        if field in updates
+    )
+    expected = {field: current_user.get(field) for field in fields}
+    updated_user = await update_user_if_matches(user_id, expected, updates)
+    if not updated_user:
+        raise HTTPException(status_code=409, detail=conflict_detail)
+    await invalidate_user_cache(user_id)
+    return updated_user
+
+
+async def complete_task_reward_atomically(
+    user_id: int, task_id: str, user_updates: dict | None = None
+) -> dict:
+    user_updates = user_updates or {}
+
+    async with AsyncSessionLocal() as session:
+        user_result = await session.execute(
+            select(User).where(User.user_id == user_id).with_for_update()
+        )
+        user_row = user_result.scalar_one_or_none()
+        if not user_row:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        task_result = await session.execute(
+            select(UserTask).where(
+                UserTask.user_id == user_id,
+                UserTask.task_id == task_id,
+            )
+        )
+        if task_result.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Task already completed")
+
+        session.add(UserTask(user_id=user_id, task_id=task_id))
+        for field, value in user_updates.items():
+            setattr(
+                user_row, field, json.dumps(value) if field == "extra_data" else value
+            )
+
+        await session.commit()
+
+    return await get_user(user_id)
+
+
+def resolve_video_task_coin_drop() -> int:
+    roll = random.random()
+    if roll < 0.55:
+        return random.randint(200, 1000)
+    if roll < 0.80:
+        return random.randint(1000, 5000)
+    if roll < 0.92:
+        return random.randint(5000, 12000)
+    if roll < 0.98:
+        return random.randint(12000, 20000)
+    return random.randint(20000, 30000)
+
+
+def get_video_task_last_claims(extra: dict) -> dict:
+    claims = extra.get("video_task_last_claims", {})
+    return claims if isinstance(claims, dict) else {}
+
+
+def get_video_task_boosts(extra: dict) -> dict:
+    boosts = extra.get("video_task_boosts", {})
+    return boosts if isinstance(boosts, dict) else {}
+
+
+def get_active_video_task_boost(
+    extra: dict, boost_key: str
+) -> tuple[bool, str | None, int]:
+    boosts = get_video_task_boosts(extra)
+    boost = boosts.get(boost_key)
+    if not isinstance(boost, dict):
+        return False, None, 1
+
+    expires_at = parse_iso_datetime(boost.get("expires_at"))
+    if not expires_at or expires_at <= datetime.utcnow():
+        return False, None, 1
+
+    return True, expires_at.isoformat(), int(boost.get("multiplier", 1) or 1)
+
+
+async def touch_user_activity(user_id: int, user: dict | None = None) -> None:
+    user_data = user or await get_user_cached(user_id)
+    if not user_data:
+        return
+
+    extra = parse_extra_data(user_data.get("extra_data"))
+    previous_activity = extra.get("last_activity_at")
+    previous_stage = int(extra.get("push_idle_stage", 0) or 0)
+    now = datetime.utcnow()
+
+    if previous_activity:
+        try:
+            prev_dt = datetime.fromisoformat(previous_activity)
+            if (now - prev_dt).total_seconds() < 120 and previous_stage == 0:
+                return
+        except Exception:
+            pass
+    now_iso = now.isoformat()
+
+    extra["last_activity_at"] = now_iso
+    extra["push_idle_stage"] = 0
+    extra["last_push_reason"] = None
+
+    await update_user(user_id, {"extra_data": extra})
+    await invalidate_user_cache(user_id)
+
+
+async def grant_referral_share_bonus(referral_user: dict, source_income: int) -> int:
+    if source_income <= 0:
+        return 0
+
+    referral_user_id = int(referral_user.get("user_id", 0))
+    referrer_id = int(referral_user.get("referrer_id") or 0)
+    if not referrer_id or referrer_id == referral_user_id:
+        return 0
+
+    referrer = await get_user_cached(referrer_id)
+    if not referrer:
+        return 0
+
+    if int(referrer.get("referrer_id") or 0) == referral_user_id:
+        return 0
+
+    bonus = int(source_income * REFERRAL_SHARE_RATE)
+    if bonus <= 0:
+        return 0
+
+    extra = parse_extra_data(referrer.get("extra_data"))
+    today_key = datetime.utcnow().date().isoformat()
+    if extra.get("referral_commission_date") != today_key:
+        extra["referral_commission_date"] = today_key
+        extra["referral_commission_today"] = 0
+
+    today_amount = int(extra.get("referral_commission_today", 0))
+    available = max(0, REFERRAL_DAILY_SHARE_LIMIT - today_amount)
+    bonus = min(bonus, available)
+    if bonus <= 0:
+        return 0
+
+    extra["referral_commission_today"] = today_amount + bonus
+
+    await update_user(
+        referrer_id,
+        {
+            "coins": int(referrer.get("coins", 0)) + bonus,
+            "referral_earnings": int(referrer.get("referral_earnings", 0)) + bonus,
+            "extra_data": extra,
+        },
+    )
+    await invalidate_user_cache(referrer_id)
+    return bonus
+
+
+async def distribute_tournament_rewards():
+    """Award top players before resetting the leaderboard."""
+    try:
+        redis_conn = await get_redis_or_none()
+        if not redis_conn:
+            return
+
+        top_players = await redis_conn.zrevrange(TOURNAMENT_KEY, 0, 2, withscores=True)
+        if not top_players:
+            return
+
+        shares = [0.5, 0.3, 0.2]
+
+        for idx, (user_id_str, score) in enumerate(top_players):
+            if idx >= len(shares):
+                break
+            try:
+                user_id = int(user_id_str)
+            except ValueError:
+                continue
+
+            reward = int(TOURNAMENT_PRIZE_POOL * shares[idx])
+            user = await get_user(user_id)
+            if not user:
+                continue
+
+            new_coins = int(user.get("coins", 0)) + reward
+            await update_user(user_id, {"coins": new_coins})
+            await invalidate_user_cache(user_id)
+            logger.info(
+                f"рџЏ† Tournament reward: user {user_id} place {idx + 1} +{reward} coins (score {int(score)})"
+            )
+    except Exception as e:
+        logger.error(f"Error distributing tournament rewards: {e}")
+
+
+async def reset_tournament_loop():
+    while True:
+        now = datetime.utcnow()
+        tomorrow = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        sleep_seconds = max(1, int((tomorrow - now).total_seconds()))
+
+        await asyncio.sleep(sleep_seconds)
+
+        try:
+            await distribute_tournament_rewards()
+            redis_conn = await get_redis_or_none()
+            if redis_conn:
+                await redis_conn.delete(TOURNAMENT_KEY)
+                logger.info("рџЏ† Tournament leaderboard reset after rewards")
+        except Exception as e:
+            logger.error(f"Error resetting tournament leaderboard: {e}")
+
+
+async def weekly_tournament_rollover_loop():
+    while True:
+        now = datetime.utcnow()
+        current_start, current_end = get_weekly_tournament_season_window(now)
+        sleep_seconds = max(1, int((current_end - now).total_seconds()))
+
+        await asyncio.sleep(sleep_seconds)
+
+        try:
+            previous_season_key = current_start.strftime("%Y-%m-%d")
+            finalized = await finalize_weekly_tournament_season(previous_season_key)
+            if finalized:
+                logger.info(
+                    "Weekly tournament season finalized: %s", previous_season_key
+                )
+        except Exception as e:
+            logger.error(f"Error finalizing weekly tournament season: {e}")
+
+
+# ==================== LIFESPAN ====================
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global redis_client
+
+    logger.info("рџљЂ Starting Ryoho Clicker API")
+
+    await init_db()
+    logger.info("вњ… Database initialized")
+
+    if REDIS_URL:
+        redis_client = redis.from_url(
+            REDIS_URL,
+            encoding="utf-8",
+            decode_responses=True,
+            socket_timeout=2,
+            socket_connect_timeout=2,
+            retry_on_timeout=True,
+        )
+        try:
+            await redis_client.ping()
+            logger.info("вњ… Redis connected")
+        except Exception as e:
+            logger.error(f"вќЊ Redis connection failed: {e}")
+            redis_client = None
+    else:
+        logger.warning("вљ пёЏ REDIS_URL is not set")
+
+    if redis_client:
+        asyncio.create_task(reset_tournament_loop())
+        asyncio.create_task(flush_click_buffer_loop())
+        asyncio.create_task(weekly_tournament_rollover_loop())
+
+    logger.info("вњ… Background tasks started")
+    yield
+
+    if redis_client:
+        await redis_client.close()
+
+    logger.info("рџ›‘ Shutting down")
+
+
+# ==================== CORS ====================
+app = FastAPI(title="Ryoho Clicker API", lifespan=lifespan)
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_CORS_ORIGINS + (["null"] if ALLOW_NULL_ORIGIN else []),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+
 from fastapi import APIRouter
 router = APIRouter()
 
@@ -17,53 +2058,6 @@ async def create_api_session(request: Request):
         "user_id": int(telegram_user.get("id", 0)),
     }
 
-
-# middleware removed
-async def metrics_middleware(request: Request, call_next):
-    start = time.perf_counter()
-    path = request.url.path
-    method = request.method
-    status_code = 500
-    try:
-        if path.startswith("/api/") and path not in {
-            "/api/ads/monetag/postback",
-            "/api/ads/adsgram/reward",
-        }:
-            request_ip = get_request_ip(request)
-            ip_allowed = await redis_rate_limit(
-                f"rl:global_api:ip:{request_ip}", 240, 60
-            )
-            if not ip_allowed:
-                RATE_LIMIT_REJECTS.labels(namespace="global_api_ip").inc()
-                status_code = 429
-                return JSONResponse(
-                    status_code=429,
-                    content={"detail": "Too many requests from this IP"},
-                )
-
-        response = await call_next(request)
-        status_code = response.status_code
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Permissions-Policy"] = (
-            "camera=(), microphone=(), geolocation=()"
-        )
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; "
-            "frame-ancestors 'none'; "
-            "base-uri 'none'; "
-            "form-action 'none'; "
-            "object-src 'none'"
-        )
-        return response
-    finally:
-        duration = time.perf_counter() - start
-        HTTP_REQUESTS_TOTAL.labels(
-            method=method, path=path, status=str(status_code)
-        ).inc()
-        HTTP_REQUEST_DURATION.labels(method=method, path=path).observe(duration)
-        record_endpoint_diagnostic(method, path, status_code, duration)
 
 
 @router.get("/metrics")
