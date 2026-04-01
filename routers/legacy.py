@@ -63,6 +63,7 @@ from DATABASE.base import (
     record_rewarded_ad_claim,
     get_referral_stats,
     get_referrals_list,
+    add_coins_atomic_returning,
 )
 from schemas import (
     AdActionClaimRequest,
@@ -3740,7 +3741,6 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
 
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        await touch_user_activity(payload.user_id, user)
 
         now = datetime.utcnow()
 
@@ -3882,7 +3882,6 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         update_data["extra_data"] = extra
 
         # === REDIS ENERGY (вместо БД) ===
-        # Пишем энергию в Redis кэш — мгновенно, без race conditions
         if redis_conn:
             await redis_conn.hset(
                 energy_key,
@@ -3894,23 +3893,35 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             )
             await redis_conn.expire(energy_key, 300)
 
-        # В БД пишем только coins и extra_data (без energy — энергия в Redis)
-        updated_user = await update_user_if_matches(
-            payload.user_id,
-            {
-                "coins": int(user.get("coins", 0)),
-            },
-            update_data,
-        )
-        if not updated_user:
-            logger.warning("Atomic click update conflict for user=%s", payload.user_id)
-            raise HTTPException(status_code=409, detail="Click state changed, retry")
+        # === ATOMIC COINS + RETURNING (one query, no stale cache) ===
+        new_coins = await add_coins_atomic_returning(payload.user_id, gained)
+        if new_coins is None:
+            logger.error("Atomic coins update failed for user=%s", payload.user_id)
+            raise HTTPException(status_code=500, detail="Coin update failed")
+
+        # === REDIS ACTIVITY (best-effort, no DB write) ===
+        if redis_conn:
+            try:
+                await redis_conn.setex(
+                    f"activity:{payload.user_id}", 300, now.isoformat()
+                )
+            except Exception as e:
+                logger.warning("Redis activity write failed (non-critical): %s", e)
+
+        # === REDIS CLICK GUARD (best-effort, no extra_data write) ===
+        if redis_conn:
+            try:
+                await redis_conn.set(
+                    f"click_guard:{payload.user_id}",
+                    json.dumps(click_guard),
+                    ex=300,
+                )
+            except Exception as e:
+                logger.warning("Redis click_guard write failed (non-critical): %s", e)
 
         conn = await get_redis_or_none()
         if conn and gained > 0:
-            # Турнир оставляем в Redis как быстрый leaderboard слой.
             await conn.zincrby(TOURNAMENT_KEY, gained, str(payload.user_id))
-            # Буферизуем клики для фонового flush в БД
             await conn.hincrby(f"click_buf:{payload.user_id}", "coins", gained)
             await conn.hincrby(
                 f"click_buf:{payload.user_id}", "clicks", effective_clicks
@@ -3932,14 +3943,14 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
                 gained,
             )
 
-        # вњ… РёРЅРІР°Р»РёРґРёСЂСѓРµРј РєСЌС€
+        # ✅ инвалидируем кэш
         await invalidate_user_cache(payload.user_id)
-        referral_bonus = await grant_referral_share_bonus(updated_user, gained)
+        referral_bonus = await grant_referral_share_bonus(new_coins, gained)
 
         return {
             "success": True,
-            "coins": int(updated_user.get("coins", new_coins)),
-            "energy": int(updated_user.get("energy", new_energy)),
+            "coins": new_coins,
+            "energy": int(new_energy),
             "max_energy": max_energy,
             "regen_seconds": ENERGY_REGEN_SECONDS,
             "server_time": now.isoformat(),

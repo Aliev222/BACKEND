@@ -1187,3 +1187,70 @@ async def get_admin_fraud_reviews(user_ids: list[int] | None = None):
             }
             for row in rows
         }
+
+
+# ==================== ATOMIC UPDATES ====================
+
+
+async def add_coins_atomic_returning(user_id: int, amount: int) -> int | None:
+    """
+    Атомарно обновляет coins и возвращает новое значение в одном запросе.
+    UPDATE ... SET coins = coins + :amount RETURNING coins
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(User)
+            .where(User.user_id == user_id)
+            .values(coins=User.coins + amount)
+            .returning(User.coins)
+        )
+        await session.commit()
+        return result.scalar_one_or_none()
+
+
+async def add_coins_atomic(user_id: int, amount: int) -> bool:
+    """Атомарное начисление монет: UPDATE users SET coins = coins + :amount"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(User)
+            .where(User.user_id == user_id)
+            .values(coins=User.coins + amount)
+        )
+        await session.commit()
+        return result.rowcount == 1
+
+
+async def spend_coins_atomic(user_id: int, amount: int) -> bool:
+    """Атомарное списание: UPDATE users SET coins = coins - :amount WHERE coins >= :amount"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(User)
+            .where(User.user_id == user_id)
+            .where(User.coins >= amount)
+            .values(coins=User.coins - amount)
+        )
+        await session.commit()
+        return result.rowcount == 1
+
+
+async def update_extra_data_field(user_id: int, field_path: str, value):
+    """Частичное обновление extra_data поля через update_user_if_matches"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            return None
+        extra = {}
+        if user.extra_data:
+            try:
+                extra = json.loads(user.extra_data)
+            except json.JSONDecodeError:
+                extra = {}
+        extra[field_path] = value
+        await session.execute(
+            update(User)
+            .where(User.user_id == user_id)
+            .values(extra_data=json.dumps(extra))
+        )
+        await session.commit()
+        return extra
