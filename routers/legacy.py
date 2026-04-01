@@ -3893,11 +3893,15 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             )
             await redis_conn.expire(energy_key, 300)
 
-        # === ATOMIC COINS + RETURNING (one query, no stale cache) ===
-        new_coins = await add_coins_atomic_returning(payload.user_id, gained)
-        if new_coins is None:
-            logger.error("Atomic coins update failed for user=%s", payload.user_id)
-            raise HTTPException(status_code=500, detail="Coin update failed")
+        # === ATOMIC COINS + RETURNING (one session, one commit) ===
+        async with AsyncSessionLocal() as session:
+            new_coins = await add_coins_atomic_returning(
+                session, payload.user_id, gained
+            )
+            if new_coins is None:
+                logger.error("Atomic coins update failed for user=%s", payload.user_id)
+                raise HTTPException(status_code=500, detail="Coin update failed")
+            await session.commit()
 
         # === REDIS ACTIVITY (best-effort, no DB write) ===
         if redis_conn:

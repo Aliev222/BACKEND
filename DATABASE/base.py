@@ -1192,20 +1192,21 @@ async def get_admin_fraud_reviews(user_ids: list[int] | None = None):
 # ==================== ATOMIC UPDATES ====================
 
 
-async def add_coins_atomic_returning(user_id: int, amount: int) -> int | None:
+async def add_coins_atomic_returning(
+    session: AsyncSession, user_id: int, amount: int
+) -> int | None:
     """
-    Атомарно обновляет coins и возвращает новое значение в одном запросе.
+    Атомарно обновляет coins и возвращает новое значение.
     UPDATE ... SET coins = coins + :amount RETURNING coins
+    Caller owns the session and commit.
     """
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            update(User)
-            .where(User.user_id == user_id)
-            .values(coins=User.coins + amount)
-            .returning(User.coins)
-        )
-        await session.commit()
-        return result.scalar_one_or_none()
+    result = await session.execute(
+        update(User)
+        .where(User.user_id == user_id)
+        .values(coins=User.coins + amount)
+        .returning(User.coins)
+    )
+    return result.scalar_one_or_none()
 
 
 async def add_coins_atomic(user_id: int, amount: int) -> bool:
