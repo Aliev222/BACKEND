@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from infrastructure.database import engine, AsyncSessionLocal, healthcheck_db
 from infrastructure.redis import init_redis, close_redis
 from routers import legacy
-from workers import click_flush
+from workers import referral_flush, tournament_flush
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +25,12 @@ async def lifespan(app: FastAPI):
     await init_redis()
 
     if BOT_MODE == "api":
-        FLUSH_TASK = asyncio.create_task(click_flush.click_flush_loop())
-        logger.info("Background flush worker started")
+        FLUSH_TASK = asyncio.gather(
+            referral_flush.referral_flush_loop(),
+            tournament_flush.tournament_flush_loop(),
+            return_exceptions=True,
+        )
+        logger.info("Background flush workers started (referrals, tournament)")
 
     logger.info("SPIRIT API ready")
     yield
