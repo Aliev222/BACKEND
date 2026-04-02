@@ -228,16 +228,23 @@ from fastapi import APIRouter as _APIRouter
 router_legacy = _APIRouter(tags=["tasks-legacy"])
 logger_legacy = logging.getLogger(__name__)
 
-from core.config import VIDEO_TASK_DEFINITIONS
-from core.game_config import RATE_LIMITS
-from core.utils import parse_extra_data, parse_iso_datetime
-from core.skins import normalize_owned_skins, DEFAULT_SKIN_ID, SOCIAL_SUB_TASK_SKINS
+from core.config import VIDEO_TASK_DEFINITIONS as _VIDEO_TASK_DEFINITIONS
+from core.game_config import RATE_LIMITS as _RATE_LIMITS
+from core.utils import (
+    parse_extra_data as _parse_extra_data,
+    parse_iso_datetime as _parse_iso_datetime,
+)
+from core.skins import (
+    normalize_owned_skins as _normalize_owned_skins,
+    DEFAULT_SKIN_ID as _DEFAULT_SKIN_ID,
+    SOCIAL_SUB_TASK_SKINS as _SOCIAL_SUB_TASK_SKINS,
+)
 from core.game_logic import normalize_dt
 from core.tasks import (
-    resolve_video_task_coin_drop,
-    get_video_task_last_claims,
-    get_video_task_boosts,
-    get_active_video_task_boost,
+    resolve_video_task_coin_drop as _resolve_video_task_coin_drop,
+    get_video_task_last_claims as _get_video_task_last_claims,
+    get_video_task_boosts as _get_video_task_boosts,
+    get_active_video_task_boost as _get_active_video_task_boost,
 )
 from routers.legacy import (
     require_telegram_user as _require_telegram_user,

@@ -2715,7 +2715,7 @@ async def monetag_postback(request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.api_route("/api/ads/adsgram/reward", methods=["GET", "POST"])
+@router.api_route("/api/ads/adsgram/reward", methods=["GET", "POST"])
 async def adsgram_reward_callback(request: Request):
     try:
         params = {str(k): str(v) for k, v in request.query_params.items()}
@@ -3100,7 +3100,7 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
 
 @router.post("/api/sync-energy")
 async def sync_energy(payload: EnergySyncRequest, request: Request):
-    """РЎРµСЂРІРµСЂРЅС‹Р№ sync СЌРЅРµСЂРіРёРё Р±РµР· СЃР±СЂРѕСЃР° С‚Р°Р№РјРµСЂР° СЂРµРіРµРЅР°."""
+    """Server-side energy sync using energy:v2 as authoritative source."""
     try:
         await require_telegram_user(request, payload.user_id)
         user = await get_user_cached(payload.user_id)
@@ -3109,40 +3109,53 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
             raise HTTPException(status_code=404, detail="User not found")
 
         now = datetime.utcnow()
+        energy_level = int(user.get("energy_level", 0))
+        max_energy = get_max_energy(energy_level)
 
-        old_energy = int(user.get("energy", 0))
-        max_energy = resolve_max_energy(user)
-        last_update = normalize_dt(user.get("last_energy_update"))
+        # Read authoritative energy from energy:v2
+        redis_conn = await get_redis_or_none()
+        energy_key = f"energy:v2:{payload.user_id}"
+        current_energy = max_energy  # default if no cache
 
-        current_energy = calculate_current_energy(user, now)
+        if redis_conn:
+            cached = await redis_conn.hgetall(energy_key)
+            if cached:
+                cached_max = int(cached.get("max_energy", max_energy))
+                cached_value = int(cached.get("value", 0))
+                cached_updated = float(cached.get("updated_at", now.timestamp()))
+                elapsed = now.timestamp() - cached_updated
+                regen = int(elapsed // ENERGY_REGEN_SECONDS)
+                current_energy = min(cached_max, cached_value + regen)
+                max_energy = cached_max
+            else:
+                # Initialize energy:v2 from DB if missing
+                db_energy = int(user.get("energy", 0))
+                last_update = normalize_dt(user.get("last_energy_update"))
+                if last_update:
+                    seconds_passed = max(0, int((now - last_update).total_seconds()))
+                    gained = seconds_passed // ENERGY_REGEN_SECONDS
+                    db_energy = min(max_energy, db_energy + gained)
+                current_energy = min(db_energy, max_energy)
 
+                await redis_conn.hset(
+                    energy_key,
+                    mapping={
+                        "value": str(current_energy),
+                        "updated_at": str(now.timestamp()),
+                        "max_energy": str(max_energy),
+                    },
+                )
+                await redis_conn.expire(energy_key, 300)
+        else:
+            # No Redis — fallback to DB calculation
+            current_energy = calculate_current_energy(user, now)
+
+        # Persist to DB for durability (but don't invalidate cache for hot fields)
         update_data = {}
         if int(user.get("max_energy", max_energy)) != max_energy:
             update_data["max_energy"] = max_energy
-
-        # РћР±РЅРѕРІР»СЏРµРј baseline С‚РѕР»СЊРєРѕ РµСЃР»Рё СЌРЅРµСЂРіРёСЏ СЂРµР°Р»СЊРЅРѕ РІС‹СЂРѕСЃР»Р°
-        if current_energy != old_energy:
-            update_data["energy"] = current_energy
-
-            if last_update:
-                seconds_passed = max(0, int((now - last_update).total_seconds()))
-                gained = seconds_passed // ENERGY_REGEN_SECONDS
-
-                if gained > 0:
-                    update_data["last_energy_update"] = last_update + timedelta(
-                        seconds=gained * ENERGY_REGEN_SECONDS
-                    )
-            else:
-                update_data["last_energy_update"] = now
-
-        # Р•СЃР»Рё СЌРЅРµСЂРіРёСЏ СѓР¶Рµ РїРѕР»РЅР°СЏ, РґРµСЂР¶РёРј baseline РєРѕРЅСЃРёСЃС‚РµРЅС‚РЅС‹Рј
-        if current_energy >= max_energy and not update_data.get("last_energy_update"):
-            update_data["last_energy_update"] = now
-            update_data["energy"] = max_energy
-
         if update_data:
             await update_user(payload.user_id, update_data)
-            await invalidate_user_cache(payload.user_id)
 
         return {
             "success": True,
@@ -3727,12 +3740,17 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             )
             await conn.expire(f"click_buf:{payload.user_id}", 300)
             # Referral bonus buffer: accumulate in Redis, flush async later
+            referral_bonus = 0
             referrer_id = user.get("referrer_id")
             if referrer_id:
-                bonus = max(1, int(gained * 0.05))  # 5% of gained
-                await conn.hincrby(f"referral_pending:{referrer_id}", "coins", bonus)
+                referral_bonus = max(1, int(gained * 0.05))  # 5% of gained
+                await conn.hincrby(
+                    f"referral_pending:{referrer_id}", "coins", referral_bonus
+                )
                 await conn.hincrby(f"referral_pending:{referrer_id}", "clicks", 1)
                 await conn.expire(f"referral_pending:{referrer_id}", 300)
+        else:
+            referral_bonus = 0
 
         # REMOVED from sync path:
         # - add_weekly_tournament_score (tournament in Redis only, ZINCRBY above)
