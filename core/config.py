@@ -56,6 +56,64 @@ TON_VERIFIER_API_BASE = (
     .rstrip("/")
 )
 TON_VERIFIER_API_KEY = os.getenv("TON_VERIFIER_API_KEY", "").strip()
+TON_VERIFIER_TIMEOUT_SECONDS = max(
+    5, int(os.getenv("TON_VERIFIER_TIMEOUT_SECONDS", "30"))
+)
+TON_NANO = 1_000_000_000
+
+# Tournament
+WEEKLY_LEAGUE_ORDER = ("diamond", "gold", "silver", "bronze")
+WEEKLY_LEAGUE_LEVEL_RANGES = {
+    "bronze": {"min_level": 1, "max_level": 32},
+    "silver": {"min_level": 33, "max_level": 65},
+    "gold": {"min_level": 66, "max_level": 99},
+    "diamond": {"min_level": 100, "max_level": None},
+}
+WEEKLY_LEAGUE_FUND_SPLITS = {
+    "diamond": 0.50,
+    "gold": 0.30,
+    "silver": 0.15,
+    "bronze": 0.05,
+}
+WEEKLY_TOP3_PAYOUT_SPLITS = {
+    1: 0.30,
+    2: 0.20,
+    3: 0.13,
+}
+WEEKLY_RANGE_PAYOUT_SPLITS = [
+    {"start": 4, "end": 10, "share": 0.22},
+    {"start": 11, "end": 20, "share": 0.10},
+    {"start": 21, "end": 50, "share": 0.05},
+]
+
+# Daily rewards
+DAILY_REWARD_MAX_DAYS = 30
+
+# Autoclicker
+AUTOCLICKER_COOLDOWN_MINUTES = 10
+
+# Video tasks — matches legacy.py VIDEO_TASK_DEFINITIONS exactly
+VIDEO_TASK_DEFINITIONS = {
+    "tap_surge": {
+        "type": "tap_boost",
+        "cooldown_minutes": 75,
+        "duration_minutes": 5,
+        "multiplier": 2,
+    },
+    "passive_hour": {
+        "type": "passive_boost",
+        "cooldown_minutes": 240,
+        "duration_minutes": 60,
+        "multiplier": 2,
+    },
+    "coin_drop": {
+        "type": "coin_drop",
+        "cooldown_minutes": 60,
+    },
+}
+
+# Diagnostics
+DIAGNOSTICS_DURATION_WINDOW = 240
 
 CORS_ORIGINS = [
     "https://spirix.vercel.app",

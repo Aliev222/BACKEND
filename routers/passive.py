@@ -8,25 +8,23 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Request, HTTPException
 
+from core.config import AUTOCLICKER_COOLDOWN_MINUTES
+from core.utils import parse_extra_data
+from core.game_logic import normalize_dt, get_hour_value
+from core.tasks import get_active_video_task_boost
+from schemas import PassiveIncomeRequest, AdActionClaimRequest
 from routers.legacy import (
     require_telegram_user,
     require_dual_rate_limit,
     require_user_action_lock,
     get_user,
     get_user_cached,
-    parse_extra_data,
     update_user,
     update_user_if_matches,
     invalidate_user_cache,
-    normalize_dt,
-    get_hour_value,
-    get_active_video_task_boost,
     grant_referral_share_bonus,
     consume_ad_action_session,
     record_rewarded_ad_claim,
-    PassiveIncomeRequest,
-    AdActionClaimRequest,
-    AUTOCLICKER_COOLDOWN_MINUTES,
 )
 
 router = APIRouter(tags=["passive"])

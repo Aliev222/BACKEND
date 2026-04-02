@@ -8,21 +8,22 @@ from datetime import datetime
 
 from fastapi import APIRouter, Request, HTTPException
 
+from core.utils import parse_extra_data
+from core.ton_utils import (
+    get_ton_wallet_from_user,
+    is_valid_ton_wallet_address,
+    ton_addresses_match,
+    ton_proof_allowed_domains,
+)
+from schemas import TonWalletConnectRequest, TonWalletDisconnectRequest
 from routers.legacy import (
     require_telegram_user,
     get_user_cached,
     get_user,
-    parse_extra_data,
     update_user,
     invalidate_user_cache,
-    get_ton_wallet_from_user,
     issue_ton_proof_payload,
-    ton_proof_allowed_domains,
     verify_ton_wallet_proof,
-    is_valid_ton_wallet_address,
-    ton_addresses_match,
-    TonWalletConnectRequest,
-    TonWalletDisconnectRequest,
 )
 
 router = APIRouter(tags=["ton-wallet"])

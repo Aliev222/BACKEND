@@ -83,10 +83,8 @@ async def get_referral_stats(request: Request):
 router_legacy = APIRouter(tags=["referrals-legacy"])
 logger_legacy = logging.getLogger(__name__)
 
-from routers.legacy import (
-    require_telegram_user as _require_telegram_user,
-    get_user_cached as _get_user_cached,
-)
+from routers.auth import require_telegram_user as _require_telegram_user
+from routers.legacy import get_user_cached as _get_user_cached
 
 
 @router_legacy.get("/api/referral-data/{user_id}")

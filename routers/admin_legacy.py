@@ -40,32 +40,32 @@ from DATABASE.base import (
     WEEKLY_LEAGUE_FUND_SPLITS,
     WEEKLY_RANGE_PAYOUT_SPLITS,
 )
+from core.config import (
+    WEEKLY_LEAGUE_LEVEL_RANGES,
+    WEEKLY_TOP3_PAYOUT_SPLITS,
+    TON_NANO,
+    TON_VERIFIER_API_BASE,
+    TON_VERIFIER_API_KEY,
+    TON_VERIFIER_TIMEOUT_SECONDS,
+    DIAGNOSTICS_DURATION_WINDOW,
+)
+from core.utils import parse_extra_data_object, parse_json_object, parse_extra_data
+from core.ton_utils import (
+    get_ton_wallet_from_user,
+    mask_ton_wallet,
+    ton_wallet_normalized_variants,
+    ton_wallets_equal,
+    is_valid_ton_wallet_address,
+)
+from core.skins import normalize_owned_skins, normalize_selected_skin, DEFAULT_SKIN_ID
 from routers.legacy import (
     require_admin_access,
     build_admin_fraud_overview,
     serialize_endpoint_diagnostic,
     ENDPOINT_DIAGNOSTICS,
-    DIAGNOSTICS_DURATION_WINDOW,
     RECENT_DIAGNOSTIC_ERRORS,
-    parse_extra_data_object,
-    get_ton_wallet_from_user,
-    normalize_owned_skins,
-    normalize_selected_skin,
-    DEFAULT_SKIN_ID,
-    parse_json_object,
     invalidate_user_cache,
-    mask_ton_wallet,
-    ton_wallet_normalized_variants,
-    ton_wallets_equal,
     send_telegram_wallet_reminder_message,
-    parse_extra_data,
-    is_valid_ton_wallet_address,
-    TON_VERIFIER_API_BASE,
-    TON_VERIFIER_API_KEY,
-    TON_VERIFIER_TIMEOUT_SECONDS,
-    WEEKLY_LEAGUE_LEVEL_RANGES,
-    WEEKLY_TOP3_PAYOUT_SPLITS,
-    TON_NANO,
 )
 from schemas import (
     AdminFraudUpdateRequest,

@@ -7,17 +7,17 @@ from datetime import datetime
 
 from fastapi import APIRouter, Request, HTTPException
 
+from core.config import DAILY_REWARD_MAX_DAYS
+from core.utils import parse_extra_data
 from routers.legacy import (
     require_telegram_user,
     get_user_cached,
-    parse_extra_data,
     update_user,
     invalidate_user_cache,
-    UserIdRequest,
-    DAILY_REWARD_MAX_DAYS,
-    get_daily_reward_progress,
     is_daily_infinite_energy_active,
+    get_daily_reward_progress,
 )
+from schemas import UserIdRequest
 
 router = APIRouter(tags=["daily-reward"])
 logger = logging.getLogger(__name__)
