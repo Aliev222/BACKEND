@@ -2850,6 +2850,7 @@ async def apply_global_upgrade_for_user(user_id: int, user: dict) -> dict:
         "profit_per_hour": new_profit_per_hour,
         "max_energy": new_max_energy,
         "energy": new_max_energy,
+        "server_time": datetime.utcnow().isoformat(),
     }
 
 
