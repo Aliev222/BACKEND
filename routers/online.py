@@ -1,11 +1,20 @@
+"""
+Online status routes.
+
+Two sets of endpoints:
+- /api/v2/online/* — new API (existing)
+- /api/online/*    — legacy paths (moved from legacy.py, Patch 7.2)
+"""
+
 import time
 import logging
 from fastapi import APIRouter, Request, HTTPException
 import redis.asyncio as redis
 
-from infrastructure.redis import get_redis
+from infrastructure.redis import get_redis, get_redis_or_none
 
 router = APIRouter(prefix="/api/v2", tags=["online"])
+router_legacy = APIRouter(tags=["online-legacy"])
 logger = logging.getLogger(__name__)
 
 ONLINE_USERS_KEY = "online:users"
@@ -63,3 +72,28 @@ async def online_count(request: Request):
     cutoff = now - ONLINE_TTL_SECONDS
     count = await redis_conn.zcount(ONLINE_USERS_KEY, cutoff, "+inf")
     return {"success": True, "online_now": int(count or 0)}
+
+
+# ─── Legacy paths (moved from legacy.py, Patch 7.2) ─────────────────────────
+
+
+@router_legacy.post("/api/online/heartbeat")
+async def online_heartbeat_legacy(payload: dict, request: Request):
+    """Legacy online heartbeat — same behavior as before extraction."""
+    from routers.legacy import require_telegram_user, touch_online_user as legacy_touch
+
+    user_id = payload.get("user_id")
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="user_id required")
+    await require_telegram_user(request, user_id)
+    online_now = await legacy_touch(int(user_id))
+    return {"success": True, "online_now": online_now}
+
+
+@router_legacy.get("/api/online/count")
+async def get_online_count_legacy():
+    """Legacy online count — same behavior as before extraction."""
+    from routers.legacy import get_online_users_count
+
+    online_now = await get_online_users_count()
+    return {"success": True, "online_now": online_now}

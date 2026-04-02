@@ -9,6 +9,14 @@ from infrastructure.database import engine, AsyncSessionLocal, healthcheck_db
 from infrastructure.redis import init_redis, close_redis
 from routers import legacy
 from routers.admin_legacy import router as admin_legacy_router
+from routers.infra import router as infra_router
+from routers.online import (
+    router as online_router,
+    router_legacy as online_legacy_router,
+)
+from routers.daily_reward import router as daily_reward_router
+from routers.tasks import router_legacy as tasks_legacy_router
+from routers.passive import router as passive_router
 from workers import referral_flush, tournament_flush, coins_flush
 
 logger = logging.getLogger(__name__)
@@ -96,6 +104,12 @@ app.add_middleware(
 
 app.include_router(legacy.router)
 app.include_router(admin_legacy_router)
+app.include_router(infra_router)
+app.include_router(online_router)
+app.include_router(online_legacy_router)
+app.include_router(daily_reward_router)
+app.include_router(tasks_legacy_router)
+app.include_router(passive_router)
 
 
 @app.get("/health")
