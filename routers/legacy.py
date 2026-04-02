@@ -3010,6 +3010,9 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
             "max_energy": max_energy,
             "regen_seconds": ENERGY_REGEN_SECONDS,
             "server_time": now.isoformat(),
+            # Ordering metadata — compatible with click/profile responses
+            "state_updated_at": int(now.timestamp() * 1000),
+            "state_version": int(now.timestamp() * 1000),
         }
 
     except HTTPException:
