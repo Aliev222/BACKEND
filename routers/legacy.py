@@ -2813,6 +2813,21 @@ async def apply_global_upgrade_for_user(user_id: int, user: dict) -> dict:
     # NOTE: Not invalidating cache — energy/max_energy are excluded from
     # user:cache. Cache only stores static profile fields.
 
+    # Update energy:v2 immediately — upgrade changes max_energy and resets energy to full.
+    try:
+        redis_conn = await get_redis_or_none()
+        if redis_conn:
+            await redis_conn.hset(
+                f"energy:v2:{user_id}",
+                mapping={
+                    "value": str(new_max_energy),
+                    "updated_at": str(datetime.utcnow().timestamp()),
+                    "max_energy": str(new_max_energy),
+                },
+            )
+    except Exception:
+        pass
+
     next_cost = (
         GLOBAL_UPGRADE_PRICES[new_level]
         if new_level < len(GLOBAL_UPGRADE_PRICES)
@@ -2921,6 +2936,20 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
                 "extra_data": extra,
             },
         )
+        # Update energy:v2 immediately — energy refill changes current energy.
+        try:
+            redis_conn = await get_redis_or_none()
+            if redis_conn:
+                await redis_conn.hset(
+                    f"energy:v2:{user_id}",
+                    mapping={
+                        "value": str(max_energy),
+                        "updated_at": str(now.timestamp()),
+                        "max_energy": str(max_energy),
+                    },
+                )
+        except Exception:
+            pass
         # NOTE: Not invalidating cache — energy/max_energy/last_energy_update
         # are excluded from user:cache. energy_refill_cooldown_until is a
         # cooldown field, not a cached profile field.
@@ -2947,7 +2976,11 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
 
 @router.post("/api/sync-energy")
 async def sync_energy(payload: EnergySyncRequest, request: Request):
-    """Server-side energy sync using energy:v2 as authoritative source."""
+    """
+    Read-only energy sync. Returns current energy from energy:v2.
+    Does NOT write to energy:v2 — only the click path writes energy.
+    This prevents sync-energy from racing with active click updates.
+    """
     try:
         await require_telegram_user(request, payload.user_id)
         user = await get_user_cached(payload.user_id)
@@ -2959,50 +2992,68 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
         energy_level = int(user.get("energy_level", 0))
         max_energy = get_max_energy(energy_level)
 
-        # Read authoritative energy from energy:v2
+        # Read authoritative energy from energy:v2 (READ-ONLY)
         redis_conn = await get_redis_or_none()
         energy_key = f"energy:v2:{payload.user_id}"
         current_energy = max_energy  # default if no cache
+        energy_updated_at = now.timestamp()  # fallback
 
         if redis_conn:
             cached = await redis_conn.hgetall(energy_key)
             if cached:
                 cached_max = int(cached.get("max_energy", max_energy))
                 cached_value = int(cached.get("value", 0))
-                cached_updated = float(cached.get("updated_at", now.timestamp()))
-                elapsed = now.timestamp() - cached_updated
+                energy_updated_at = float(cached.get("updated_at", now.timestamp()))
+                elapsed = now.timestamp() - energy_updated_at
                 regen = int(elapsed // ENERGY_REGEN_SECONDS)
                 current_energy = min(cached_max, cached_value + regen)
                 max_energy = cached_max
+                logger.debug(
+                    "SYNC-ENERGY user=%s energy=%d max=%d source=energy:v2 updated_at=%.0f",
+                    payload.user_id,
+                    current_energy,
+                    max_energy,
+                    energy_updated_at,
+                )
             else:
-                # Initialize energy:v2 from DB if missing
+                # energy:v2 missing — compute from DB but DO NOT write.
+                # The click path is the only writer of energy:v2.
                 db_energy = int(user.get("energy", 0))
                 last_update = normalize_dt(user.get("last_energy_update"))
                 if last_update:
                     seconds_passed = max(0, int((now - last_update).total_seconds()))
                     gained = seconds_passed // ENERGY_REGEN_SECONDS
                     db_energy = min(max_energy, db_energy + gained)
+                    energy_updated_at = last_update.timestamp()
+                else:
+                    # No last_energy_update in DB — cannot determine a safe
+                    # ordering timestamp. Use 0 so the frontend will NEVER
+                    # treat this response as newer than a real click/profile
+                    # response (which always have state_updated_at > 0).
+                    energy_updated_at = 0
                 current_energy = min(db_energy, max_energy)
-
-                await redis_conn.hset(
-                    energy_key,
-                    mapping={
-                        "value": str(current_energy),
-                        "updated_at": str(now.timestamp()),
-                        "max_energy": str(max_energy),
-                    },
+                logger.info(
+                    "SYNC-ENERGY user=%s energy=%d max=%d source=DB (energy:v2 missing) updated_at=%.0f",
+                    payload.user_id,
+                    current_energy,
+                    max_energy,
+                    energy_updated_at,
                 )
-                # NOTE: No TTL — energy:v2 is persistent hot-state like coins_hot.
         else:
-            # No Redis — fallback to DB calculation
             current_energy = calculate_current_energy(user, now)
+            energy_updated_at = now.timestamp()
 
-        # Persist to DB for durability (but don't invalidate cache for hot fields)
+        # Persist max_energy to DB if changed (but don't invalidate cache)
         update_data = {}
         if int(user.get("max_energy", max_energy)) != max_energy:
             update_data["max_energy"] = max_energy
         if update_data:
             await update_user(payload.user_id, update_data)
+
+        # Return state_updated_at as the actual energy:v2 updated_at timestamp,
+        # NOT the current time. This ensures the frontend ordering check
+        # correctly identifies this response as not-newer than a recent click.
+        state_updated_at = int(energy_updated_at * 1000)
 
         return {
             "success": True,
@@ -3010,9 +3061,8 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
             "max_energy": max_energy,
             "regen_seconds": ENERGY_REGEN_SECONDS,
             "server_time": now.isoformat(),
-            # Ordering metadata — compatible with click/profile responses
-            "state_updated_at": int(now.timestamp() * 1000),
-            "state_version": int(now.timestamp() * 1000),
+            "state_updated_at": state_updated_at,
+            "state_version": state_updated_at,
         }
 
     except HTTPException:
@@ -3502,6 +3552,13 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
                 },
             )
             # NOTE: No TTL — energy:v2 is persistent hot-state like coins_hot.
+            logger.debug(
+                "CLICK-ENERGY user=%s energy=%d max=%d clicks=%d source=click",
+                payload.user_id,
+                new_energy,
+                max_energy,
+                effective_clicks,
+            )
 
         # === REDIS COINS (atomic Lua script, no DB write per click) ===
         if redis_conn:
