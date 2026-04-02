@@ -100,7 +100,7 @@ async def read_energy_v2(user_id: int, max_energy: int) -> dict:
                         "max_energy": str(max_energy),
                     },
                 )
-                await redis_conn.expire(energy_key, 300)
+                # NOTE: No TTL — energy:v2 is persistent hot-state like coins_hot.
             except Exception:
                 pass
 
@@ -135,7 +135,7 @@ async def write_energy_v2(user_id: int, value: int, max_energy: int) -> None:
                 "max_energy": str(max_energy),
             },
         )
-        await redis_conn.expire(energy_key, 300)
+        # NOTE: No TTL — energy:v2 is persistent hot-state like coins_hot.
     except Exception as e:
         logger.warning("Failed to write energy:v2 for user %s: %s", user_id, e)
 

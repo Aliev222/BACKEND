@@ -2992,7 +2992,7 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
                         "max_energy": str(max_energy),
                     },
                 )
-                await redis_conn.expire(energy_key, 300)
+                # NOTE: No TTL — energy:v2 is persistent hot-state like coins_hot.
         else:
             # No Redis — fallback to DB calculation
             current_energy = calculate_current_energy(user, now)
@@ -3379,7 +3379,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
                         "max_energy": str(max_energy),
                     },
                 )
-                await redis_conn.expire(energy_key, 300)
+                # NOTE: No TTL — energy:v2 is persistent hot-state like coins_hot.
         else:
             current_energy = calculate_current_energy(user, now)
 
@@ -3501,7 +3501,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
                     "max_energy": str(max_energy),
                 },
             )
-            await redis_conn.expire(energy_key, 300)
+            # NOTE: No TTL — energy:v2 is persistent hot-state like coins_hot.
 
         # === REDIS COINS (atomic Lua script, no DB write per click) ===
         if redis_conn:
