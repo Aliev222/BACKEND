@@ -83,21 +83,31 @@ async def flush_coins_to_db(redis_conn: redis.Redis) -> int:
     now = int(time.time())
     moved_data = []  # (flushing_key, user_id, delta, batch_id)
 
-    # Phase 1: MOVE pending → flushing (atomic RENAME with batch_id)
+    # Phase 1: MOVE pending → flushing (atomic Lua move)
+    move_lua = """
+    local pending_key = KEYS[1]
+    local flushing_key = KEYS[2]
+    local delta = redis.call('GET', pending_key)
+    if not delta then
+        return nil
+    end
+    if tonumber(delta) <= 0 then
+        redis.call('DEL', pending_key)
+        return nil
+    end
+    redis.call('SET', flushing_key, delta)
+    redis.call('DEL', pending_key)
+    return delta
+    """
     for key in pending_keys:
         user_id = int(key.split(":")[-1])
         batch_id = f"{user_id}:{now}:{uuid.uuid4().hex[:8]}"
         flushing_key = f"coins_flushing:{user_id}:{batch_id}"
 
         try:
-            delta = await redis_conn.get(key)
-            if not delta or int(delta) <= 0:
-                await redis_conn.delete(key)
+            delta = await redis_conn.eval(move_lua, 2, key, flushing_key)
+            if delta is None:
                 continue
-
-            # Atomic move: set flushing value, delete pending
-            await redis_conn.set(flushing_key, delta)
-            await redis_conn.delete(key)
             moved_data.append((flushing_key, user_id, int(delta), batch_id))
         except Exception as e:
             logger.warning("Failed to move coins key %s: %s", key, e)
