@@ -1853,15 +1853,6 @@ async def touch_user_activity(user_id: int, user: dict | None = None) -> None:
 
     await update_user(user_id, {"extra_data": extra})
 
-    return {
-        "success": True,
-        "token": token,
-        "token_type": "Bearer",
-        "expires_in": SESSION_TOKEN_TTL_SECONDS,
-        "expires_at": expires_at,
-        "user_id": int(telegram_user.get("id", 0)),
-    }
-
 
 # ==================== МОДЕЛИ ====================
 
@@ -2083,6 +2074,23 @@ def get_request_ip(request: Request) -> str:
         return x_forwarded_for.split(",")[0].strip()
 
     return (request.client.host if request.client else "") or "unknown"
+
+
+@router.post("/api/auth/session")
+async def create_api_session(request: Request):
+    ensure_mobile_only_game_access(request)
+    telegram_user = verify_telegram_init_data(
+        request.headers.get("X-Telegram-Init-Data", "")
+    )
+    token, expires_at = issue_session_token(telegram_user)
+    return {
+        "success": True,
+        "token": token,
+        "token_type": "Bearer",
+        "expires_in": SESSION_TOKEN_TTL_SECONDS,
+        "expires_at": expires_at,
+        "user_id": int(telegram_user.get("id", 0)),
+    }
 
 
 async def require_ip_rate_limit(
