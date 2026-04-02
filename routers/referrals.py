@@ -76,3 +76,35 @@ async def get_referral_stats(request: Request):
         "bonus_per_referral": REFERRAL_BONUS_COINS,
         "share_percent": REFERRAL_SHARE_PERCENT * 100,
     }
+
+
+# ─── Legacy referral route (moved from legacy.py, Patch 7.4) ─────────────────
+
+router_legacy = APIRouter(tags=["referrals-legacy"])
+logger_legacy = logging.getLogger(__name__)
+
+from routers.legacy import (
+    require_telegram_user as _require_telegram_user,
+    get_user_cached as _get_user_cached,
+)
+
+
+@router_legacy.get("/api/referral-data/{user_id}")
+async def get_referral_data_legacy(user_id: int, request: Request):
+    """Get referral statistics"""
+    try:
+        await _require_telegram_user(request, user_id)
+        user = await _get_user_cached(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        return {
+            "count": user.get("referral_count", 0),
+            "earnings": user.get("referral_earnings", 0),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger_legacy.error(f"Error in get_referral_data: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")

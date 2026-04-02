@@ -17,6 +17,8 @@ from routers.online import (
 from routers.daily_reward import router as daily_reward_router
 from routers.tasks import router_legacy as tasks_legacy_router
 from routers.passive import router as passive_router
+from routers.referrals import router_legacy as referrals_legacy_router
+from routers.ton_wallet import router as ton_wallet_router
 from workers import referral_flush, tournament_flush, coins_flush
 
 logger = logging.getLogger(__name__)
@@ -110,6 +112,8 @@ app.include_router(online_legacy_router)
 app.include_router(daily_reward_router)
 app.include_router(tasks_legacy_router)
 app.include_router(passive_router)
+app.include_router(referrals_legacy_router)
+app.include_router(ton_wallet_router)
 
 
 @app.get("/health")

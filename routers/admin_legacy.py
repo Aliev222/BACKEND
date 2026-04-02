@@ -37,11 +37,8 @@ from DATABASE.base import (
     get_referral_stats,
     get_referrals_list,
     WEEKLY_LEAGUE_ORDER,
-    WEEKLY_LEAGUE_LEVEL_RANGES,
     WEEKLY_LEAGUE_FUND_SPLITS,
-    WEEKLY_TOP3_PAYOUT_SPLITS,
     WEEKLY_RANGE_PAYOUT_SPLITS,
-    TON_NANO,
 )
 from routers.legacy import (
     require_admin_access,
@@ -66,6 +63,9 @@ from routers.legacy import (
     TON_VERIFIER_API_BASE,
     TON_VERIFIER_API_KEY,
     TON_VERIFIER_TIMEOUT_SECONDS,
+    WEEKLY_LEAGUE_LEVEL_RANGES,
+    WEEKLY_TOP3_PAYOUT_SPLITS,
+    TON_NANO,
 )
 from schemas import (
     AdminFraudUpdateRequest,

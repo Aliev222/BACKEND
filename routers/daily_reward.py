@@ -16,10 +16,52 @@ from routers.legacy import (
     UserIdRequest,
     DAILY_REWARD_MAX_DAYS,
     get_daily_reward_progress,
-    get_daily_reward_coins_for_day,
-    get_daily_reward_infinite_energy_status,
     is_daily_infinite_energy_active,
 )
+
+router = APIRouter(tags=["daily-reward"])
+logger = logging.getLogger(__name__)
+
+# Daily reward coin amounts by day (1-indexed)
+_DAILY_REWARD_COINS = [
+    500,
+    1000,
+    2500,
+    5000,
+    10000,
+    15000,
+    25000,
+    30000,
+    40000,
+    50000,
+    75000,
+    100000,
+    150000,
+    200000,
+    250000,
+    300000,
+    400000,
+    500000,
+    750000,
+    1000000,
+    1500000,
+    2000000,
+    2500000,
+    3000000,
+    5000000,
+    7500000,
+    10000000,
+    15000000,
+    20000000,
+    50000000,
+]
+
+
+def _daily_reward_coins_for_day(day: int) -> int:
+    """Return coin reward for the given day (1-indexed)."""
+    idx = max(0, min(day - 1, len(_DAILY_REWARD_COINS) - 1))
+    return _DAILY_REWARD_COINS[idx]
+
 
 router = APIRouter(tags=["daily-reward"])
 logger = logging.getLogger(__name__)
@@ -79,7 +121,7 @@ async def claim_daily_reward(payload: UserIdRequest, request: Request):
             raise HTTPException(status_code=400, detail="Already claimed today")
 
         next_day = min(claimed_days + 1, DAILY_REWARD_MAX_DAYS)
-        coins_reward = get_daily_reward_coins_for_day(next_day)
+        coins_reward = _daily_reward_coins_for_day(next_day)
 
         claimed_days += 1
         extra["daily_reward_claimed_days"] = claimed_days
