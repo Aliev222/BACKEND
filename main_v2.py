@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from infrastructure.database import engine, AsyncSessionLocal, healthcheck_db
 from infrastructure.redis import init_redis, close_redis
 from routers import legacy
+from routers.admin_legacy import router as admin_legacy_router
 from workers import referral_flush, tournament_flush, coins_flush
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ app.add_middleware(
 )
 
 app.include_router(legacy.router)
+app.include_router(admin_legacy_router)
 
 
 @app.get("/health")
