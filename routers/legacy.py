@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 
 # Sync marker for VS Code source control
@@ -151,6 +151,9 @@ from core.realtime_state import (
 from core.telegram_auth import verify_telegram_init_data
 from core.stars_skins import get_stars_skin_price
 from CONFIG.settings import BOT_TOKEN
+
+
+router = APIRouter()
 
 
 REDIS_URL = os.getenv("REDIS_URL")
@@ -1571,6 +1574,21 @@ async def build_admin_fraud_overview(season_key: str) -> list[dict]:
 # ==================== РўРЈР РќРР РќР«Р• Р”РђРќРќР«Р• ==================
 
 
+# Hot-state fields that must NOT be stored in user:cache.
+# These are authoritative from Redis hot keys (energy:v2, coins_hot, etc.)
+_USER_CACHE_EXCLUDE_FIELDS = frozenset(
+    {
+        "energy",
+        "max_energy",
+        "coins",
+        "last_energy_update",
+        "last_passive_income",
+        "profit_per_hour",
+        "profit_per_tap",
+    }
+)
+
+
 async def get_user_cached(user_id: int) -> dict | None:
     conn = await get_redis_or_none()
     if conn:
@@ -1587,10 +1605,14 @@ async def get_user_cached(user_id: int) -> dict | None:
 
     conn = await get_redis_or_none()
     if conn:
+        # Filter out hot-state fields before caching
+        cache_data = {
+            k: v for k, v in user.items() if k not in _USER_CACHE_EXCLUDE_FIELDS
+        }
         await conn.setex(
             f"{USER_CACHE_PREFIX}{user_id}",
             USER_CACHE_TTL,
-            json.dumps(user, default=str),
+            json.dumps(cache_data, default=str),
         )
 
     return user
@@ -1830,199 +1852,7 @@ async def touch_user_activity(user_id: int, user: dict | None = None) -> None:
     extra["last_push_reason"] = None
 
     await update_user(user_id, {"extra_data": extra})
-    await invalidate_user_cache(user_id)
 
-
-async def grant_referral_share_bonus(referral_user: dict, source_income: int) -> int:
-    if source_income <= 0:
-        return 0
-
-    referral_user_id = int(referral_user.get("user_id", 0))
-    referrer_id = int(referral_user.get("referrer_id") or 0)
-    if not referrer_id or referrer_id == referral_user_id:
-        return 0
-
-    referrer = await get_user_cached(referrer_id)
-    if not referrer:
-        return 0
-
-    if int(referrer.get("referrer_id") or 0) == referral_user_id:
-        return 0
-
-    bonus = int(source_income * REFERRAL_SHARE_RATE)
-    if bonus <= 0:
-        return 0
-
-    extra = parse_extra_data(referrer.get("extra_data"))
-    today_key = datetime.utcnow().date().isoformat()
-    if extra.get("referral_commission_date") != today_key:
-        extra["referral_commission_date"] = today_key
-        extra["referral_commission_today"] = 0
-
-    today_amount = int(extra.get("referral_commission_today", 0))
-    available = max(0, REFERRAL_DAILY_SHARE_LIMIT - today_amount)
-    bonus = min(bonus, available)
-    if bonus <= 0:
-        return 0
-
-    extra["referral_commission_today"] = today_amount + bonus
-
-    await update_user(
-        referrer_id,
-        {
-            "coins": int(referrer.get("coins", 0)) + bonus,
-            "referral_earnings": int(referrer.get("referral_earnings", 0)) + bonus,
-            "extra_data": extra,
-        },
-    )
-    await invalidate_user_cache(referrer_id)
-    return bonus
-
-
-async def distribute_tournament_rewards():
-    """Award top players before resetting the leaderboard."""
-    try:
-        redis_conn = await get_redis_or_none()
-        if not redis_conn:
-            return
-
-        top_players = await redis_conn.zrevrange(TOURNAMENT_KEY, 0, 2, withscores=True)
-        if not top_players:
-            return
-
-        shares = [0.5, 0.3, 0.2]
-
-        for idx, (user_id_str, score) in enumerate(top_players):
-            if idx >= len(shares):
-                break
-            try:
-                user_id = int(user_id_str)
-            except ValueError:
-                continue
-
-            reward = int(TOURNAMENT_PRIZE_POOL * shares[idx])
-            user = await get_user(user_id)
-            if not user:
-                continue
-
-            new_coins = int(user.get("coins", 0)) + reward
-            await update_user(user_id, {"coins": new_coins})
-            await invalidate_user_cache(user_id)
-            logger.info(
-                f"рџЏ† Tournament reward: user {user_id} place {idx + 1} +{reward} coins (score {int(score)})"
-            )
-    except Exception as e:
-        logger.error(f"Error distributing tournament rewards: {e}")
-
-
-async def reset_tournament_loop():
-    while True:
-        now = datetime.utcnow()
-        tomorrow = (now + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        sleep_seconds = max(1, int((tomorrow - now).total_seconds()))
-
-        await asyncio.sleep(sleep_seconds)
-
-        try:
-            await distribute_tournament_rewards()
-            redis_conn = await get_redis_or_none()
-            if redis_conn:
-                await redis_conn.delete(TOURNAMENT_KEY)
-                logger.info("рџЏ† Tournament leaderboard reset after rewards")
-        except Exception as e:
-            logger.error(f"Error resetting tournament leaderboard: {e}")
-
-
-async def weekly_tournament_rollover_loop():
-    while True:
-        now = datetime.utcnow()
-        current_start, current_end = get_weekly_tournament_season_window(now)
-        sleep_seconds = max(1, int((current_end - now).total_seconds()))
-
-        await asyncio.sleep(sleep_seconds)
-
-        try:
-            previous_season_key = current_start.strftime("%Y-%m-%d")
-            finalized = await finalize_weekly_tournament_season(previous_season_key)
-            if finalized:
-                logger.info(
-                    "Weekly tournament season finalized: %s", previous_season_key
-                )
-        except Exception as e:
-            logger.error(f"Error finalizing weekly tournament season: {e}")
-
-
-# ==================== LIFESPAN ====================
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global redis_client
-
-    logger.info("рџљЂ Starting Ryoho Clicker API")
-
-    await init_db()
-    logger.info("вњ… Database initialized")
-
-    if REDIS_URL:
-        redis_client = redis.from_url(
-            REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-            socket_timeout=2,
-            socket_connect_timeout=2,
-            retry_on_timeout=True,
-        )
-        try:
-            await redis_client.ping()
-            logger.info("вњ… Redis connected")
-        except Exception as e:
-            logger.error(f"вќЊ Redis connection failed: {e}")
-            redis_client = None
-    else:
-        logger.warning("вљ пёЏ REDIS_URL is not set")
-
-    if redis_client:
-        asyncio.create_task(reset_tournament_loop())
-        asyncio.create_task(flush_click_buffer_loop())
-        asyncio.create_task(weekly_tournament_rollover_loop())
-
-    logger.info("вњ… Background tasks started")
-    yield
-
-    if redis_client:
-        await redis_client.close()
-
-    logger.info("рџ›‘ Shutting down")
-
-
-# ==================== CORS ====================
-app = FastAPI(title="Ryoho Clicker API", lifespan=lifespan)
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_CORS_ORIGINS + (["null"] if ALLOW_NULL_ORIGIN else []),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-from fastapi import APIRouter
-
-router = APIRouter()
-
-
-@router.post("/api/auth/session")
-async def create_api_session(request: Request):
-    ensure_mobile_only_game_access(request)
-    telegram_user = verify_telegram_init_data(
-        request.headers.get("X-Telegram-Init-Data", "")
-    )
-    token, expires_at = issue_session_token(telegram_user)
     return {
         "success": True,
         "token": token,
@@ -2310,8 +2140,8 @@ async def flush_click_buffer_loop():
                 new_coins = int(user.get("coins", 0)) + coins
 
                 await update_user(user_id, {"coins": new_coins})
-
-                await invalidate_user_cache(user_id)
+                # NOTE: Not invalidating cache — coins is a hot-state field
+                # excluded from user:cache. Cache only stores static profile data.
 
             await conn.delete(CLICK_BUFFER_KEY)
 
@@ -2379,7 +2209,8 @@ async def get_mega_boost_status(user_id: int, request: Request):
                     del active_boosts["mega_boost"]
                     extra["active_boosts"] = active_boosts
                     await update_user(user_id, {"extra_data": extra})
-                    await invalidate_user_cache(user_id)
+                    # NOTE: Not invalidating cache — boost state is derived from
+                    # expires_at in extra_data, read from DB in realtime assembler.
                     cooldown_until = parse_iso_datetime(
                         extra.get("mega_boost_cooldown_until")
                     )
@@ -2416,7 +2247,8 @@ async def get_mega_boost_status(user_id: int, request: Request):
         if cooldown_until and cooldown_until <= now:
             extra.pop("mega_boost_cooldown_until", None)
             await update_user(user_id, {"extra_data": extra})
-            await invalidate_user_cache(user_id)
+            # NOTE: Not invalidating cache — boost state is derived from
+            # expires_at in extra_data, read from DB in realtime assembler.
 
         return {"active": False, "cooldown_active": False}
     except Exception as e:
@@ -2483,7 +2315,8 @@ async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
         extra["mega_boost_cooldown_until"] = cooldown_until_value
         extra["active_boosts"] = active_boosts
         await update_user(payload.user_id, {"extra_data": extra})
-        await invalidate_user_cache(payload.user_id)
+        # NOTE: Not invalidating cache — boost state is derived from
+        # expires_at in extra_data, read from DB in realtime assembler.
         await record_rewarded_ad_claim(
             payload.user_id, "boost", {"source_action": "mega_boost"}
         )
@@ -2579,7 +2412,8 @@ async def activate_ghost_boost(payload: AdActionClaimRequest, request: Request):
         extra["active_boosts"] = active_boosts
 
         await update_user(payload.user_id, {"extra_data": extra})
-        await invalidate_user_cache(payload.user_id)
+        # NOTE: Not invalidating cache — boost state is derived from
+        # expires_at in extra_data, read from DB in realtime assembler.
         await record_rewarded_ad_claim(
             payload.user_id, "ghost", {"source_action": "ghost_boost"}
         )
@@ -2650,7 +2484,7 @@ async def adsgram_complete_locally(payload: AdActionClaimRequest, request: Reque
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.api_route("/api/ads/monetag/postback", methods=["GET", "POST"])
+@router.api_route("/api/ads/monetag/postback", methods=["GET", "POST"])
 async def monetag_postback(request: Request):
     try:
         params = {str(k): str(v) for k, v in request.query_params.items()}
@@ -2811,7 +2645,7 @@ async def ad_watched(payload: dict, request: Request):
         extra["ads_history"] = ads_history[-50:]
 
         await update_user(user_id, {"extra_data": extra})
-        await invalidate_user_cache(user_id)
+        # NOTE: Not invalidating cache — ads_history is not a cached field.
 
         return {"success": True}
 
@@ -2894,7 +2728,9 @@ async def increment_ads_watched(payload: AdActionClaimRequest, request: Request)
                 ready_to_unlock = current_count >= required_count
 
         await update_user(payload.user_id, {"extra_data": extra})
-        await invalidate_user_cache(payload.user_id)
+        # NOTE: Not invalidating cache — skin_ad_progress changes frequently
+        # and is read from DB in the realtime assembler. Cache staleness
+        # is acceptable for this display-only field (60s TTL anyway).
         await record_rewarded_ad_claim(
             payload.user_id,
             "skins",
@@ -2966,7 +2802,8 @@ async def apply_global_upgrade_for_user(user_id: int, user: dict) -> dict:
     updated_user = await update_user_if_matches(user_id, expected, updates)
     if not updated_user:
         raise HTTPException(status_code=409, detail="Upgrade state changed, retry")
-    await invalidate_user_cache(user_id)
+    # NOTE: Not invalidating cache — energy/max_energy are excluded from
+    # user:cache. Cache only stores static profile fields.
 
     next_cost = (
         GLOBAL_UPGRADE_PRICES[new_level]
@@ -3076,7 +2913,9 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
                 "extra_data": extra,
             },
         )
-        await invalidate_user_cache(user_id)
+        # NOTE: Not invalidating cache — energy/max_energy/last_energy_update
+        # are excluded from user:cache. energy_refill_cooldown_until is a
+        # cooldown field, not a cached profile field.
         await record_rewarded_ad_claim(
             user_id, "energy_restore", {"source_action": "energy_refill_max"}
         )
@@ -3588,7 +3427,8 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             )
             write_click_guard_state(extra, click_guard)
             await update_user(payload.user_id, {"extra_data": extra})
-            await invalidate_user_cache(payload.user_id)
+            # NOTE: Not invalidating cache — click_guard is a hot-state field
+            # excluded from user:cache. Cache only stores static profile data.
             logger.warning(
                 "Rejected suspicious click batch user=%s ip=%s requested=%s allowed=%s",
                 payload.user_id,

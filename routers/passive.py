@@ -22,10 +22,10 @@ from routers.legacy import (
     update_user,
     update_user_if_matches,
     invalidate_user_cache,
-    grant_referral_share_bonus,
     consume_ad_action_session,
     record_rewarded_ad_claim,
 )
+from infrastructure.redis import get_redis_or_none
 
 router = APIRouter(tags=["passive"])
 logger = logging.getLogger(__name__)
@@ -106,7 +106,18 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
             )
 
         await invalidate_user_cache(payload.user_id)
-        referral_bonus = await grant_referral_share_bonus(updated_user, total_income)
+
+        # Referral bonus (5% of income, buffered in Redis)
+        referral_bonus = 0
+        referrer_id = updated_user.get("referrer_id")
+        if referrer_id:
+            referral_bonus = max(1, int(total_income * 0.05))
+            redis_conn = await get_redis_or_none()
+            if redis_conn:
+                await redis_conn.hincrby(
+                    f"referral_pending:{referrer_id}", "coins", referral_bonus
+                )
+                await redis_conn.expire(f"referral_pending:{referrer_id}", 300)
 
         return {
             "success": True,
