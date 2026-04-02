@@ -141,6 +141,13 @@ from core.config import (
     TON_VERIFIER_TIMEOUT_SECONDS,
 )
 from core.skins import DEFAULT_SKIN_ID, SOCIAL_SUB_TASK_SKINS
+from core.realtime_state import (
+    build_realtime_player_state,
+    build_click_response_state,
+    read_energy_v2,
+    write_energy_v2,
+    get_all_boost_states,
+)
 from core.telegram_auth import verify_telegram_init_data
 from core.stars_skins import get_stars_skin_price
 from CONFIG.settings import BOT_TOKEN
@@ -2331,87 +2338,12 @@ async def get_user_data(user_id: int, request: Request):
                 user_id, int(user.get("coins", 0)), redis_conn
             )
 
-        now = datetime.utcnow()
-        current_energy = calculate_current_energy(user, now)
-        max_energy = resolve_max_energy(user)
+        # Use the realtime state assembler for authoritative energy/coins/boosts
+        state = await build_realtime_player_state(user_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="User not found")
 
-        if (
-            int(user.get("max_energy", max_energy)) != max_energy
-            or int(user.get("energy", current_energy)) > max_energy
-        ):
-            await update_user(
-                user_id,
-                {
-                    "max_energy": max_energy,
-                    "energy": min(current_energy, max_energy),
-                },
-            )
-            await invalidate_user_cache(user_id)
-
-        extra = parse_extra_data(user.get("extra_data"))
-
-        owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
-        selected_skin = normalize_selected_skin(
-            extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins
-        )
-        ghost_boost_active, ghost_boost_expires_at = get_ghost_boost_status(user)
-        daily_infinite_energy_active, daily_infinite_energy_expires_at = (
-            is_daily_infinite_energy_active(user)
-        )
-        task_tap_boost_active, task_tap_boost_expires_at, task_tap_boost_multiplier = (
-            get_active_video_task_boost(extra, "tap_boost")
-        )
-        (
-            task_passive_boost_active,
-            task_passive_boost_expires_at,
-            task_passive_boost_multiplier,
-        ) = get_active_video_task_boost(extra, "passive_boost")
-        multitap_level = int(user.get("multitap_level", 0))
-        profit_level = int(user.get("profit_level", 0))
-        energy_level = int(user.get("energy_level", 0))
-        profit_per_tap = get_tap_value(multitap_level)
-        profit_per_hour = get_hour_value(profit_level)
-
-        if owned_skins != extra.get("owned_skins") or selected_skin != extra.get(
-            "selected_skin", DEFAULT_SKIN_ID
-        ):
-            extra["owned_skins"] = owned_skins
-            extra["selected_skin"] = selected_skin
-            await update_user(user_id, {"extra_data": extra})
-            await invalidate_user_cache(user_id)
-
-        ton_wallet = get_ton_wallet_from_user({"extra_data": extra})
-
-        return {
-            "user_id": user["user_id"],
-            "username": user.get("username"),
-            "coins": user.get("coins", 0),
-            "energy": current_energy,
-            "max_energy": max_energy,
-            "profit_per_tap": profit_per_tap,
-            "profit_per_hour": profit_per_hour,
-            "multitap_level": multitap_level,
-            "profit_level": profit_level,
-            "energy_level": energy_level,
-            "owned_skins": owned_skins,
-            "selected_skin": selected_skin,
-            "ads_watched": extra.get("ads_watched", 0),
-            "ghost_boost_active": ghost_boost_active,
-            "ghost_boost_expires_at": ghost_boost_expires_at,
-            "task_tap_boost_active": task_tap_boost_active,
-            "task_tap_boost_expires_at": task_tap_boost_expires_at,
-            "task_tap_boost_multiplier": task_tap_boost_multiplier,
-            "task_passive_boost_active": task_passive_boost_active,
-            "task_passive_boost_expires_at": task_passive_boost_expires_at,
-            "task_passive_boost_multiplier": task_passive_boost_multiplier,
-            "daily_infinite_energy_active": daily_infinite_energy_active,
-            "daily_infinite_energy_expires_at": daily_infinite_energy_expires_at,
-            "skin_ad_progress": get_skin_ad_progress(extra),
-            "skin_ad_last_watch": get_skin_ad_last_watch(extra),
-            "ton_wallet": ton_wallet,
-            "regen_seconds": ENERGY_REGEN_SECONDS,
-            "server_time": now.isoformat(),
-        }
+        return state
 
     except HTTPException:
         raise
@@ -3807,25 +3739,25 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
         # - grant_referral_share_bonus (buffered in Redis above, flush async later)
         # - invalidate_user_cache (cache invalidation on explicit state changes only)
 
-        return {
-            "success": True,
-            "coins": new_coins,
-            "energy": int(new_energy),
-            "max_energy": max_energy,
-            "regen_seconds": ENERGY_REGEN_SECONDS,
-            "server_time": now.isoformat(),
-            "gained": gained,
-            "effective_clicks": effective_clicks,
-            "coin_per_tap": coin_per_tap,
-            "profit_per_tap": tap_value,
-            "profit_per_hour": get_hour_value(int(user.get("profit_level", 0))),
-            "mega_boost_active": mega_boost_active,
-            "ghost_boost_active": ghost_boost_active,
-            "ghost_boost_expires_at": ghost_boost_expires_at,
-            "daily_infinite_energy_active": daily_infinite_energy_active,
-            "click_guard_suspicion_score": click_guard["suspicion_score"],
-            "referral_bonus_paid": referral_bonus,
-        }
+        # Build authoritative click response from the realtime state assembler
+        boosts = get_all_boost_states(parse_extra_data(user.get("extra_data")))
+        tap_value = get_tap_value(int(user.get("multitap_level", 0)))
+        profit_per_hour = get_hour_value(int(user.get("profit_level", 0)))
+
+        return await build_click_response_state(
+            user_id=payload.user_id,
+            coins_after=new_coins,
+            energy_after=int(new_energy),
+            max_energy=max_energy,
+            gained=gained,
+            effective_clicks=effective_clicks,
+            coin_per_tap=coin_per_tap,
+            tap_value=tap_value,
+            profit_per_hour=profit_per_hour,
+            boosts=boosts,
+            suspicion_score=click_guard["suspicion_score"],
+            referral_bonus=referral_bonus,
+        )
 
     except HTTPException:
         raise
