@@ -3412,31 +3412,33 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
 
         # === REDIS ENERGY CACHE ===
         redis_conn = await get_redis_or_none()
+        if not redis_conn:
+            raise HTTPException(
+                status_code=503,
+                detail="Redis unavailable: click processing temporarily disabled",
+            )
         energy_key = f"energy:v2:{payload.user_id}"
-        if redis_conn:
-            cached = await redis_conn.hgetall(energy_key)
-            if cached:
-                elapsed = now.timestamp() - float(
-                    cached.get("updated_at", now.timestamp())
-                )
-                regen = int(elapsed // ENERGY_REGEN_SECONDS)
-                current_energy = min(
-                    int(cached.get("max_energy", max_energy)),
-                    int(cached.get("value", 0)) + regen,
-                )
-            else:
-                current_energy = calculate_current_energy(user, now)
-                await redis_conn.hset(
-                    energy_key,
-                    mapping={
-                        "value": str(current_energy),
-                        "updated_at": str(now.timestamp()),
-                        "max_energy": str(max_energy),
-                    },
-                )
-                # NOTE: No TTL — energy:v2 is persistent hot-state like coins_hot.
+        cached = await redis_conn.hgetall(energy_key)
+        if cached:
+            elapsed = now.timestamp() - float(
+                cached.get("updated_at", now.timestamp())
+            )
+            regen = int(elapsed // ENERGY_REGEN_SECONDS)
+            current_energy = min(
+                int(cached.get("max_energy", max_energy)),
+                int(cached.get("value", 0)) + regen,
+            )
         else:
             current_energy = calculate_current_energy(user, now)
+            await redis_conn.hset(
+                energy_key,
+                mapping={
+                    "value": str(current_energy),
+                    "updated_at": str(now.timestamp()),
+                    "max_energy": str(max_energy),
+                },
+            )
+            # NOTE: No TTL — energy:v2 is persistent hot-state like coins_hot.
 
         multitap_level = int(user.get("multitap_level", 0))
         tap_value = get_tap_value(multitap_level)
