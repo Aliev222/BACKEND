@@ -125,6 +125,22 @@ from core.game_logic import (
     normalize_dt,
     resolve_max_energy,
 )
+from core.config import (
+    DIAGNOSTICS_DURATION_WINDOW,
+    DAILY_REWARD_MAX_DAYS,
+    AUTOCLICKER_COOLDOWN_MINUTES,
+    VIDEO_TASK_DEFINITIONS,
+    WEEKLY_LEAGUE_ORDER,
+    WEEKLY_LEAGUE_LEVEL_RANGES,
+    WEEKLY_LEAGUE_FUND_SPLITS,
+    WEEKLY_TOP3_PAYOUT_SPLITS,
+    WEEKLY_RANGE_PAYOUT_SPLITS,
+    TON_NANO,
+    TON_VERIFIER_API_BASE,
+    TON_VERIFIER_API_KEY,
+    TON_VERIFIER_TIMEOUT_SECONDS,
+)
+from core.skins import DEFAULT_SKIN_ID, SOCIAL_SUB_TASK_SKINS
 from core.telegram_auth import verify_telegram_init_data
 from core.stars_skins import get_stars_skin_price
 from CONFIG.settings import BOT_TOKEN
@@ -136,7 +152,6 @@ LOCAL_LOCKS: dict[str, float] = {}
 LOCAL_IDEMPOTENCY_KEYS: dict[str, float] = {}
 LOCAL_RATE_LIMITS_STATE: dict[str, deque[float]] = defaultdict(deque)
 LOCAL_TON_PROOF_PAYLOADS: dict[str, dict] = {}
-DIAGNOSTICS_DURATION_WINDOW = 240
 ENDPOINT_DIAGNOSTICS: dict[tuple[str, str], dict] = {}
 RECENT_DIAGNOSTIC_ERRORS: deque[dict] = deque(maxlen=120)
 APP_ENV = (os.getenv("APP_ENV", "production") or "production").strip().lower()
@@ -178,7 +193,6 @@ SESSION_TOKEN_TTL_SECONDS = max(
 ENABLE_K6_FRAUD_HEURISTICS = (
     os.getenv("ENABLE_K6_FRAUD_HEURISTICS", "0") or "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
-DAILY_REWARD_MAX_DAYS = 30
 DAILY_REWARD_BASE_COINS = 500
 DAILY_REWARD_INFINITE_ENERGY_MINUTES = 10
 DAILY_REWARD_SKIN_ID = "retro.pngSP"
@@ -187,7 +201,6 @@ MEGA_BOOST_COOLDOWN_MIN_MINUTES = 10
 MEGA_BOOST_COOLDOWN_MAX_MINUTES = 10
 GHOST_BOOST_MULTIPLIER = 5
 GHOST_BOOST_MINUTES = 1
-AUTOCLICKER_COOLDOWN_MINUTES = 10
 SKIN_AD_COOLDOWN_MINUTES = 10
 ENERGY_REFILL_COOLDOWN_MINUTES = 10
 AD_ACTION_SESSION_TTL_SECONDS = 180
@@ -249,24 +262,6 @@ ADSGRAM_REWARD_SESSION_KEYS = (
     "custom_data",
 )
 ADSGRAM_REWARD_SECRET_KEYS = ("token", "secret", "key")
-VIDEO_TASK_DEFINITIONS = {
-    "tap_surge": {
-        "type": "tap_boost",
-        "cooldown_minutes": 75,
-        "duration_minutes": 5,
-        "multiplier": 2,
-    },
-    "passive_hour": {
-        "type": "passive_boost",
-        "cooldown_minutes": 240,
-        "duration_minutes": 60,
-        "multiplier": 2,
-    },
-    "coin_drop": {
-        "type": "coin_drop",
-        "cooldown_minutes": 60,
-    },
-}
 
 VIDEO_SKIN_IDS = {
     "video.pngSP",
@@ -278,41 +273,8 @@ VIDEO_SKIN_IDS = {
     "video7.pngSP",
     "video8.pngSP",
 }
-WEEKLY_LEAGUE_ORDER = ("diamond", "gold", "silver", "bronze")
-WEEKLY_LEAGUE_LEVEL_RANGES = {
-    "bronze": {"min_level": 1, "max_level": 32},
-    "silver": {"min_level": 33, "max_level": 65},
-    "gold": {"min_level": 66, "max_level": 99},
-    "diamond": {"min_level": 100, "max_level": None},
-}
-WEEKLY_LEAGUE_FUND_SPLITS = {
-    "diamond": 0.50,
-    "gold": 0.30,
-    "silver": 0.15,
-    "bronze": 0.05,
-}
-WEEKLY_TOP3_PAYOUT_SPLITS = {
-    1: 0.30,
-    2: 0.20,
-    3: 0.13,
-}
-WEEKLY_RANGE_PAYOUT_SPLITS = [
-    {"start": 4, "end": 10, "share": 0.22},
-    {"start": 11, "end": 20, "share": 0.10},
-    {"start": 21, "end": 50, "share": 0.05},
-]
-TON_NANO = 1_000_000_000
 TON_WALLET_ALLOWED_CHARS = set(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-:"
-)
-TON_VERIFIER_API_BASE = (
-    (os.getenv("TON_VERIFIER_API_BASE", "https://toncenter.com/api/v3") or "")
-    .strip()
-    .rstrip("/")
-)
-TON_VERIFIER_API_KEY = (os.getenv("TON_VERIFIER_API_KEY", "") or "").strip()
-TON_VERIFIER_TIMEOUT_SECONDS = max(
-    5.0, float(os.getenv("TON_VERIFIER_TIMEOUT_SECONDS", "15") or "15")
 )
 TON_PROOF_TTL_SECONDS = max(
     120, int((os.getenv("TON_PROOF_TTL_SECONDS", "900") or "900").strip())
@@ -2458,7 +2420,6 @@ async def get_user_data(user_id: int, request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-
 @router.get("/api/mega-boost-status/{user_id}")
 async def get_mega_boost_status(user_id: int, request: Request):
     """Get mega boost status"""
@@ -3266,8 +3227,6 @@ async def sync_energy(payload: EnergySyncRequest, request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-DEFAULT_SKIN_ID = "default.pngSP"
-
 SKIN_MULTIPLIERS = {
     DEFAULT_SKIN_ID: 1.0,
     REFERRAL_SPECIAL_SKIN_ID: 1.8,
@@ -3304,12 +3263,6 @@ LEGACY_SKIN_ID_MAP = {
     "telegram-social.pngSP": "telega.pngSP",
     "tiktok-social.pngSP": "tiktok.pngSP",
     "instagram-social.pngSP": "insta.pngSP",
-}
-
-SOCIAL_SUB_TASK_SKINS = {
-    "telegram_sub": "telega.pngSP",
-    "tiktok_sub": "tiktok.pngSP",
-    "instagram_sub": "insta.pngSP",
 }
 
 VALID_SKIN_IDS = set(SKIN_MULTIPLIERS.keys())
@@ -4016,8 +3969,6 @@ async def get_weekly_tournament_overview(user_id: int, request: Request):
 
 
 # ==================== REFERRALS ====================
-
-
 
 
 @router.get("/api/weekly-tournament/leaderboard/{league}")

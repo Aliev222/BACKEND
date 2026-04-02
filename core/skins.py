@@ -5,9 +5,9 @@ Skin constants and pure helpers extracted from routers/legacy.py (Patch 7.6).
 DEFAULT_SKIN_ID = "default.pngSP"
 
 SOCIAL_SUB_TASK_SKINS = {
-    "telegram_sub": "telegram.pngSP",
+    "telegram_sub": "telega.pngSP",
     "tiktok_sub": "tiktok.pngSP",
-    "instagram_sub": "instagram.pngSP",
+    "instagram_sub": "insta.pngSP",
 }
 
 
