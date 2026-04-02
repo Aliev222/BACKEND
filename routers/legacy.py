@@ -2217,6 +2217,7 @@ async def get_mega_boost_status(user_id: int, request: Request):
                     del active_boosts["mega_boost"]
                     extra["active_boosts"] = active_boosts
                     await update_user(user_id, {"extra_data": extra})
+                    await invalidate_user_cache(user_id)
                     # NOTE: Not invalidating cache — boost state is derived from
                     # expires_at in extra_data, read from DB in realtime assembler.
                     cooldown_until = parse_iso_datetime(
@@ -2255,6 +2256,7 @@ async def get_mega_boost_status(user_id: int, request: Request):
         if cooldown_until and cooldown_until <= now:
             extra.pop("mega_boost_cooldown_until", None)
             await update_user(user_id, {"extra_data": extra})
+            await invalidate_user_cache(user_id)
             # NOTE: Not invalidating cache — boost state is derived from
             # expires_at in extra_data, read from DB in realtime assembler.
 
@@ -2323,6 +2325,7 @@ async def activate_mega_boost(payload: AdActionClaimRequest, request: Request):
         extra["mega_boost_cooldown_until"] = cooldown_until_value
         extra["active_boosts"] = active_boosts
         await update_user(payload.user_id, {"extra_data": extra})
+        await invalidate_user_cache(payload.user_id)
         # NOTE: Not invalidating cache — boost state is derived from
         # expires_at in extra_data, read from DB in realtime assembler.
         await record_rewarded_ad_claim(
@@ -2420,6 +2423,7 @@ async def activate_ghost_boost(payload: AdActionClaimRequest, request: Request):
         extra["active_boosts"] = active_boosts
 
         await update_user(payload.user_id, {"extra_data": extra})
+        await invalidate_user_cache(payload.user_id)
         # NOTE: Not invalidating cache — boost state is derived from
         # expires_at in extra_data, read from DB in realtime assembler.
         await record_rewarded_ad_claim(
