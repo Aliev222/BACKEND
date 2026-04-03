@@ -151,6 +151,7 @@ from core.realtime_state import (
 from core.telegram_auth import verify_telegram_init_data
 from core.stars_skins import get_stars_skin_price
 from CONFIG.settings import BOT_TOKEN
+from infrastructure.coins_hot_sync import sync_hot_after_db_increment
 
 
 router = APIRouter()
@@ -1720,6 +1721,14 @@ async def update_user_if_matches(user_id: int, expected: dict, data: dict):
     values = {
         field: serialize_db_field(field, raw_value) for field, raw_value in data.items()
     }
+    expected_coins = expected.get("coins")
+    new_coins = data.get("coins")
+    coin_delta = None
+    if expected_coins is not None and new_coins is not None:
+        try:
+            coin_delta = int(new_coins) - int(expected_coins)
+        except Exception:
+            coin_delta = None
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -1729,6 +1738,8 @@ async def update_user_if_matches(user_id: int, expected: dict, data: dict):
             await session.rollback()
             return None
         await session.commit()
+    if coin_delta and coin_delta > 0:
+        await sync_hot_after_db_increment(user_id, int(coin_delta), int(new_coins))
 
     return await get_user(user_id)
 
@@ -1765,6 +1776,8 @@ async def complete_task_reward_atomically(
     user_id: int, task_id: str, user_updates: dict | None = None
 ) -> dict:
     user_updates = user_updates or {}
+    sync_delta = 0
+    sync_new_coins = None
 
     async with AsyncSessionLocal() as session:
         user_result = await session.execute(
@@ -1773,6 +1786,7 @@ async def complete_task_reward_atomically(
         user_row = user_result.scalar_one_or_none()
         if not user_row:
             raise HTTPException(status_code=404, detail="User not found")
+        old_coins = int(user_row.coins or 0)
 
         task_result = await session.execute(
             select(UserTask).where(
@@ -1790,6 +1804,11 @@ async def complete_task_reward_atomically(
             )
 
         await session.commit()
+        if "coins" in user_updates:
+            sync_new_coins = int(user_row.coins or 0)
+            sync_delta = sync_new_coins - old_coins
+    if sync_delta > 0 and sync_new_coins is not None:
+        await sync_hot_after_db_increment(user_id, sync_delta, sync_new_coins)
 
     return await get_user(user_id)
 

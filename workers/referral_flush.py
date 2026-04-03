@@ -16,6 +16,7 @@ import redis.asyncio as redis
 
 from DATABASE.base import AsyncSessionLocal, User
 from infrastructure.redis import init_redis, close_redis
+from infrastructure.coins_hot_sync import sync_hot_after_db_increment
 from sqlalchemy import update, text
 from workers.worker_health import (
     worker_heartbeat,
@@ -174,9 +175,10 @@ async def flush_referral_pending(redis_conn: redis.Redis) -> int:
                     coins=User.coins + coins,
                     referral_earnings=User.referral_earnings + coins,
                 )
+                .returning(User.coins)
             )
-
-            if result.rowcount == 0:
+            new_coins = result.scalar_one_or_none()
+            if new_coins is None:
                 # User not found. DO NOT commit.
                 # Session rollback removes the log INSERT automatically.
                 # Processing key stays in Redis for retry/recovery.
@@ -189,6 +191,7 @@ async def flush_referral_pending(redis_conn: redis.Redis) -> int:
 
             # Step 3: Commit (log + balance update are atomic)
             await session.commit()
+            await sync_hot_after_db_increment(referrer_id, coins, int(new_coins))
 
         # Step 4: Cleanup processing key ONLY after successful commit
         try:

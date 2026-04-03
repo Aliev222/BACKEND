@@ -21,6 +21,7 @@ import logging
 from CONFIG.settings import DATABASE_URL
 from core.game_config import BASE_MAX_ENERGY
 from core.game_logic import get_hour_value, get_max_energy, get_tap_value
+from infrastructure.coins_hot_sync import sync_hot_after_db_increment
 
 import ssl
 
@@ -416,6 +417,11 @@ async def add_referral_bonus(referrer_id: int, referral_id: int):
             referrer.extra_data = json.dumps(extra_data)
 
             await session.commit()
+            await sync_hot_after_db_increment(
+                referrer_id,
+                REFERRAL_SIGNUP_BONUS,
+                int(referrer.coins or 0),
+            )
             logging.info(
                 f"✅ Реферер {referrer_id} получил +{REFERRAL_SIGNUP_BONUS} монет за реферала {referral_id}"
             )
@@ -581,6 +587,8 @@ async def update_user(user_id: int, data: dict):
         if not user:
             return None
 
+        old_coins = int(user.coins or 0)
+
         if "coins" in data:
             user.coins = data["coins"]
         if "username" in data:
@@ -619,6 +627,13 @@ async def update_user(user_id: int, data: dict):
             user.extra_data = json.dumps(data["extra_data"])
 
         await session.commit()
+        new_coins = int(user.coins or 0)
+        if "coins" in data and new_coins > old_coins:
+            await sync_hot_after_db_increment(
+                user_id,
+                new_coins - old_coins,
+                new_coins,
+            )
 
         return await get_user(user_id)
 
@@ -693,8 +708,10 @@ async def record_crash_ghost_cashout(
             update(User)
             .where(User.user_id == user_id)
             .values(coins=User.coins + payout_i)
+            .returning(User.coins)
         )
-        if result.rowcount != 1:
+        new_coins = result.scalar_one_or_none()
+        if new_coins is None:
             await session.rollback()
             return None
 
@@ -703,6 +720,7 @@ async def record_crash_ghost_cashout(
         except IntegrityError:
             await session.rollback()
             return await _crash_ghost_cashout_idempotent_response(user_id, session_id)
+    await sync_hot_after_db_increment(user_id, payout_i, int(new_coins))
 
     fresh = await get_user(user_id)
     return {
