@@ -4321,6 +4321,147 @@ async def admin_reconcile_coins_user(user_id: int, request: Request):
     }
 
 
+async def _repair_user_hot_if_below_db(user_id: int, redis_conn) -> dict:
+    """
+    One-time repair for drifted balances where DB coins > Redis coins_hot.
+    Safe by design:
+    - updates only coins_hot
+    - does not touch coins_pending / coins_flushing
+    - no DB writes
+    """
+    from workers.reconcile_coins import reconcile_user
+
+    before = await reconcile_user(user_id, redis_conn)
+    drift_confirmed = "hot_below_db" in before.mismatch_categories
+
+    if not drift_confirmed:
+        return {
+            "user_id": before.user_id,
+            "repaired": False,
+            "reason": "no_confirmed_drift",
+            "before": {
+                "db_coins": before.db_coins,
+                "hot_coins": before.hot_coins,
+                "pending_coins": before.pending_coins,
+                "flushing_coins": before.flushing_coins,
+                "mismatch_categories": before.mismatch_categories,
+            },
+        }
+
+    repair_lua = """
+    local hot_key = KEYS[1]
+    local db_coins = tonumber(ARGV[1])
+
+    local current_raw = redis.call('GET', hot_key)
+    local current = 0
+    if current_raw then
+        current = tonumber(current_raw)
+    end
+
+    if current < db_coins then
+        redis.call('SET', hot_key, tostring(db_coins))
+        return db_coins
+    end
+
+    return current
+    """
+    repaired_hot = int(
+        await redis_conn.eval(repair_lua, 1, f"coins_hot:{int(user_id)}", before.db_coins)
+    )
+    after = await reconcile_user(user_id, redis_conn)
+
+    return {
+        "user_id": before.user_id,
+        "repaired": True,
+        "before": {
+            "db_coins": before.db_coins,
+            "hot_coins": before.hot_coins,
+            "pending_coins": before.pending_coins,
+            "flushing_coins": before.flushing_coins,
+            "mismatch_categories": before.mismatch_categories,
+        },
+        "after": {
+            "db_coins": after.db_coins,
+            "hot_coins": after.hot_coins,
+            "pending_coins": after.pending_coins,
+            "flushing_coins": after.flushing_coins,
+            "mismatch_categories": after.mismatch_categories,
+        },
+        "repaired_hot": repaired_hot,
+    }
+
+
+@router.post("/api/admin/reconcile/coins/{user_id}/repair-hot")
+async def admin_reconcile_repair_hot_user(user_id: int, request: Request):
+    """Repair one user if and only if confirmed drift exists (DB > coins_hot)."""
+    await require_admin_access(request)
+    redis_conn = await get_redis_or_none()
+    if not redis_conn:
+        return {"error": "Redis unavailable", "status": "error"}
+
+    result = await _repair_user_hot_if_below_db(user_id, redis_conn)
+    return {"status": "ok", **result}
+
+
+@router.post("/api/admin/reconcile/coins/repair-hot")
+async def admin_reconcile_repair_hot_batch(
+    request: Request, limit: int = 200, apply: bool = True
+):
+    """
+    One-time batch repair:
+    - scans users
+    - selects only confirmed hot_below_db drifts
+    - sets coins_hot to DB coins for those users
+    """
+    await require_admin_access(request)
+    redis_conn = await get_redis_or_none()
+    if not redis_conn:
+        return {"error": "Redis unavailable", "status": "error"}
+
+    from workers.reconcile_coins import reconcile_all_users
+
+    recs = await reconcile_all_users(redis_conn, limit=max(1, min(int(limit), 5000)))
+    drifted = [r for r in recs if "hot_below_db" in r.mismatch_categories]
+
+    if not apply:
+        return {
+            "status": "ok",
+            "dry_run": True,
+            "checked": len(recs),
+            "drifted_count": len(drifted),
+            "drifted_users": [
+                {
+                    "user_id": r.user_id,
+                    "db_coins": r.db_coins,
+                    "hot_coins": r.hot_coins,
+                    "pending_coins": r.pending_coins,
+                    "flushing_coins": r.flushing_coins,
+                }
+                for r in drifted[:200]
+            ],
+        }
+
+    repaired = []
+    skipped = []
+    for r in drifted:
+        outcome = await _repair_user_hot_if_below_db(r.user_id, redis_conn)
+        if outcome.get("repaired"):
+            repaired.append(outcome)
+        else:
+            skipped.append(outcome)
+
+    return {
+        "status": "ok",
+        "dry_run": False,
+        "checked": len(recs),
+        "drifted_count": len(drifted),
+        "repaired_count": len(repaired),
+        "skipped_count": len(skipped),
+        "repaired_users": repaired[:200],
+        "skipped_users": skipped[:200],
+    }
+
+
 @router.get("/api/admin/reconcile/flush-lag")
 async def admin_flush_lag(request: Request):
     """Current flush pipeline state — pending/flushing/processing key counts."""
