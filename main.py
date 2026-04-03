@@ -11,9 +11,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from CONFIG.settings import BOT_TOKEN
 from DATABASE.base import add_user, get_user, init_db, record_stars_skin_purchase, update_user
 from core.game_config import USER_CACHE_PREFIX
-from core.realtime_state import build_realtime_player_state
 from infrastructure.redis import get_redis_or_none
-from routers.legacy import ensure_coins_hot_initialized
 from core.stars_skins import get_stars_skin_price
 
 logging.basicConfig(level=logging.INFO)
@@ -78,21 +76,20 @@ async def cmd_start(message: types.Message) -> None:
                 if cursor == 0:
                     break
 
-        if redis_conn:
-            ensure_coins_hot_initialized_ran = True
-            await ensure_coins_hot_initialized(
-                user_id, int(user_data.get("coins", 0)), redis_conn
-            )
         coins_hot_after = (
             await redis_conn.get(f"coins_hot:{user_id}") if redis_conn else None
         )
-        realtime = await build_realtime_player_state(user_id)
-        user_coins = (realtime or {}).get("coins", user_data.get("coins", 0))
+        if coins_hot_before is not None:
+            user_coins = int(coins_hot_before)
+        elif coins_hot_after is not None:
+            user_coins = int(coins_hot_after)
+        else:
+            user_coins = int(user_data.get("coins", 0))
 
         source_used = "db_fallback"
         if coins_hot_before is not None:
             source_used = "hot"
-        elif ensure_coins_hot_initialized_ran and coins_hot_after is not None:
+        elif coins_hot_after is not None:
             source_used = "initialized_hot"
 
         if user_id == TRACE_START_USER_ID:
@@ -105,7 +102,7 @@ async def cmd_start(message: types.Message) -> None:
                 "coins_flushing": coins_flushing,
                 "db_users_coins": int(user_data.get("coins", 0)),
                 "ensure_coins_hot_initialized_ran": ensure_coins_hot_initialized_ran,
-                "realtime_state_coins": (realtime or {}).get("coins"),
+                "realtime_state_coins": None,
                 "final_user_coins_shown": user_coins,
                 "source_used": source_used,
             }
