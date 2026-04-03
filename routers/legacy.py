@@ -1057,6 +1057,8 @@ async def mark_ad_action_session_verified_for_user(
     user_id: int,
     ad_session_id: str,
     verification_payload: dict | None = None,
+    *,
+    enforce_min_wait: bool = True,
 ) -> bool:
     redis_conn = await ensure_redis_available()
     session_key = f"adsession:action:{ad_session_id}"
@@ -1075,9 +1077,10 @@ async def mark_ad_action_session_verified_for_user(
     if session.get("claimed") is True:
         return False
 
-    created_at = float(session.get("created_at") or 0)
-    if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
-        return False
+    if enforce_min_wait:
+        created_at = float(session.get("created_at") or 0)
+        if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
+            return False
 
     return await mark_ad_action_session_verified(
         ad_session_id, verification_payload or {}
@@ -2482,6 +2485,7 @@ async def adsgram_complete_locally(payload: AdActionClaimRequest, request: Reque
             payload.user_id,
             payload.ad_session_id,
             {"source": "adsgram_sdk", "confirmed_at": datetime.utcnow().isoformat()},
+            enforce_min_wait=False,
         )
         if not verified:
             raise HTTPException(
