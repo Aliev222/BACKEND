@@ -1186,9 +1186,10 @@ async def consume_ad_action_session(
                 status_code=400, detail="Ad completion was not confirmed yet"
             )
     else:
-        created_at = float(session.get("created_at") or 0)
-        if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
-            raise HTTPException(status_code=400, detail="Ad watch is not completed yet")
+        if session.get("verified") is not True:
+            created_at = float(session.get("created_at") or 0)
+            if created_at <= 0 or (time.time() - created_at) < AD_SESSION_MIN_WAIT_SECONDS:
+                raise HTTPException(status_code=400, detail="Ad watch is not completed yet")
 
     session["claimed"] = True
     await redis_conn.setex(session_key, 60, json.dumps(session))
