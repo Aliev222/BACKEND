@@ -12,6 +12,8 @@ from CONFIG.settings import BOT_TOKEN
 from DATABASE.base import add_user, get_user, init_db, record_stars_skin_purchase, update_user
 from core.game_config import USER_CACHE_PREFIX
 from core.realtime_state import build_realtime_player_state
+from infrastructure.redis import get_redis_or_none
+from routers.legacy import ensure_coins_hot_initialized
 from core.stars_skins import get_stars_skin_price
 
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +51,11 @@ async def cmd_start(message: types.Message) -> None:
 
     user_data = await get_user(user_id)
     if user_data:
+        redis_conn = await get_redis_or_none()
+        if redis_conn:
+            await ensure_coins_hot_initialized(
+                user_id, int(user_data.get("coins", 0)), redis_conn
+            )
         realtime = await build_realtime_player_state(user_id)
         user_coins = (realtime or {}).get("coins", user_data.get("coins", 0))
     else:
