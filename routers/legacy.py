@@ -3372,7 +3372,7 @@ async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
             raise HTTPException(status_code=400, detail="Too many clicks in batch")
 
         batch_key = f"idem:clicks:{payload.user_id}:{payload.batch_id}"
-        is_new_batch = await acquire_idempotency_key(batch_key, ttl=120)
+        is_new_batch = await acquire_idempotency_key(batch_key, ttl=86400)
         if not is_new_batch:
             logger.warning(
                 "FRAUD_SUSPECT duplicate_batch user=%s batch_id=%s ip=%s",
