@@ -2176,9 +2176,11 @@ async def get_user_data(user_id: int, request: Request):
 
         redis_conn = await get_redis_or_none()
         if redis_conn:
-            await ensure_coins_hot_initialized(
-                user_id, int(user.get("coins", 0)), redis_conn
-            )
+            hot_exists = await redis_conn.exists(f"coins_hot:{user_id}")
+            if not hot_exists:
+                db_user = await get_user(user_id)
+                db_coins = int((db_user or {}).get("coins", 0))
+                await ensure_coins_hot_initialized(user_id, db_coins, redis_conn)
 
         # Use the realtime state assembler for authoritative energy/coins/boosts
         state = await build_realtime_player_state(user_id)

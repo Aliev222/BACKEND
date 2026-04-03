@@ -23,6 +23,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 REDIS_URL = os.getenv("REDIS_URL")
 REENGAGEMENT_RUNTIME = (os.getenv("REENGAGEMENT_RUNTIME", "webhook") or "webhook").strip().lower()
+TRACE_START_USER_ID = 1507124181
 
 
 async def invalidate_user_cache(user_id: int) -> None:
@@ -51,13 +52,67 @@ async def cmd_start(message: types.Message) -> None:
 
     user_data = await get_user(user_id)
     if user_data:
+        trace_payload = None
         redis_conn = await get_redis_or_none()
+        redis_reachable = redis_conn is not None
+        coins_hot_before = None
+        coins_pending = None
+        coins_flushing = []
+        ensure_coins_hot_initialized_ran = False
+
         if redis_conn:
+            coins_hot_before = await redis_conn.get(f"coins_hot:{user_id}")
+            coins_pending = await redis_conn.get(f"coins_pending:{user_id}")
+            cursor = 0
+            while True:
+                cursor, keys = await redis_conn.scan(
+                    cursor, match=f"coins_flushing:{user_id}:*", count=100
+                )
+                for key in keys:
+                    coins_flushing.append(
+                        {
+                            "key": key,
+                            "value": await redis_conn.get(key),
+                        }
+                    )
+                if cursor == 0:
+                    break
+
+        if redis_conn:
+            ensure_coins_hot_initialized_ran = True
             await ensure_coins_hot_initialized(
                 user_id, int(user_data.get("coins", 0)), redis_conn
             )
+        coins_hot_after = (
+            await redis_conn.get(f"coins_hot:{user_id}") if redis_conn else None
+        )
         realtime = await build_realtime_player_state(user_id)
         user_coins = (realtime or {}).get("coins", user_data.get("coins", 0))
+
+        source_used = "db_fallback"
+        if coins_hot_before is not None:
+            source_used = "hot"
+        elif ensure_coins_hot_initialized_ran and coins_hot_after is not None:
+            source_used = "initialized_hot"
+
+        if user_id == TRACE_START_USER_ID:
+            trace_payload = {
+                "user_id": user_id,
+                "redis_reachable": redis_reachable,
+                "coins_hot_before": coins_hot_before,
+                "coins_hot_after": coins_hot_after,
+                "coins_pending": coins_pending,
+                "coins_flushing": coins_flushing,
+                "db_users_coins": int(user_data.get("coins", 0)),
+                "ensure_coins_hot_initialized_ran": ensure_coins_hot_initialized_ran,
+                "realtime_state_coins": (realtime or {}).get("coins"),
+                "final_user_coins_shown": user_coins,
+                "source_used": source_used,
+            }
+            logger.info(
+                "START_BALANCE_TRACE %s",
+                json.dumps(trace_payload, ensure_ascii=True, default=str),
+            )
     else:
         await add_user(user_id, username, referrer_id)
         user_coins = 0
