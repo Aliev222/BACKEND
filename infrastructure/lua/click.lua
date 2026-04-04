@@ -76,6 +76,7 @@ if redis.call('EXISTS', user_hot_key) == 0 then
         'multitap_level', '0',
         'profit_level', '0',
         'energy_level', '0',
+        'rebirth_count', '0',
         'max_energy', tostring(base_max_energy),
         'click_streak', '0',
         'suspicion_score', '0',
@@ -93,6 +94,7 @@ local hot_tap_power = tonumber(redis.call('HGET', user_hot_key, 'tap_power') or 
 local multitap_level = tonumber(redis.call('HGET', user_hot_key, 'multitap_level') or '0')
 local profit_level = tonumber(redis.call('HGET', user_hot_key, 'profit_level') or '0')
 local energy_level = tonumber(redis.call('HGET', user_hot_key, 'energy_level') or '0')
+local rebirth_count = tonumber(redis.call('HGET', user_hot_key, 'rebirth_count') or '0')
 local hot_click_streak = tonumber(redis.call('HGET', user_hot_key, 'click_streak') or '0')
 local hot_suspicion_score = tonumber(redis.call('HGET', user_hot_key, 'suspicion_score') or '0')
 local hot_version = tonumber(redis.call('HGET', user_hot_key, 'version') or tostring(hot_state_version_default))
@@ -119,7 +121,8 @@ local computed_regen_seconds = regen_seconds
 if computed_regen_seconds <= 0 then
     computed_regen_seconds = 1
 end
-local tap_value = 1 + multitap_level
+local rebirth_bonus_per_level = 1 + math.max(0, rebirth_count)
+local tap_value = 1 + (multitap_level * rebirth_bonus_per_level)
 if tap_value <= 0 then
     tap_value = hot_tap_power
 end

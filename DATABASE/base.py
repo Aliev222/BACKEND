@@ -78,6 +78,7 @@ class User(Base):
     profit_level = Column(Integer, default=0)
     energy_level = Column(Integer, default=0)
     boost_level = Column(Integer, default=0)
+    rebirth_count = Column(Integer, default=0)
 
     last_passive_income = Column(DateTime, default=datetime.utcnow)
     last_energy_update = Column(DateTime, default=datetime.utcnow)
@@ -339,6 +340,7 @@ def _serialize_user(user: User) -> dict:
         "profit_level": user.profit_level,
         "energy_level": user.energy_level,
         "boost_level": user.boost_level,
+        "rebirth_count": user.rebirth_count,
         "last_passive_income": user.last_passive_income,
         "last_energy_update": user.last_energy_update,
         "luck_level": user.luck_level,
@@ -527,6 +529,7 @@ async def add_user(user_id: int, username: str = None, referrer_id: int = None):
             multitap_level=0,
             profit_level=0,
             energy_level=0,
+            rebirth_count=0,
             luck_level=0,
             last_passive_income=datetime.utcnow(),
             last_energy_update=datetime.utcnow(),
@@ -568,6 +571,7 @@ async def update_user(user_id: int, data: dict):
         "profit_level",
         "energy_level",
         "boost_level",
+        "rebirth_count",
         "last_passive_income",
         "last_energy_update",
         "referrer_id",
@@ -611,6 +615,8 @@ async def update_user(user_id: int, data: dict):
             user.energy_level = data["energy_level"]
         if "boost_level" in data:
             user.boost_level = data["boost_level"]
+        if "rebirth_count" in data:
+            user.rebirth_count = data["rebirth_count"]
         if "last_passive_income" in data:
             user.last_passive_income = data["last_passive_income"]
         if "last_energy_update" in data:

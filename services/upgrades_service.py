@@ -5,6 +5,7 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
 from core.upgrades.calculator import calc_upgrade_price, calc_upgrade_value
+from core.game_logic import get_tap_value_with_rebirth
 from observability.metrics import observe_storage_error, observe_storage_timing
 
 
@@ -43,7 +44,8 @@ async def apply_global_upgrade_for_user_service(
 
     new_level = current_level + 1
     new_values = calc_upgrade_value(new_level)
-    new_profit_per_tap = new_values.tap_power
+    rebirth_count = max(0, int(user.get("rebirth_count", 0)))
+    new_profit_per_tap = get_tap_value_with_rebirth(new_level, rebirth_count)
     new_profit_per_hour = new_values.profit_per_hour
     new_max_energy = new_values.max_energy
     new_coins = current_coins - price

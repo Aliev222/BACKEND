@@ -191,6 +191,10 @@ from services.upgrades_service import (
     process_upgrade_all_service,
     process_upgrade_service,
 )
+from services.rebirth_service import (
+    RebirthServiceDeps,
+    process_rebirth_service,
+)
 
 
 router = APIRouter()
@@ -1525,6 +1529,7 @@ async def update_user_if_matches(user_id: int, expected: dict, data: dict):
         "profit_level",
         "energy_level",
         "boost_level",
+        "rebirth_count",
         "last_passive_income",
         "last_energy_update",
         "referrer_id",
@@ -2409,6 +2414,13 @@ async def process_upgrade_all(payload: UserIdRequest, request: Request):
     )
 
 
+@router.post("/api/rebirth")
+async def process_rebirth(payload: UserIdRequest, request: Request):
+    return await process_rebirth_service(
+        payload, request, _build_rebirth_service_deps()
+    )
+
+
 @router.post("/api/update-energy")
 async def update_energy(payload: AdActionClaimRequest, request: Request):
     return await update_energy_reward_service(
@@ -2736,6 +2748,20 @@ def _build_upgrades_service_deps() -> UpgradesServiceDeps:
         logger=logger,
         GLOBAL_UPGRADE_PRICES=GLOBAL_UPGRADE_PRICES,
         MAX_UPGRADE_LEVEL=MAX_UPGRADE_LEVEL,
+    )
+
+
+def _build_rebirth_service_deps() -> RebirthServiceDeps:
+    return RebirthServiceDeps(
+        require_telegram_user=require_telegram_user,
+        require_dual_rate_limit=require_dual_rate_limit,
+        require_user_action_lock=require_user_action_lock,
+        get_user=get_user,
+        update_user_if_matches=update_user_if_matches,
+        invalidate_user_cache=invalidate_user_cache,
+        get_redis_or_none=get_redis_or_none,
+        logger=logger,
+        ENERGY_REGEN_SECONDS=ENERGY_REGEN_SECONDS,
     )
 
 

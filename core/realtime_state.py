@@ -23,7 +23,7 @@ from core.game_config import (
     USER_CACHE_PREFIX,
     USER_CACHE_TTL,
 )
-from core.game_logic import get_hour_value, get_tap_value, get_max_energy
+from core.game_logic import get_hour_value, get_tap_value_with_rebirth, get_max_energy
 from core.ton_utils import get_ton_wallet_from_user
 from core.skins import normalize_owned_skins, normalize_selected_skin, DEFAULT_SKIN_ID
 from core.tasks import get_active_video_task_boost
@@ -251,6 +251,7 @@ async def build_realtime_player_state(user_id: int) -> dict | None:
     energy_level = int(profile.get("energy_level", 0))
     multitap_level = int(profile.get("multitap_level", 0))
     profit_level = int(profile.get("profit_level", 0))
+    rebirth_count = int(profile.get("rebirth_count", 0))
     max_energy = get_max_energy(energy_level)
 
     # 4. Read authoritative energy from energy:v2
@@ -302,7 +303,7 @@ async def build_realtime_player_state(user_id: int) -> dict | None:
     ton_wallet = get_ton_wallet_from_user({"extra_data": extra})
 
     # 10. Compute derived values
-    tap_value = get_tap_value(multitap_level)
+    tap_value = get_tap_value_with_rebirth(multitap_level, rebirth_count)
     profit_per_hour = get_hour_value(profit_level)
 
     # 11. State ordering fields (timestamp-based)
@@ -316,6 +317,7 @@ async def build_realtime_player_state(user_id: int) -> dict | None:
         "multitap_level": multitap_level,
         "profit_level": profit_level,
         "energy_level": energy_level,
+        "rebirth_count": rebirth_count,
         "referral_count": int(profile.get("referral_count", 0)),
         "referral_earnings": int(profile.get("referral_earnings", 0)),
         # Authoritative hot state

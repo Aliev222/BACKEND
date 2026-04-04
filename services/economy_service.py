@@ -7,7 +7,7 @@ from repositories.user_repo import (
     spend_coins_if_enough,
     update_user_atomic,
 )
-from core.game_logic import get_tap_value, get_hour_value, get_max_energy
+from core.game_logic import get_tap_value_with_rebirth, get_hour_value, get_max_energy
 from core.game_config import GLOBAL_UPGRADE_PRICES, MAX_UPGRADE_LEVEL
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,7 @@ async def apply_global_upgrade(session: AsyncSession, user_id: int) -> dict:
     multitap_level = int(user.get("multitap_level", 0))
     profit_level = int(user.get("profit_level", 0))
     energy_level = int(user.get("energy_level", 0))
+    rebirth_count = max(0, int(user.get("rebirth_count", 0) or 0))
 
     global_level = max(multitap_level, profit_level, energy_level)
     if global_level >= MAX_UPGRADE_LEVEL:
@@ -37,7 +38,7 @@ async def apply_global_upgrade(session: AsyncSession, user_id: int) -> dict:
         raise HTTPException(status_code=409, detail="Concurrent modification, retry")
 
     new_level = global_level + 1
-    new_tap_value = get_tap_value(new_level)
+    new_tap_value = get_tap_value_with_rebirth(new_level, rebirth_count)
     new_hour_value = get_hour_value(new_level)
     new_max_energy = get_max_energy(new_level)
 

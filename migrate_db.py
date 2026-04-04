@@ -61,6 +61,10 @@ def migrate() -> None:
         """,
         """
         ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS rebirth_count INTEGER DEFAULT 0
+        """,
+        """
+        ALTER TABLE users
         ADD COLUMN IF NOT EXISTS luck_level INTEGER DEFAULT 0
         """,
         """

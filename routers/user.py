@@ -10,7 +10,7 @@ from routers.auth import require_telegram_user
 from core.game_logic import (
     calculate_current_energy,
     resolve_max_energy,
-    get_tap_value,
+    get_tap_value_with_rebirth,
     get_hour_value,
 )
 from core.game_config import ENERGY_REGEN_SECONDS
@@ -131,6 +131,7 @@ async def get_user_data(request: Request):
     multitap_level = int(user.get("multitap_level", 0))
     profit_level = int(user.get("profit_level", 0))
     energy_level = int(user.get("energy_level", 0))
+    rebirth_count = max(0, int(user.get("rebirth_count", 0) or 0))
 
     return {
         "user_id": user["user_id"],
@@ -138,12 +139,13 @@ async def get_user_data(request: Request):
         "coins": user.get("coins", 0),
         "energy": current_energy,
         "max_energy": max_energy,
-        "profit_per_tap": get_tap_value(multitap_level),
+        "profit_per_tap": get_tap_value_with_rebirth(multitap_level, rebirth_count),
         "profit_per_hour": get_hour_value(profit_level),
         "multitap_level": multitap_level,
         "profit_level": profit_level,
         "energy_level": energy_level,
         "level": user.get("level", 0),
+        "rebirth_count": rebirth_count,
         "owned_skins": owned_skins,
         "selected_skin": selected_skin,
         "ads_watched": extra.get("ads_watched", 0),
@@ -188,6 +190,7 @@ async def register_user(request: Request):
                 "profit_level": existing.get("profit_level", 0),
                 "energy_level": existing.get("energy_level", 0),
                 "level": existing.get("level", 0),
+                "rebirth_count": existing.get("rebirth_count", 0),
                 "owned_skins": _get_owned_skins(
                     _parse_extra(existing.get("extra_data", {}))
                 ),
@@ -223,6 +226,7 @@ async def register_user(request: Request):
             "profit_level": user.profit_level,
             "energy_level": user.energy_level,
             "level": user.level,
+            "rebirth_count": user.rebirth_count,
             "owned_skins": ["default.pngSP"],
             "selected_skin": "default.pngSP",
             "ads_watched": 0,

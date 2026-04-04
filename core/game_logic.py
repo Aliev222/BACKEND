@@ -60,6 +60,13 @@ def get_tap_value(level: int) -> int:
     return 1 + level
 
 
+def get_tap_value_with_rebirth(level: int, rebirth_count: int) -> int:
+    lvl = max(0, int(level))
+    rebirths = max(0, int(rebirth_count))
+    # Base: +1 tap per level. Rebirth adds +1 extra tap per level per rebirth.
+    return 1 + (lvl * (1 + rebirths))
+
+
 def get_hour_value(level: int) -> int:
     level = max(0, int(level))
     return 100 + (level * 35) + (level * level * 7)
