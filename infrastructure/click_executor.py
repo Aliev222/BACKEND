@@ -27,6 +27,9 @@ class ClickResult:
     task_tap_boost_active: bool
     task_tap_boost_multiplier: int
     ghost_boost_multiplier: int
+    energy_regen: int
+    click_streak: int
+    version: int
 
 
 _LUA_PATH = Path(__file__).resolve().parent / "lua" / "click.lua"
@@ -44,7 +47,7 @@ async def process_click_lua(
 ) -> ClickResult:
     raw = await redis.eval(_CLICK_LUA, len(keys), *keys, *args)
     values = list(raw or [])
-    while len(values) < 18:
+    while len(values) < 21:
         values.append(0)
     return ClickResult(
         status=int(values[0]),
@@ -65,4 +68,7 @@ async def process_click_lua(
         task_tap_boost_active=int(values[15]) == 1,
         task_tap_boost_multiplier=int(values[16]),
         ghost_boost_multiplier=int(values[17]),
+        energy_regen=int(values[18]),
+        click_streak=int(values[19]),
+        version=int(values[20]),
     )

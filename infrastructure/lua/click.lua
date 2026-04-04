@@ -29,6 +29,7 @@ local regen_seconds = tonumber(ARGV[15])
 local user_id = ARGV[16]
 local base_max_energy = tonumber(ARGV[17])
 local ghost_boost_multiplier_default = tonumber(ARGV[18])
+local hot_state_version_default = 1
 
 local function json_decode_or_empty(raw)
     if not raw or raw == '' then
@@ -70,10 +71,15 @@ if redis.call('EXISTS', user_hot_key) == 0 then
         'coins', '0',
         'energy', tostring(base_max_energy),
         'last_energy_ts', tostring(now_ts),
+        'tap_power', '1',
+        'energy_regen', tostring(regen_seconds),
         'multitap_level', '0',
         'profit_level', '0',
         'energy_level', '0',
         'max_energy', tostring(base_max_energy),
+        'click_streak', '0',
+        'suspicion_score', '0',
+        'version', tostring(hot_state_version_default),
         'skin_multiplier', '1',
         'boosts', '{}',
         'flags', '{}'
@@ -83,9 +89,14 @@ end
 local hot_coins = tonumber(redis.call('HGET', user_hot_key, 'coins') or '0')
 local hot_energy = tonumber(redis.call('HGET', user_hot_key, 'energy') or tostring(base_max_energy))
 local hot_last_energy_ts = tonumber(redis.call('HGET', user_hot_key, 'last_energy_ts') or tostring(now_ts))
+local hot_tap_power = tonumber(redis.call('HGET', user_hot_key, 'tap_power') or '1')
+local hot_energy_regen = tonumber(redis.call('HGET', user_hot_key, 'energy_regen') or tostring(regen_seconds))
 local multitap_level = tonumber(redis.call('HGET', user_hot_key, 'multitap_level') or '0')
 local profit_level = tonumber(redis.call('HGET', user_hot_key, 'profit_level') or '0')
 local energy_level = tonumber(redis.call('HGET', user_hot_key, 'energy_level') or '0')
+local hot_click_streak = tonumber(redis.call('HGET', user_hot_key, 'click_streak') or '0')
+local hot_suspicion_score = tonumber(redis.call('HGET', user_hot_key, 'suspicion_score') or '0')
+local hot_version = tonumber(redis.call('HGET', user_hot_key, 'version') or tostring(hot_state_version_default))
 local skin_multiplier = tonumber(redis.call('HGET', user_hot_key, 'skin_multiplier') or '1')
 local max_energy = tonumber(redis.call('HGET', user_hot_key, 'max_energy') or tostring(base_max_energy))
 local boosts = json_decode_or_empty(redis.call('HGET', user_hot_key, 'boosts'))
@@ -95,11 +106,20 @@ if type(flags['click_guard']) == 'table' then
     click_guard = flags['click_guard']
 end
 local prev_suspicion_score = tonumber(click_guard['suspicion_score'] or '0')
+if prev_suspicion_score <= 0 and hot_suspicion_score > 0 then
+    prev_suspicion_score = hot_suspicion_score
+end
+if hot_version < 1 then
+    hot_version = hot_state_version_default
+end
 
 if max_energy <= 0 then
     max_energy = math.min(1000, base_max_energy + (energy_level * 5))
 end
-local tap_value = 1 + multitap_level
+local tap_value = hot_tap_power
+if tap_value <= 0 then
+    tap_value = 1 + multitap_level
+end
 local profit_per_hour = 100 + (profit_level * 35) + (profit_level * profit_level * 7)
 
 local mega_boost_active = boosts['mega_boost_active'] == true
@@ -156,7 +176,11 @@ local elapsed = now_ts - stored_updated
 if elapsed < 0 then
     elapsed = 0
 end
-local regen = math.floor(elapsed / regen_seconds)
+local effective_regen_seconds = hot_energy_regen
+if not effective_regen_seconds or effective_regen_seconds <= 0 then
+    effective_regen_seconds = regen_seconds
+end
+local regen = math.floor(elapsed / effective_regen_seconds)
 local current_energy = stored_value
 if regen > 0 then
     current_energy = math.min(stored_max, stored_value + regen)
@@ -249,12 +273,23 @@ if new_suspicion_score >= suspicion_soft_limit then
 end
 redis.call('SET', click_guard_key, cjson.encode(guard_payload), 'EX', 300)
 flags['click_guard'] = guard_payload
+local new_click_streak = hot_click_streak
+if effective_clicks > 0 then
+    new_click_streak = hot_click_streak + 1
+else
+    new_click_streak = 0
+end
 
 redis.call('HSET', user_hot_key,
     'coins', tostring(new_coins),
     'energy', tostring(new_energy),
     'last_energy_ts', tostring(now_ts),
+    'tap_power', tostring(tap_value),
+    'energy_regen', tostring(effective_regen_seconds),
     'max_energy', tostring(max_energy),
+    'click_streak', tostring(new_click_streak),
+    'suspicion_score', tostring(new_suspicion_score),
+    'version', tostring(hot_version),
     'profit_per_hour', tostring(profit_per_hour),
     'boosts', cjson.encode(boosts),
     'flags', cjson.encode(flags)
@@ -278,5 +313,8 @@ return {
     daily_infinite_energy_active and 1 or 0,
     task_tap_boost_active and 1 or 0,
     task_tap_boost_multiplier,
-    ghost_boost_multiplier
+    ghost_boost_multiplier,
+    effective_regen_seconds,
+    new_click_streak,
+    hot_version
 }
