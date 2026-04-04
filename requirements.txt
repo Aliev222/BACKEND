@@ -5,6 +5,7 @@ python-dotenv
 asyncpg
 aiosqlite
 sqlalchemy
+psycopg2-binary
 httpx
 python-multipart
 aiohttp
