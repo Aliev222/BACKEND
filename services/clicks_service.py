@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
+from observability.metrics import observe_storage_error, observe_storage_timing
 
 
 def _is_trace_enabled() -> bool:
@@ -22,6 +23,16 @@ CLICK_TRACE_TIMING = _is_trace_enabled()
 
 def _ms_since(start_ts: float) -> float:
     return round((time.perf_counter() - start_ts) * 1000, 2)
+
+
+def _observe_store(store: str, operation: str, started_at: float, outcome: str = "ok") -> None:
+    observe_storage_timing(
+        store,
+        operation,
+        "clicks",
+        time.perf_counter() - started_at,
+        outcome=outcome,
+    )
 
 
 ATOMIC_CLICK_MUTATION_LUA = """
@@ -199,6 +210,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
         t = time.perf_counter()
         user = await deps.get_user_cached(payload.user_id)
         mark("user_profile_hot_state_load", t)
+        _observe_store("db", "get_user_cached", t)
 
         if payload.clicks > deps.MAX_CLICK_BATCH_SIZE:
             flush_trace("too_many_clicks")
@@ -318,6 +330,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             str(deps.CLICK_SUSPICIOUS_OVERSHOOT),
         )
         mark("atomic_redis_click_mutation", t)
+        _observe_store("redis", "atomic_click_mutation", t)
 
         status = int(atomic_result[0])
         if status == -1:
@@ -347,6 +360,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
                 str(deps.CLICK_SUSPICIOUS_OVERSHOOT),
             )
             mark("atomic_redis_click_mutation_reinit", t)
+            _observe_store("redis", "atomic_click_mutation_reinit", t)
             status = int(atomic_result[0])
 
         if status == -2:
@@ -362,6 +376,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             t = time.perf_counter()
             await deps.update_user(payload.user_id, {"extra_data": extra})
             mark("anti_fraud_db_update", t)
+            _observe_store("db", "update_user_anti_fraud", t)
             deps.logger.warning(
                 "Rejected suspicious click batch user=%s ip=%s requested=%s allowed=%s",
                 payload.user_id,
@@ -421,8 +436,11 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
                     ex=300,
                 )
                 await pipe.execute()
+            _observe_store("redis", "post_mutation_activity_guard", t)
         except Exception as e:
             deps.logger.warning("Redis activity/click_guard write failed (non-critical): %s", e)
+            _observe_store("redis", "post_mutation_activity_guard", t, outcome="error")
+            observe_storage_error("redis", "post_mutation_activity_guard", "clicks")
         mark("post_mutation_redis_activity_and_guard", t)
 
         t = time.perf_counter()
@@ -444,8 +462,10 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
                     pipe.expire(referral_pending_key, 300)
 
                 await pipe.execute()
+            _observe_store("redis", "post_mutation_side_effects", t)
         else:
             referral_bonus = 0
+            _observe_store("redis", "post_mutation_side_effects", t)
         mark("post_mutation_redis_side_effects", t)
 
         t = time.perf_counter()
@@ -477,6 +497,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
         raise
     except Exception as e:
         deps.logger.error(f"Error in process_clicks_batch: {e}")
+        observe_storage_error("app", "process_clicks_batch", "clicks")
         flush_trace("unexpected_exception")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -484,7 +505,9 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
 async def sync_energy_service(payload: Any, request: Any, deps: ClicksServiceDeps):
     try:
         await deps.require_telegram_user(request, payload.user_id)
+        t = time.perf_counter()
         user = await deps.get_user_cached(payload.user_id)
+        _observe_store("db", "get_user_cached", t)
 
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -499,7 +522,9 @@ async def sync_energy_service(payload: Any, request: Any, deps: ClicksServiceDep
         energy_updated_at = now.timestamp()
 
         if redis_conn:
+            t = time.perf_counter()
             cached = await redis_conn.hgetall(energy_key)
+            _observe_store("redis", "sync_energy_hgetall", t)
             if cached:
                 cached_max = int(cached.get("max_energy", max_energy))
                 cached_value = int(cached.get("value", 0))
@@ -541,7 +566,9 @@ async def sync_energy_service(payload: Any, request: Any, deps: ClicksServiceDep
         if int(user.get("max_energy", max_energy)) != max_energy:
             update_data["max_energy"] = max_energy
         if update_data:
+            t = time.perf_counter()
             await deps.update_user(payload.user_id, update_data)
+            _observe_store("db", "update_user_sync_energy", t)
 
         state_updated_at = int(energy_updated_at * 1000)
 
@@ -558,4 +585,5 @@ async def sync_energy_service(payload: Any, request: Any, deps: ClicksServiceDep
         raise
     except Exception as e:
         deps.logger.error(f"Error in sync_energy: {e}")
+        observe_storage_error("app", "sync_energy", "clicks")
         raise HTTPException(status_code=500, detail="Internal server error")

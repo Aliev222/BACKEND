@@ -27,6 +27,7 @@ from typing import Optional
 from sqlalchemy import select, func
 from DATABASE.base import AsyncSessionLocal, User
 from infrastructure.redis import init_redis, close_redis
+from observability.metrics import observe_storage_timing, observe_worker_loop
 
 logger = logging.getLogger("reconcile_coins")
 
@@ -72,22 +73,28 @@ async def reconcile_user(user_id: int, redis_conn) -> UserReconciliation:
     result = UserReconciliation(user_id=user_id)
 
     # DB coins
+    t = time.perf_counter()
     async with AsyncSessionLocal() as session:
         user = await session.execute(select(User).where(User.user_id == user_id))
         user_row = user.scalar_one_or_none()
         if user_row:
             result.db_coins = int(user_row.coins or 0)
+    observe_storage_timing("db", "reconcile_user_db_read", "reconcile", time.perf_counter() - t)
 
     # Redis coins_hot
     hot_key = f"coins_hot:{user_id}"
+    t = time.perf_counter()
     hot_val = await redis_conn.get(hot_key)
+    observe_storage_timing("redis", "reconcile_hot_get", "reconcile", time.perf_counter() - t)
     result.hot_exists = hot_val is not None
     if hot_val is not None:
         result.hot_coins = int(hot_val)
 
     # Redis coins_pending
     pending_key = f"coins_pending:{user_id}"
+    t = time.perf_counter()
     pending_val = await redis_conn.get(pending_key)
+    observe_storage_timing("redis", "reconcile_pending_get", "reconcile", time.perf_counter() - t)
     result.pending_exists = pending_val is not None
     if pending_val is not None:
         result.pending_coins = int(pending_val)
@@ -95,13 +102,17 @@ async def reconcile_user(user_id: int, redis_conn) -> UserReconciliation:
     # Redis coins_flushing
     cursor = 0
     while True:
+        t = time.perf_counter()
         cursor, keys = await redis_conn.scan(
             cursor, match=f"coins_flushing:{user_id}:*", count=100
         )
+        observe_storage_timing("redis", "reconcile_flushing_scan", "reconcile", time.perf_counter() - t)
         for key in keys:
             key_str = key if isinstance(key, str) else key.decode()
             result.flushing_keys.append(key_str)
+            t = time.perf_counter()
             val = await redis_conn.get(key_str)
+            observe_storage_timing("redis", "reconcile_flushing_get", "reconcile", time.perf_counter() - t)
             if val:
                 result.flushing_coins += int(val)
         result.flushing_batches = len(result.flushing_keys)
@@ -226,6 +237,7 @@ async def main():
             redis_conn, user_ids=user_ids, limit=args.limit
         )
         elapsed = (time.monotonic() - start) * 1000
+        observe_worker_loop("reconcile_coins", "run", elapsed / 1000.0, flushed=len(results))
         logger.info("Reconciliation completed in %.0fms", elapsed)
         print_report(results, as_json=args.json)
     finally:

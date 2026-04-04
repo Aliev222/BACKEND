@@ -1,8 +1,9 @@
 import os
 import logging
 import asyncio
+import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from infrastructure.database import engine, AsyncSessionLocal, healthcheck_db
@@ -20,6 +21,7 @@ from routers.passive import router as passive_router
 from routers.referrals import router_legacy as referrals_legacy_router
 from routers.ton_wallet import router as ton_wallet_router
 from workers import referral_flush, tournament_flush, coins_flush
+from observability.metrics import observe_http_request
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +116,29 @@ app.include_router(tasks_legacy_router)
 app.include_router(passive_router)
 app.include_router(referrals_legacy_router)
 app.include_router(ton_wallet_router)
+
+
+@app.middleware("http")
+async def api_metrics_middleware(request: Request, call_next):
+    started_at = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        observe_http_request(
+            request.method,
+            request.url.path,
+            500,
+            time.perf_counter() - started_at,
+        )
+        raise
+
+    observe_http_request(
+        request.method,
+        request.url.path,
+        response.status_code,
+        time.perf_counter() - started_at,
+    )
+    return response
 
 
 @app.get("/health")

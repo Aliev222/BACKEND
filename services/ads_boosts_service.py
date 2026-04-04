@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
+from observability.metrics import observe_storage_error, observe_storage_timing
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ async def create_ad_action_session_service(
     )
 
     async def _write_session_once(redis_conn):
+        started_at = time.perf_counter()
         await redis_conn.setex(
             session_key,
             deps.AD_ACTION_SESSION_TTL_SECONDS,
@@ -81,16 +83,24 @@ async def create_ad_action_session_service(
             )
         except Exception:
             pass
+        observe_storage_timing(
+            "redis",
+            "ad_action_session_create",
+            "ads_boosts",
+            time.perf_counter() - started_at,
+        )
 
     redis_conn = await deps.ensure_redis_available()
     try:
         await _write_session_once(redis_conn)
     except Exception:
+        observe_storage_error("redis", "ad_action_session_create", "ads_boosts")
         # Transient Redis connection can drop mid-operation; retry once.
         redis_conn = await deps.ensure_redis_available()
         try:
             await _write_session_once(redis_conn)
         except Exception:
+            observe_storage_error("redis", "ad_action_session_create", "ads_boosts")
             raise HTTPException(
                 status_code=503, detail="Ad session temporarily unavailable"
             )
@@ -102,7 +112,9 @@ async def mark_ad_action_session_verified_service(
 ) -> bool:
     redis_conn = await deps.ensure_redis_available()
     session_key = f"adsession:action:{ad_session_id}"
+    t = time.perf_counter()
     raw = await redis_conn.get(session_key)
+    observe_storage_timing("redis", "ad_session_get_for_verify", "ads_boosts", time.perf_counter() - t)
     if not raw:
         return False
 
@@ -115,9 +127,11 @@ async def mark_ad_action_session_verified_service(
     session["verified_at"] = time.time()
     session["postback_payload"] = postback_payload
 
+    t = time.perf_counter()
     ttl = await redis_conn.ttl(session_key)
     ttl = max(int(ttl or 0), 300)
     await redis_conn.setex(session_key, ttl, json.dumps(session))
+    observe_storage_timing("redis", "ad_session_verify_write", "ads_boosts", time.perf_counter() - t)
     return True
 
 
@@ -131,7 +145,9 @@ async def mark_ad_action_session_verified_for_user_service(
 ) -> bool:
     redis_conn = await deps.ensure_redis_available()
     session_key = f"adsession:action:{ad_session_id}"
+    t = time.perf_counter()
     raw = await redis_conn.get(session_key)
+    observe_storage_timing("redis", "ad_session_get_for_consume", "ads_boosts", time.perf_counter() - t)
     if not raw:
         return False
 
@@ -265,12 +281,17 @@ async def consume_ad_action_session_service(
                 raise HTTPException(status_code=400, detail="Ad watch is not completed yet")
 
     session["claimed"] = True
+    t = time.perf_counter()
     await redis_conn.setex(session_key, 60, json.dumps(session))
+    observe_storage_timing("redis", "ad_session_consume_write", "ads_boosts", time.perf_counter() - t)
     try:
+        t = time.perf_counter()
         active_session_id = await redis_conn.get(active_session_key)
         if active_session_id == ad_session_id:
             await redis_conn.delete(active_session_key)
+        observe_storage_timing("redis", "ad_session_active_cleanup", "ads_boosts", time.perf_counter() - t)
     except Exception:
+        observe_storage_error("redis", "ad_session_active_cleanup", "ads_boosts")
         pass
     return session
 
@@ -282,7 +303,9 @@ async def ad_action_start_service(payload: Any, request: Any, deps: AdsBoostsSer
             "ad_action_start", request, payload.user_id, 20, 60, ip_limit=40
         )
 
+        t = time.perf_counter()
         user = await deps.get_user_cached(payload.user_id)
+        observe_storage_timing("db", "get_user_cached", "ads_boosts", time.perf_counter() - t)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -298,6 +321,7 @@ async def ad_action_start_service(payload: Any, request: Any, deps: AdsBoostsSer
         raise
     except Exception as e:
         deps.logger.exception("Error in ad_action_start")
+        observe_storage_error("app", "ad_action_start", "ads_boosts")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -328,6 +352,7 @@ async def adsgram_complete_locally_service(
         raise
     except Exception as e:
         deps.logger.error(f"Error in adsgram_complete_locally: {e}")
+        observe_storage_error("app", "adsgram_complete", "ads_boosts")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -340,7 +365,9 @@ async def activate_mega_boost_service(payload: Any, request: Any, deps: AdsBoost
         await consume_ad_action_session_service(
             payload.user_id, payload.ad_session_id, "mega_boost", deps
         )
+        t = time.perf_counter()
         user = await deps.get_user_cached(payload.user_id)
+        observe_storage_timing("db", "get_user_cached", "ads_boosts", time.perf_counter() - t)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -384,7 +411,9 @@ async def activate_mega_boost_service(payload: Any, request: Any, deps: AdsBoost
         active_boosts["mega_boost"] = {"active": True, "expires_at": expires_at}
         extra["mega_boost_cooldown_until"] = cooldown_until_value
         extra["active_boosts"] = active_boosts
+        t = time.perf_counter()
         await deps.update_user(payload.user_id, {"extra_data": extra})
+        observe_storage_timing("db", "update_user", "ads_boosts", time.perf_counter() - t)
         await deps.invalidate_user_cache(payload.user_id)
         await deps.record_rewarded_ad_claim(
             payload.user_id, "boost", {"source_action": "mega_boost"}
@@ -401,6 +430,7 @@ async def activate_mega_boost_service(payload: Any, request: Any, deps: AdsBoost
         raise
     except Exception as e:
         deps.logger.error(f"Error in activate_mega_boost: {e}")
+        observe_storage_error("app", "activate_mega_boost", "ads_boosts")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -413,7 +443,9 @@ async def activate_ghost_boost_service(payload: Any, request: Any, deps: AdsBoos
         await consume_ad_action_session_service(
             payload.user_id, payload.ad_session_id, "ghost_boost", deps
         )
+        t = time.perf_counter()
         user = await deps.get_user_cached(payload.user_id)
+        observe_storage_timing("db", "get_user_cached", "ads_boosts", time.perf_counter() - t)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -448,7 +480,9 @@ async def activate_ghost_boost_service(payload: Any, request: Any, deps: AdsBoos
         }
         extra["active_boosts"] = active_boosts
 
+        t = time.perf_counter()
         await deps.update_user(payload.user_id, {"extra_data": extra})
+        observe_storage_timing("db", "update_user", "ads_boosts", time.perf_counter() - t)
         await deps.invalidate_user_cache(payload.user_id)
         await deps.record_rewarded_ad_claim(
             payload.user_id, "ghost", {"source_action": "ghost_boost"}
@@ -465,6 +499,7 @@ async def activate_ghost_boost_service(payload: Any, request: Any, deps: AdsBoos
         raise
     except Exception as e:
         deps.logger.error(f"Error in activate_ghost_boost: {e}")
+        observe_storage_error("app", "activate_ghost_boost", "ads_boosts")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -479,7 +514,9 @@ async def increment_ads_watched_service(
         await consume_ad_action_session_service(
             payload.user_id, payload.ad_session_id, "ads_increment", deps
         )
+        t = time.perf_counter()
         user = await deps.get_user_cached(payload.user_id)
+        observe_storage_timing("db", "get_user_cached", "ads_boosts", time.perf_counter() - t)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -540,7 +577,9 @@ async def increment_ads_watched_service(
                 extra["skin_ad_last_watch"] = last_watch
                 ready_to_unlock = current_count >= required_count
 
+        t = time.perf_counter()
         await deps.update_user(payload.user_id, {"extra_data": extra})
+        observe_storage_timing("db", "update_user", "ads_boosts", time.perf_counter() - t)
         await deps.record_rewarded_ad_claim(
             payload.user_id,
             "skins",
@@ -561,6 +600,7 @@ async def increment_ads_watched_service(
         raise
     except Exception as e:
         deps.logger.error(f"Error in increment_ads_watched: {e}")
+        observe_storage_error("app", "increment_ads_watched", "ads_boosts")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -577,7 +617,9 @@ async def update_energy_service(payload: Any, request: Any, deps: AdsBoostsServi
         await deps.require_user_action_lock("update_energy", user_id, ttl=3)
         if not user_id:
             raise HTTPException(status_code=400, detail="user_id required")
+        t = time.perf_counter()
         user = await deps.get_user_cached(user_id)
+        observe_storage_timing("db", "get_user_cached", "ads_boosts", time.perf_counter() - t)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -599,6 +641,7 @@ async def update_energy_service(payload: Any, request: Any, deps: AdsBoostsServi
         ).isoformat()
         extra["energy_refill_cooldown_until"] = cooldown_until_value
 
+        t = time.perf_counter()
         await deps.update_user(
             user_id,
             {
@@ -608,9 +651,11 @@ async def update_energy_service(payload: Any, request: Any, deps: AdsBoostsServi
                 "extra_data": extra,
             },
         )
+        observe_storage_timing("db", "update_user", "ads_boosts", time.perf_counter() - t)
         try:
             redis_conn = await deps.get_redis_or_none()
             if redis_conn:
+                t = time.perf_counter()
                 await redis_conn.hset(
                     f"energy:v2:{user_id}",
                     mapping={
@@ -619,7 +664,9 @@ async def update_energy_service(payload: Any, request: Any, deps: AdsBoostsServi
                         "max_energy": str(max_energy),
                     },
                 )
+                observe_storage_timing("redis", "energy_v2_hset", "ads_boosts", time.perf_counter() - t)
         except Exception:
+            observe_storage_error("redis", "energy_v2_hset", "ads_boosts")
             pass
 
         await deps.record_rewarded_ad_claim(
@@ -640,6 +687,7 @@ async def update_energy_service(payload: Any, request: Any, deps: AdsBoostsServi
         raise
     except Exception as e:
         deps.logger.error(f"Error in update_energy: {e}")
+        observe_storage_error("app", "update_energy", "ads_boosts")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

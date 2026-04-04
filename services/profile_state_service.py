@@ -1,7 +1,9 @@
+import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
+from observability.metrics import observe_storage_error, observe_storage_timing
 
 
 @dataclass(frozen=True)
@@ -90,18 +92,28 @@ async def get_user_data_service(
 ):
     try:
         await deps.require_telegram_user(request, user_id)
+        t = time.perf_counter()
         user = await deps.get_user_cached(user_id)
+        observe_storage_timing("db", "get_user_cached", "profile", time.perf_counter() - t)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         await deps.touch_user_activity(user_id, user)
 
         redis_conn = await deps.get_redis_or_none()
         if redis_conn:
+            t = time.perf_counter()
             hot_exists = await redis_conn.exists(f"coins_hot:{user_id}")
+            observe_storage_timing("redis", "coins_hot_exists", "profile", time.perf_counter() - t)
             if not hot_exists:
+                t = time.perf_counter()
                 db_user = await deps.get_user(user_id)
+                observe_storage_timing("db", "get_user", "profile", time.perf_counter() - t)
                 db_coins = int((db_user or {}).get("coins", 0))
+                t = time.perf_counter()
                 await ensure_coins_hot_initialized(user_id, db_coins, redis_conn)
+                observe_storage_timing(
+                    "redis", "ensure_coins_hot_initialized", "profile", time.perf_counter() - t
+                )
 
         state = await deps.build_realtime_player_state(user_id)
         if state is None:
@@ -113,4 +125,5 @@ async def get_user_data_service(
         raise
     except Exception as e:
         deps.logger.error(f"Error in get_user_data: {e}")
+        observe_storage_error("app", "get_user_data", "profile")
         raise HTTPException(status_code=500, detail="Internal server error")

@@ -23,6 +23,7 @@ from DATABASE.base import (
 )
 from core.game_config import TOURNAMENT_KEY
 from infrastructure.redis import init_redis, close_redis
+from observability.metrics import observe_worker_loop
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from datetime import datetime
 from workers.worker_health import (
@@ -47,6 +48,7 @@ async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
     Snapshot Redis ZSET leaderboard to PostgreSQL.
     Returns number of entries flushed.
     """
+    flush_started_at = time.perf_counter()
     entries = await redis_conn.zrevrange(
         TOURNAMENT_KEY, 0, LEADERBOARD_LIMIT - 1, withscores=True
     )
@@ -101,6 +103,12 @@ async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
 
         await session.commit()
 
+    observe_worker_loop(
+        WORKER_NAME,
+        "flush",
+        time.perf_counter() - flush_started_at,
+        flushed=flushed,
+    )
     return flushed
 
 
@@ -127,9 +135,22 @@ async def tournament_flush_loop():
                     logger.info("Flushed %d tournament entries to DB", flushed)
             except Exception as e:
                 error = str(e)
+                observe_worker_loop(
+                    WORKER_NAME,
+                    "flush",
+                    0.0,
+                    error=e,
+                )
                 log_worker_error(WORKER_NAME, error)
 
             loop_ms = (time.monotonic() - loop_start) * 1000
+            observe_worker_loop(
+                WORKER_NAME,
+                "loop",
+                loop_ms / 1000.0,
+                error=error,
+                flushed=flushed,
+            )
 
             # Leaderboard size for lag visibility
             pending_count = 0

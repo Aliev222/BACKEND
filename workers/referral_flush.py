@@ -17,6 +17,7 @@ import redis.asyncio as redis
 from DATABASE.base import AsyncSessionLocal, User
 from infrastructure.redis import init_redis, close_redis
 from infrastructure.coins_hot_sync import sync_hot_after_db_increment
+from observability.metrics import observe_worker_loop
 from sqlalchemy import update, text
 from workers.worker_health import (
     worker_heartbeat,
@@ -59,6 +60,7 @@ async def flush_referral_pending(redis_conn: redis.Redis) -> int:
     2. DB update + log insert
     3. Cleanup: DEL processing
     """
+    flush_started_at = time.perf_counter()
     # Lua: atomic move pending → processing
     move_script = """
     local pending_key = KEYS[1]
@@ -204,6 +206,12 @@ async def flush_referral_pending(redis_conn: redis.Redis) -> int:
             )
         flushed += 1
 
+    observe_worker_loop(
+        WORKER_NAME,
+        "flush",
+        time.perf_counter() - flush_started_at,
+        flushed=flushed,
+    )
     return flushed
 
 
@@ -231,6 +239,12 @@ async def referral_flush_loop():
                     logger.info("Flushed referral bonuses for %d users", flushed)
             except Exception as e:
                 error = str(e)
+                observe_worker_loop(
+                    WORKER_NAME,
+                    "flush",
+                    0.0,
+                    error=e,
+                )
                 log_worker_error(WORKER_NAME, error)
 
             # Stuck key detection
@@ -242,6 +256,13 @@ async def referral_flush_loop():
             )
 
             loop_ms = (time.monotonic() - loop_start) * 1000
+            observe_worker_loop(
+                WORKER_NAME,
+                "loop",
+                loop_ms / 1000.0,
+                error=error,
+                flushed=flushed,
+            )
 
             # Count pending keys for lag visibility
             pending_count = 0

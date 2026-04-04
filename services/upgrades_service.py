@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from datetime import datetime
+import time
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
+from observability.metrics import observe_storage_error, observe_storage_timing
 
 
 @dataclass(frozen=True)
@@ -68,7 +70,11 @@ async def apply_global_upgrade_for_user_service(
         "energy": new_max_energy,
     }
 
+    t = time.perf_counter()
     updated_user = await deps.update_user_if_matches(user_id, expected, updates)
+    observe_storage_timing(
+        "db", "update_user_if_matches", "upgrades", time.perf_counter() - t
+    )
     if not updated_user:
         raise HTTPException(status_code=409, detail="Upgrade state changed, retry")
 
@@ -76,6 +82,7 @@ async def apply_global_upgrade_for_user_service(
     try:
         redis_conn = await deps.get_redis_or_none()
         if redis_conn:
+            t = time.perf_counter()
             await redis_conn.hset(
                 f"energy:v2:{user_id}",
                 mapping={
@@ -84,7 +91,9 @@ async def apply_global_upgrade_for_user_service(
                     "max_energy": str(new_max_energy),
                 },
             )
+            observe_storage_timing("redis", "energy_v2_hset", "upgrades", time.perf_counter() - t)
     except Exception:
+        observe_storage_error("redis", "energy_v2_hset", "upgrades")
         pass
 
     next_cost = (
@@ -121,7 +130,9 @@ async def process_upgrade_service(payload: Any, request: Any, deps: UpgradesServ
         )
         await deps.require_user_action_lock("upgrade", payload.user_id, ttl=0.35)
         # Authoritative spend checks must use DB user state (coins are hot-state).
+        t = time.perf_counter()
         user = await deps.get_user(payload.user_id)
+        observe_storage_timing("db", "get_user", "upgrades", time.perf_counter() - t)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         return await apply_global_upgrade_for_user_service(payload.user_id, user, deps)
@@ -129,6 +140,7 @@ async def process_upgrade_service(payload: Any, request: Any, deps: UpgradesServ
         raise
     except Exception as e:
         deps.logger.error(f"Error in process_upgrade: {e}")
+        observe_storage_error("app", "process_upgrade", "upgrades")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -142,7 +154,9 @@ async def process_upgrade_all_service(
         )
         await deps.require_user_action_lock("upgrade_all", payload.user_id, ttl=0.35)
         # Upgrade-all already requires authoritative DB state for coins.
+        t = time.perf_counter()
         user = await deps.get_user(payload.user_id)
+        observe_storage_timing("db", "get_user", "upgrades", time.perf_counter() - t)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         return await apply_global_upgrade_for_user_service(payload.user_id, user, deps)
@@ -150,4 +164,5 @@ async def process_upgrade_all_service(
         raise
     except Exception as e:
         deps.logger.error(f"Error in process_upgrade_all: {e}")
+        observe_storage_error("app", "process_upgrade_all", "upgrades")
         raise HTTPException(status_code=500, detail="Internal server error")
