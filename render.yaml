@@ -1,4 +1,5 @@
 services:
+  # deploy-trigger: keep this file versioned to ensure Render sees backend diffs
   - type: web
     name: ryoho-clicker-api
     runtime: python
