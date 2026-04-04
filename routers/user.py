@@ -144,7 +144,7 @@ async def get_user_data(request: Request):
         "multitap_level": multitap_level,
         "profit_level": profit_level,
         "energy_level": energy_level,
-        "level": user.get("level", 0),
+        "level": multitap_level,
         "rebirth_count": rebirth_count,
         "owned_skins": owned_skins,
         "selected_skin": selected_skin,

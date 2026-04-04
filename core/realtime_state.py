@@ -247,7 +247,9 @@ async def build_realtime_player_state(user_id: int) -> dict | None:
             return None
 
     # 3. Compute levels and max_energy BEFORE reading energy
-    level = int(profile.get("level", 1))
+    # Main frontend progression level follows tap progression.
+    # Keep it aligned with multitap_level to avoid UI/tap desync.
+    level = int(profile.get("multitap_level", 0))
     energy_level = int(profile.get("energy_level", 0))
     multitap_level = int(profile.get("multitap_level", 0))
     profit_level = int(profile.get("profit_level", 0))
