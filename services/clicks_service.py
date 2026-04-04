@@ -36,6 +36,33 @@ def _observe_store(store: str, operation: str, started_at: float, outcome: str =
     )
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _safe_json_dict(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
 ATOMIC_CLICK_MUTATION_LUA = """
 local energy_key = KEYS[1]
 local hot_key = KEYS[2]
@@ -202,24 +229,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
         mark("require_telegram_user", t)
 
         t = time.perf_counter()
-        user = await deps.get_user_cached(payload.user_id)
-        mark("user_profile_hot_state_load", t)
-        timings["get_user_cached"] = timings["user_profile_hot_state_load"]
-        _observe_store("db", "get_user_cached", t)
-
-        if payload.clicks > deps.MAX_CLICK_BATCH_SIZE:
-            flush_trace("too_many_clicks")
-            raise HTTPException(status_code=400, detail="Too many clicks in batch")
-
-        if not user:
-            flush_trace("user_not_found")
-            raise HTTPException(status_code=404, detail="User not found")
-
-        t = time.perf_counter()
-        now = datetime.utcnow()
-        max_energy = deps.resolve_max_energy(user)
         redis_conn = await deps.get_redis_or_none()
-        mark("precompute_and_redis_load", t)
         if not redis_conn:
             flush_trace("redis_unavailable")
             raise HTTPException(
@@ -227,27 +237,57 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
                 detail="Redis unavailable: click processing temporarily disabled",
             )
 
-        multitap_level = int(user.get("multitap_level", 0))
+        user_hot_key = f"user_hot:{payload.user_id}"
+        user = await redis_conn.hgetall(user_hot_key)
+        mark("user_profile_hot_state_load", t)
+        _observe_store("redis", "user_hot_hgetall", t)
+
+        if payload.clicks > deps.MAX_CLICK_BATCH_SIZE:
+            flush_trace("too_many_clicks")
+            raise HTTPException(status_code=400, detail="Too many clicks in batch")
+
+        if not user:
+            deps.logger.error(
+                "CLICK_PATH_DB_ACCESS = ERROR user=%s reason=user_hot_missing_no_db_fallback",
+                payload.user_id,
+            )
+            flush_trace("user_not_found")
+            raise HTTPException(
+                status_code=503,
+                detail="User hot state is not initialized",
+            )
+
+        t = time.perf_counter()
+        now = datetime.utcnow()
+
+        boosts = _safe_json_dict(user.get("boosts"))
+        flags = _safe_json_dict(user.get("flags"))
+
+        multitap_level = _safe_int(user.get("multitap_level"), 0)
+        profit_level = _safe_int(user.get("profit_level"), 0)
+        energy_level = _safe_int(user.get("energy_level"), 0)
+
+        max_energy = _safe_int(user.get("max_energy"), 0)
+        if max_energy <= 0:
+            max_energy = deps.get_max_energy(energy_level)
+
+        mark("precompute_and_redis_load", t)
+
         tap_value = deps.get_tap_value(multitap_level)
-
-        extra = deps.parse_extra_data(user.get("extra_data"))
-        click_guard = deps.get_click_guard_state(extra)
-        last_click_at = deps.parse_iso_datetime(click_guard.get("last_click_at"))
-
+        click_guard = _safe_json_dict(flags.get("click_guard"))
         owned_skins = deps.normalize_owned_skins(
-            extra.get("owned_skins", [deps.DEFAULT_SKIN_ID])
+            flags.get("owned_skins", [deps.DEFAULT_SKIN_ID])
         )
         selected_skin = deps.normalize_selected_skin(
-            extra.get("selected_skin", deps.DEFAULT_SKIN_ID), owned_skins
+            str(flags.get("selected_skin") or deps.DEFAULT_SKIN_ID), owned_skins
         )
         skin_multiplier = float(deps.SKIN_MULTIPLIERS.get(selected_skin, 1.0))
 
-        mega_boost_active = deps.is_mega_boost_active(user)
-        ghost_boost_active, _ghost_boost_expires_at = deps.get_ghost_boost_status(user)
-        task_tap_boost_active, _, task_tap_boost_multiplier = (
-            deps.get_active_video_task_boost(extra, "tap_boost")
-        )
-        daily_infinite_energy_active, _ = deps.is_daily_infinite_energy_active(user)
+        mega_boost_active = bool(boosts.get("mega_boost_active", False))
+        ghost_boost_active = bool(boosts.get("ghost_boost_active", False))
+        task_tap_boost_active = bool(boosts.get("task_tap_boost_active", False))
+        task_tap_boost_multiplier = max(1, _safe_int(boosts.get("task_tap_boost_multiplier"), 1))
+        daily_infinite_energy_active = bool(boosts.get("daily_infinite_energy_active", False))
         free_energy_clicks = (
             mega_boost_active or daily_infinite_energy_active or ghost_boost_active
         )
@@ -261,12 +301,11 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             coin_per_tap *= max(1, task_tap_boost_multiplier)
 
         safe_requested_clicks = min(payload.clicks, deps.MAX_CLICK_BATCH_SIZE)
-        baseline_click_dt = last_click_at or deps.normalize_dt(user.get("last_energy_update"))
-        baseline_click_ts = baseline_click_dt.timestamp() if baseline_click_dt else 0.0
-        init_energy = deps.calculate_current_energy(user, now)
+        baseline_click_ts = _safe_float(user.get("last_energy_ts"), now.timestamp())
+        init_energy = _safe_int(user.get("energy"), max_energy)
         prev_suspicion_score = int(click_guard.get("suspicion_score", 0))
         request_ip = deps.get_request_ip(request)
-        referrer_id = int(user.get("referrer_id") or 0)
+        referrer_id = _safe_int(flags.get("referrer_id"), 0)
 
         keys = [
             f"rl:clicks:{payload.user_id}",
@@ -280,6 +319,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             f"referral_pending:{referrer_id}" if referrer_id > 0 else "",
             f"activity:{payload.user_id}",
             f"click_guard:{payload.user_id}",
+            user_hot_key,
         ]
         args = [
             "90",
@@ -300,7 +340,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             str(max_energy),
             str(init_energy),
             str(deps.CLICK_SUSPICIOUS_OVERSHOOT),
-            str(int(user.get("coins", 0))),
+            str(_safe_int(user.get("coins"), 0)),
             str(referrer_id),
             str(prev_suspicion_score),
             str(deps.CLICK_SUSPICION_SOFT_LIMIT),
@@ -357,8 +397,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             raise HTTPException(status_code=500, detail="Click mutation failed")
 
         t = time.perf_counter()
-        boosts = deps.get_all_boost_states(deps.parse_extra_data(user.get("extra_data")))
-        profit_per_hour = deps.get_hour_value(int(user.get("profit_level", 0)))
+        profit_per_hour = _safe_int(user.get("profit_per_hour"), deps.get_hour_value(profit_level))
         mark("response_assembly_prepare", t)
 
         t = time.perf_counter()

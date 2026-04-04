@@ -9,6 +9,7 @@ local click_buf_key = KEYS[8]
 local referral_pending_key = KEYS[9]
 local activity_key = KEYS[10]
 local click_guard_key = KEYS[11]
+local user_hot_key = KEYS[12]
 
 local user_limit = tonumber(ARGV[1])
 local ip_limit = tonumber(ARGV[2])
@@ -175,5 +176,10 @@ if new_suspicion_score >= suspicion_soft_limit then
     guard_payload["flagged_at"] = now_iso
 end
 redis.call('SET', click_guard_key, cjson.encode(guard_payload), 'EX', 300)
+redis.call('HSET', user_hot_key,
+    'coins', tostring(new_coins),
+    'energy', tostring(new_energy),
+    'last_energy_ts', tostring(now_ts)
+)
 
 return {0, new_coins, new_energy, effective_clicks, gained, allowed_clicks, referral_bonus, new_suspicion_score}
