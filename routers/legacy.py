@@ -1,11 +1,9 @@
-from fastapi import APIRouter, FastAPI, HTTPException, Request, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import APIRouter, HTTPException, Request
 
 # Sync marker for VS Code source control
 from fastapi.responses import JSONResponse, Response
 import asyncio
 import base64
-import uvicorn
 import random
 import time
 import json
@@ -18,7 +16,6 @@ import secrets
 import re
 import struct
 from datetime import datetime, timedelta
-from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 from sqlalchemy import select, func, update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -162,10 +159,7 @@ from services.ads_boosts_service import (
     ad_action_start_service,
     adsgram_complete_locally_service,
     consume_ad_action_session_service,
-    create_ad_action_session_service,
-    find_latest_ad_action_session_for_user_service,
     increment_ads_watched_service,
-    mark_ad_action_session_verified_for_user_service,
     mark_ad_action_session_verified_service,
     mark_latest_ad_action_session_verified_for_user_service,
     update_energy_service as update_energy_reward_service,
@@ -982,12 +976,6 @@ async def send_telegram_wallet_reminder_message(
         return False, str(exc)
 
 
-async def create_ad_action_session(user_id: int, action: str) -> str:
-    return await create_ad_action_session_service(
-        user_id, action, _build_ads_boosts_service_deps()
-    )
-
-
 def extract_first_value(source: dict, keys: tuple[str, ...]) -> str | None:
     for key in keys:
         value = source.get(key)
@@ -1004,28 +992,6 @@ async def mark_ad_action_session_verified(
 ) -> bool:
     return await mark_ad_action_session_verified_service(
         ad_session_id, postback_payload, _build_ads_boosts_service_deps()
-    )
-
-
-async def mark_ad_action_session_verified_for_user(
-    user_id: int,
-    ad_session_id: str,
-    verification_payload: dict | None = None,
-    *,
-    enforce_min_wait: bool = True,
-) -> bool:
-    return await mark_ad_action_session_verified_for_user_service(
-        user_id,
-        ad_session_id,
-        verification_payload,
-        _build_ads_boosts_service_deps(),
-        enforce_min_wait=enforce_min_wait,
-    )
-
-
-async def find_latest_ad_action_session_for_user(user_id: int) -> str | None:
-    return await find_latest_ad_action_session_for_user_service(
-        user_id, _build_ads_boosts_service_deps()
     )
 
 
