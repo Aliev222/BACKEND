@@ -1971,6 +1971,24 @@ async def create_api_session(request: Request):
     }
 
 
+@router.post("/api/debug/session")
+async def create_debug_session(payload: UserIdRequest):
+    if APP_ENV != "staging":
+        raise HTTPException(status_code=404, detail="Not found")
+
+    user_id = int(payload.user_id)
+    username = None
+    try:
+        user = await get_user(user_id)
+        if user:
+            username = user.get("username")
+    except Exception:
+        username = None
+
+    token, _expires_at = issue_session_token({"id": user_id, "username": username})
+    return {"token": token}
+
+
 async def require_ip_rate_limit(
     namespace: str, request: Request, limit: int, window_seconds: int
 ):
