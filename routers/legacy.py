@@ -175,6 +175,22 @@ from services.profile_state_service import (
     ensure_coins_hot_initialized_service,
     get_user_data_service,
 )
+from services.tasks_rewards_service import (
+    TasksRewardsServiceDeps,
+    complete_task_reward_atomically_service,
+    get_active_video_task_boost_service,
+    get_daily_reward_progress_service,
+    get_video_task_boosts_service,
+    get_video_task_last_claims_service,
+    resolve_video_task_coin_drop_service,
+    verify_telegram_channel_subscription_service,
+)
+from services.tournament_service import (
+    TournamentReadServiceDeps,
+    get_weekly_tournament_leaderboard_service,
+    get_weekly_tournament_overview_service,
+    get_weekly_tournament_results_service,
+)
 
 
 router = APIRouter()
@@ -906,49 +922,9 @@ async def create_telegram_stars_invoice_link(
 
 
 async def verify_telegram_channel_subscription(user_id: int) -> bool:
-    if not BOT_TOKEN or not TELEGRAM_VERIFY_CHANNEL:
-        logger.warning("Telegram subscription verification is not configured")
-        return False
-
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            response = await client.get(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember",
-                params={
-                    "chat_id": TELEGRAM_VERIFY_CHANNEL,
-                    "user_id": user_id,
-                },
-            )
-    except Exception as exc:
-        logger.warning(
-            "Telegram subscription verification request failed for %s: %s", user_id, exc
-        )
-        return False
-
-    if response.status_code != 200:
-        logger.warning(
-            "Telegram subscription verification HTTP error for %s: %s",
-            user_id,
-            response.status_code,
-        )
-        return False
-
-    try:
-        payload = response.json()
-    except Exception:
-        logger.warning(
-            "Telegram subscription verification returned invalid JSON for %s", user_id
-        )
-        return False
-
-    if not payload.get("ok"):
-        logger.warning(
-            "Telegram subscription verification failed for %s: %s", user_id, payload
-        )
-        return False
-
-    status = ((payload.get("result") or {}).get("status") or "").lower()
-    return status in TELEGRAM_MEMBER_STATUSES
+    return await verify_telegram_channel_subscription_service(
+        user_id, _build_tasks_rewards_service_deps()
+    )
 
 
 async def send_telegram_wallet_reminder_message(
@@ -1641,80 +1617,29 @@ async def apply_atomic_user_updates(
 async def complete_task_reward_atomically(
     user_id: int, task_id: str, user_updates: dict | None = None
 ) -> dict:
-    user_updates = user_updates or {}
-    sync_delta = 0
-    sync_new_coins = None
-
-    async with AsyncSessionLocal() as session:
-        user_result = await session.execute(
-            select(User).where(User.user_id == user_id).with_for_update()
-        )
-        user_row = user_result.scalar_one_or_none()
-        if not user_row:
-            raise HTTPException(status_code=404, detail="User not found")
-        old_coins = int(user_row.coins or 0)
-
-        task_result = await session.execute(
-            select(UserTask).where(
-                UserTask.user_id == user_id,
-                UserTask.task_id == task_id,
-            )
-        )
-        if task_result.scalar_one_or_none():
-            raise HTTPException(status_code=400, detail="Task already completed")
-
-        session.add(UserTask(user_id=user_id, task_id=task_id))
-        for field, value in user_updates.items():
-            setattr(
-                user_row, field, json.dumps(value) if field == "extra_data" else value
-            )
-
-        await session.commit()
-        if "coins" in user_updates:
-            sync_new_coins = int(user_row.coins or 0)
-            sync_delta = sync_new_coins - old_coins
-    if sync_delta > 0 and sync_new_coins is not None:
-        await sync_hot_after_db_increment(user_id, sync_delta, sync_new_coins)
-
-    return await get_user(user_id)
+    return await complete_task_reward_atomically_service(
+        user_id, task_id, user_updates, _build_tasks_rewards_service_deps()
+    )
 
 
 def resolve_video_task_coin_drop() -> int:
-    roll = random.random()
-    if roll < 0.55:
-        return random.randint(200, 1000)
-    if roll < 0.80:
-        return random.randint(1000, 5000)
-    if roll < 0.92:
-        return random.randint(5000, 12000)
-    if roll < 0.98:
-        return random.randint(12000, 20000)
-    return random.randint(20000, 30000)
+    return resolve_video_task_coin_drop_service()
 
 
 def get_video_task_last_claims(extra: dict) -> dict:
-    claims = extra.get("video_task_last_claims", {})
-    return claims if isinstance(claims, dict) else {}
+    return get_video_task_last_claims_service(extra)
 
 
 def get_video_task_boosts(extra: dict) -> dict:
-    boosts = extra.get("video_task_boosts", {})
-    return boosts if isinstance(boosts, dict) else {}
+    return get_video_task_boosts_service(extra)
 
 
 def get_active_video_task_boost(
     extra: dict, boost_key: str
 ) -> tuple[bool, str | None, int]:
-    boosts = get_video_task_boosts(extra)
-    boost = boosts.get(boost_key)
-    if not isinstance(boost, dict):
-        return False, None, 1
-
-    expires_at = parse_iso_datetime(boost.get("expires_at"))
-    if not expires_at or expires_at <= datetime.utcnow():
-        return False, None, 1
-
-    return True, expires_at.isoformat(), int(boost.get("multiplier", 1) or 1)
+    return get_active_video_task_boost_service(
+        extra, boost_key, _build_tasks_rewards_service_deps()
+    )
 
 
 async def touch_user_activity(user_id: int, user: dict | None = None) -> None:
@@ -2658,12 +2583,7 @@ def get_ghost_boost_status(user: dict) -> tuple[bool, str | None]:
 
 
 def get_daily_reward_progress(extra: dict) -> tuple[int, str | None]:
-    claimed_days = int(extra.get("daily_reward_claimed_days", 0) or 0)
-    claimed_days = max(0, min(DAILY_REWARD_MAX_DAYS, claimed_days))
-    last_claim_date = extra.get("daily_reward_last_claim_date")
-    if not isinstance(last_claim_date, str):
-        last_claim_date = None
-    return claimed_days, last_claim_date
+    return get_daily_reward_progress_service(extra, _build_tasks_rewards_service_deps())
 
 
 def is_daily_infinite_energy_active(user: dict) -> tuple[bool, str | None]:
@@ -2751,6 +2671,42 @@ def _build_profile_state_service_deps() -> ProfileStateServiceDeps:
         get_redis_or_none=get_redis_or_none,
         get_user=get_user,
         build_realtime_player_state=build_realtime_player_state,
+        logger=logger,
+    )
+
+
+def _build_tasks_rewards_service_deps() -> TasksRewardsServiceDeps:
+    return TasksRewardsServiceDeps(
+        logger=logger,
+        BOT_TOKEN=BOT_TOKEN,
+        TELEGRAM_VERIFY_CHANNEL=TELEGRAM_VERIFY_CHANNEL,
+        TELEGRAM_MEMBER_STATUSES=TELEGRAM_MEMBER_STATUSES,
+        DAILY_REWARD_MAX_DAYS=DAILY_REWARD_MAX_DAYS,
+        parse_iso_datetime=parse_iso_datetime,
+        AsyncSessionLocal=AsyncSessionLocal,
+        User=User,
+        UserTask=UserTask,
+        get_user=get_user,
+        sync_hot_after_db_increment=sync_hot_after_db_increment,
+    )
+
+
+def _build_tournament_service_deps() -> TournamentReadServiceDeps:
+    return TournamentReadServiceDeps(
+        require_telegram_user=require_telegram_user,
+        get_weekly_tournament_season_window=get_weekly_tournament_season_window,
+        get_weekly_tournament_season_key=get_weekly_tournament_season_key,
+        list_weekly_tournament_seasons=list_weekly_tournament_seasons,
+        get_weekly_tournament_player_entry=get_weekly_tournament_player_entry,
+        get_weekly_tournament_leaderboard=get_weekly_tournament_leaderboard,
+        get_weekly_tournament_winners=get_weekly_tournament_winners,
+        AsyncSessionLocal=AsyncSessionLocal,
+        WeeklyTournamentTonPayout=WeeklyTournamentTonPayout,
+        WEEKLY_LEAGUE_ORDER=WEEKLY_LEAGUE_ORDER,
+        WEEKLY_LEAGUE_LEVEL_RANGES=WEEKLY_LEAGUE_LEVEL_RANGES,
+        WEEKLY_LEAGUE_FUND_SPLITS=WEEKLY_LEAGUE_FUND_SPLITS,
+        WEEKLY_TOP3_PAYOUT_SPLITS=WEEKLY_TOP3_PAYOUT_SPLITS,
+        WEEKLY_RANGE_PAYOUT_SPLITS=WEEKLY_RANGE_PAYOUT_SPLITS,
         logger=logger,
     )
 
@@ -2931,49 +2887,12 @@ async def register_user(payload: RegisterRequest, request: Request):
 
 @router.get("/api/weekly-tournament/overview/{user_id}")
 async def get_weekly_tournament_overview(user_id: int, request: Request):
-    try:
-        await require_telegram_user(request, user_id)
-        now = datetime.utcnow()
-        starts_at, ends_at = get_weekly_tournament_season_window(now)
-        season_key = get_weekly_tournament_season_key(now)
-        season_rows = await list_weekly_tournament_seasons(limit=12)
-        active_season = (
-            next(
-                (item for item in season_rows if item.get("season_key") == season_key),
-                None,
-            )
-            or {}
-        )
-        player = await get_weekly_tournament_player_entry(user_id, season_key)
-        pending_ton_notice = await get_pending_ton_wallet_notice(user_id)
-
-        return {
-            "success": True,
-            "season_key": season_key,
-            "season_status": active_season.get("status") or "active",
-            "starts_at": starts_at.isoformat(),
-            "ends_at": ends_at.isoformat(),
-            "time_left_seconds": max(0, int((ends_at - now).total_seconds())),
-            "payout_fund_cents": int(active_season.get("payout_fund_cents") or 0),
-            "gross_ad_revenue_cents": int(
-                active_season.get("gross_ad_revenue_cents") or 0
-            ),
-            "leagues": WEEKLY_LEAGUE_LEVEL_RANGES,
-            "fund_splits": WEEKLY_LEAGUE_FUND_SPLITS,
-            "top3_splits": WEEKLY_TOP3_PAYOUT_SPLITS,
-            "rest_split": max(0.0, 1.0 - sum(WEEKLY_TOP3_PAYOUT_SPLITS.values())),
-            "payout_splits": {
-                "top": WEEKLY_TOP3_PAYOUT_SPLITS,
-                "ranges": WEEKLY_RANGE_PAYOUT_SPLITS,
-            },
-            "player": player,
-            "pending_ton_notice": pending_ton_notice,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in get_weekly_tournament_overview: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    return await get_weekly_tournament_overview_service(
+        user_id,
+        request,
+        _build_tournament_service_deps(),
+        get_pending_ton_wallet_notice=get_pending_ton_wallet_notice,
+    )
 
 
 # ==================== REFERRALS ====================
@@ -2983,28 +2902,9 @@ async def get_weekly_tournament_overview(user_id: int, request: Request):
 async def get_weekly_tournament_leaderboard_endpoint(
     league: str, season_key: str | None = None, limit: int = 50
 ):
-    try:
-        league = (league or "").strip().lower()
-        if league not in WEEKLY_LEAGUE_ORDER:
-            raise HTTPException(status_code=400, detail="Unknown league")
-
-        effective_season_key = season_key or get_weekly_tournament_season_key()
-        rows = await get_weekly_tournament_leaderboard(
-            season_key=effective_season_key,
-            league=league,
-            limit=limit,
-        )
-        return {
-            "success": True,
-            "season_key": effective_season_key,
-            "league": league,
-            "players": rows,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in get_weekly_tournament_leaderboard_endpoint: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    return await get_weekly_tournament_leaderboard_service(
+        league, season_key, limit, _build_tournament_service_deps()
+    )
 
 
 @router.get("/api/weekly-tournament/player/{user_id}")
@@ -3031,72 +2931,9 @@ async def get_weekly_tournament_player_endpoint(
 async def get_weekly_tournament_results_endpoint(
     league: str, season_key: str | None = None, limit: int = 50
 ):
-    try:
-        league = (league or "").strip().lower()
-        if league not in WEEKLY_LEAGUE_ORDER:
-            raise HTTPException(status_code=400, detail="Unknown league")
-
-        season_rows = await list_weekly_tournament_seasons(limit=52)
-        if season_key:
-            season = next(
-                (
-                    item
-                    for item in season_rows
-                    if item["season_key"] == season_key
-                    and item["status"] == "finalized"
-                ),
-                None,
-            )
-        else:
-            season = next(
-                (item for item in season_rows if item["status"] == "finalized"), None
-            )
-
-        if not season:
-            return {
-                "success": True,
-                "league": league,
-                "season": None,
-                "players": [],
-            }
-
-        winners = await get_weekly_tournament_winners(
-            season["season_key"], league=league
-        )
-        async with AsyncSessionLocal() as session:
-            payouts_result = await session.execute(
-                select(WeeklyTournamentTonPayout).where(
-                    WeeklyTournamentTonPayout.season_key == season["season_key"],
-                    WeeklyTournamentTonPayout.league == league,
-                )
-            )
-            payout_rows = {
-                int(row.user_id): row for row in payouts_result.scalars().all()
-            }
-
-        enriched_winners = []
-        for winner in winners:
-            payout_row = payout_rows.get(int(winner["user_id"]))
-            winner_payload = dict(winner)
-            winner_payload["ton_amount_nano"] = int(
-                getattr(payout_row, "ton_amount_nano", 0) or 0
-            )
-            winner_payload["ton_payout_status"] = getattr(payout_row, "status", None)
-            winner_payload["ton_wallet_address"] = getattr(
-                payout_row, "wallet_address", None
-            )
-            enriched_winners.append(winner_payload)
-        return {
-            "success": True,
-            "league": league,
-            "season": season,
-            "players": enriched_winners[: max(1, min(50, int(limit or 50)))],
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in get_weekly_tournament_results_endpoint: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    return await get_weekly_tournament_results_service(
+        league, season_key, limit, _build_tournament_service_deps()
+    )
 
 
 @router.post("/api/skins/stars-invoice")
