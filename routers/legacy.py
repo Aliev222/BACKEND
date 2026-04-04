@@ -1823,6 +1823,33 @@ def _local_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
     return True
 
 
+DUAL_RATE_LIMIT_LUA = """
+local user_key = KEYS[1]
+local ip_key = KEYS[2]
+local user_limit = tonumber(ARGV[1])
+local ip_limit = tonumber(ARGV[2])
+local window_seconds = tonumber(ARGV[3])
+
+local user_current = redis.call('INCR', user_key)
+if user_current == 1 then
+    redis.call('EXPIRE', user_key, window_seconds)
+end
+if user_current > user_limit then
+    return {0, user_current, -1}
+end
+
+local ip_current = redis.call('INCR', ip_key)
+if ip_current == 1 then
+    redis.call('EXPIRE', ip_key, window_seconds)
+end
+if ip_current > ip_limit then
+    return {2, user_current, ip_current}
+end
+
+return {1, user_current, ip_current}
+"""
+
+
 async def redis_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
     """
     True = РјРѕР¶РЅРѕ РїСЂРѕРїСѓСЃС‚РёС‚СЊ
@@ -1845,6 +1872,57 @@ async def redis_rate_limit(key: str, limit: int, window_seconds: int) -> bool:
         REDIS_ERRORS.inc()
         redis_client = None
         return _local_rate_limit(key, limit, window_seconds)
+
+
+async def redis_dual_rate_limit(
+    user_key: str,
+    ip_key: str,
+    user_limit: int,
+    ip_limit: int,
+    window_seconds: int,
+) -> tuple[bool, bool]:
+    """
+    Returns tuple:
+      (user_allowed, ip_allowed)
+    Semantics intentionally match sequential checks:
+      1) user check first; if denied -> ip is not checked
+      2) if user allowed -> ip check and decide
+    """
+    global redis_client
+
+    conn = await get_redis_or_none()
+    if conn is None:
+        user_allowed = _local_rate_limit(user_key, user_limit, window_seconds)
+        if not user_allowed:
+            return False, True
+        ip_allowed = _local_rate_limit(ip_key, ip_limit, window_seconds)
+        return user_allowed, ip_allowed
+
+    try:
+        result = await conn.eval(
+            DUAL_RATE_LIMIT_LUA,
+            2,
+            user_key,
+            ip_key,
+            str(user_limit),
+            str(ip_limit),
+            str(window_seconds),
+        )
+        code = int(result[0])
+        if code == 1:
+            return True, True
+        if code == 0:
+            return False, True
+        return True, False
+    except Exception as e:
+        logger.warning(f"Redis dual_rate_limit failed, fallback to local: {e}")
+        REDIS_ERRORS.inc()
+        redis_client = None
+        user_allowed = _local_rate_limit(user_key, user_limit, window_seconds)
+        if not user_allowed:
+            return False, True
+        ip_allowed = _local_rate_limit(ip_key, ip_limit, window_seconds)
+        return user_allowed, ip_allowed
 
 
 async def require_redis_rate_limit(
@@ -1906,10 +1984,24 @@ async def require_dual_rate_limit(
     *,
     ip_limit: int | None = None,
 ):
-    await require_redis_rate_limit(namespace, user_id, user_limit, window_seconds)
-    await require_ip_rate_limit(
-        namespace, request, ip_limit or user_limit, window_seconds
+    request_ip = get_request_ip(request)
+    user_key = f"rl:{namespace}:{user_id}"
+    ip_key = f"rl:{namespace}:ip:{request_ip}"
+    effective_ip_limit = ip_limit or user_limit
+
+    user_allowed, ip_allowed = await redis_dual_rate_limit(
+        user_key,
+        ip_key,
+        user_limit,
+        effective_ip_limit,
+        window_seconds,
     )
+    if not user_allowed:
+        RATE_LIMIT_REJECTS.labels(namespace=namespace).inc()
+        raise HTTPException(status_code=429, detail="Too many requests")
+    if not ip_allowed:
+        RATE_LIMIT_REJECTS.labels(namespace=f"{namespace}_ip").inc()
+        raise HTTPException(status_code=429, detail="Too many requests from this IP")
 
 
 async def flush_click_buffer_loop():
