@@ -396,8 +396,7 @@ async def sync_energy_service(payload: Any, request: Any, deps: ClicksServiceDep
             raise HTTPException(status_code=404, detail="User not found")
 
         now = datetime.utcnow()
-        energy_level = int(user.get("energy_level", 0))
-        max_energy = deps.get_max_energy(energy_level)
+        max_energy = deps.resolve_max_energy(user)
 
         redis_conn = await deps.get_redis_or_none()
         energy_key = f"energy:v2:{payload.user_id}"

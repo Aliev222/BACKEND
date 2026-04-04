@@ -23,7 +23,12 @@ from core.game_config import (
     USER_CACHE_PREFIX,
     USER_CACHE_TTL,
 )
-from core.game_logic import get_hour_value, get_tap_value_with_rebirth, get_max_energy
+from core.game_logic import (
+    get_profit_per_hour,
+    get_tap,
+    get_max_energy,
+    resolve_progression_level,
+)
 from core.ton_utils import get_ton_wallet_from_user
 from core.skins import normalize_owned_skins, normalize_selected_skin, DEFAULT_SKIN_ID
 from core.tasks import get_active_video_task_boost
@@ -140,6 +145,74 @@ async def write_energy_v2(user_id: int, value: int, max_energy: int) -> None:
         logger.warning("Failed to write energy:v2 for user %s: %s", user_id, e)
 
 
+async def ensure_user_hot_progression_state(
+    user_id: int,
+    *,
+    level: int,
+    rebirth_count: int,
+    tap_value: int,
+    max_energy: int,
+    profit_per_hour: int,
+    energy: int,
+    coins: int,
+) -> None:
+    redis_conn = await get_redis_or_none()
+    if not redis_conn:
+        return
+    key = f"user_hot:{user_id}"
+    lua = """
+    local key = KEYS[1]
+    local level = tonumber(ARGV[1])
+    local rebirth = tonumber(ARGV[2])
+    local tap = tonumber(ARGV[3])
+    local max_energy = tonumber(ARGV[4])
+    local profit_per_hour = tonumber(ARGV[5])
+    local energy = tonumber(ARGV[6])
+    local coins = tonumber(ARGV[7])
+
+    local existing_level = tonumber(redis.call('HGET', key, 'level') or '0')
+    local existing_rebirth = tonumber(redis.call('HGET', key, 'rebirth_count') or '0')
+    local should_apply = 0
+
+    if redis.call('EXISTS', key) == 0 then
+        should_apply = 1
+    elseif rebirth > existing_rebirth then
+        should_apply = 1
+    elseif level > existing_level then
+        should_apply = 1
+    end
+
+    if should_apply == 1 then
+        redis.call('HSET', key,
+            'level', tostring(level),
+            'rebirth_count', tostring(rebirth),
+            'tap_power', tostring(tap),
+            'max_energy', tostring(max_energy),
+            'profit_per_hour', tostring(profit_per_hour),
+            'energy', tostring(energy),
+            'coins', tostring(coins)
+        )
+        redis.call('HDEL', key, 'multitap_level', 'profit_level', 'energy_level')
+    end
+    return should_apply
+    """
+    try:
+        await redis_conn.eval(
+            lua,
+            1,
+            key,
+            str(level),
+            str(rebirth_count),
+            str(tap_value),
+            str(max_energy),
+            str(profit_per_hour),
+            str(energy),
+            str(coins),
+        )
+    except Exception as exc:
+        logger.warning("Failed to ensure user_hot progression for %s: %s", user_id, exc)
+
+
 # ─── Boost truth model ───────────────────────────────────────────────────────
 
 
@@ -246,15 +319,10 @@ async def build_realtime_player_state(user_id: int) -> dict | None:
         if profile is None:
             return None
 
-    # 3. Compute levels and max_energy BEFORE reading energy
-    # Main frontend progression level follows tap progression.
-    # Keep it aligned with multitap_level to avoid UI/tap desync.
-    level = int(profile.get("multitap_level", 0))
-    energy_level = int(profile.get("energy_level", 0))
-    multitap_level = int(profile.get("multitap_level", 0))
-    profit_level = int(profile.get("profit_level", 0))
+    # 3. Compute progression level BEFORE reading energy.
+    level = resolve_progression_level(profile)
     rebirth_count = int(profile.get("rebirth_count", 0))
-    max_energy = get_max_energy(energy_level)
+    max_energy = get_max_energy(level)
 
     # 4. Read authoritative energy from energy:v2
     energy_state = await read_energy_v2(user_id, max_energy)
@@ -305,20 +373,32 @@ async def build_realtime_player_state(user_id: int) -> dict | None:
     ton_wallet = get_ton_wallet_from_user({"extra_data": extra})
 
     # 10. Compute derived values
-    tap_value = get_tap_value_with_rebirth(multitap_level, rebirth_count)
-    profit_per_hour = get_hour_value(profit_level)
+    tap_value = get_tap(level, rebirth_count)
+    profit_per_hour = get_profit_per_hour(level)
 
     # 11. State ordering fields (timestamp-based)
     state_updated_at = int(time.time() * 1000)  # milliseconds
+
+    await ensure_user_hot_progression_state(
+        user_id,
+        level=level,
+        rebirth_count=rebirth_count,
+        tap_value=tap_value,
+        max_energy=energy_state["max_energy"],
+        profit_per_hour=profit_per_hour,
+        energy=energy_state["energy"],
+        coins=coins,
+    )
 
     return {
         # Static profile
         "user_id": int(profile.get("user_id", user_id)),
         "username": profile.get("username"),
         "level": level,
-        "multitap_level": multitap_level,
-        "profit_level": profit_level,
-        "energy_level": energy_level,
+        # Deprecated mirrors for backward compatibility.
+        "multitap_level": level,
+        "profit_level": level,
+        "energy_level": level,
         "rebirth_count": rebirth_count,
         "referral_count": int(profile.get("referral_count", 0)),
         "referral_earnings": int(profile.get("referral_earnings", 0)),

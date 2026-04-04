@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from sqlalchemy import select
 
 from DATABASE.base import AsyncSessionLocal, User
-from core.game_logic import calculate_current_energy, resolve_max_energy
+from core.game_logic import calculate_current_energy, resolve_max_energy, resolve_progression_level
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +42,23 @@ def _idle_stage(last_activity_at: str | None) -> int:
 
 
 def _build_reason_and_text(user_row: User, extra: dict, stage: int) -> tuple[str, str]:
+    level = resolve_progression_level(
+        {
+            "level": user_row.level,
+            "multitap_level": user_row.multitap_level,
+            "profit_level": user_row.profit_level,
+            "energy_level": user_row.energy_level,
+        }
+    )
     current_energy = calculate_current_energy({
         "energy": user_row.energy,
         "max_energy": user_row.max_energy,
         "last_energy_update": user_row.last_energy_update,
-        "energy_level": user_row.energy_level,
+        "level": level,
     }, datetime.utcnow())
     max_energy = resolve_max_energy({
         "max_energy": user_row.max_energy,
-        "energy_level": user_row.energy_level,
+        "level": level,
     })
 
     today = datetime.utcnow().date().isoformat()

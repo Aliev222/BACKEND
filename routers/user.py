@@ -10,8 +10,9 @@ from routers.auth import require_telegram_user
 from core.game_logic import (
     calculate_current_energy,
     resolve_max_energy,
-    get_tap_value_with_rebirth,
-    get_hour_value,
+    get_tap,
+    get_profit_per_hour,
+    resolve_progression_level,
 )
 from core.game_config import ENERGY_REGEN_SECONDS
 
@@ -128,9 +129,7 @@ async def get_user_data(request: Request):
         _get_video_task_boost(extra, "passive_boost")
     )
 
-    multitap_level = int(user.get("multitap_level", 0))
-    profit_level = int(user.get("profit_level", 0))
-    energy_level = int(user.get("energy_level", 0))
+    level = resolve_progression_level(user)
     rebirth_count = max(0, int(user.get("rebirth_count", 0) or 0))
 
     return {
@@ -139,12 +138,13 @@ async def get_user_data(request: Request):
         "coins": user.get("coins", 0),
         "energy": current_energy,
         "max_energy": max_energy,
-        "profit_per_tap": get_tap_value_with_rebirth(multitap_level, rebirth_count),
-        "profit_per_hour": get_hour_value(profit_level),
-        "multitap_level": multitap_level,
-        "profit_level": profit_level,
-        "energy_level": energy_level,
-        "level": multitap_level,
+        "profit_per_tap": get_tap(level, rebirth_count),
+        "profit_per_hour": get_profit_per_hour(level),
+        # Deprecated mirrors for backward compatibility.
+        "multitap_level": level,
+        "profit_level": level,
+        "energy_level": level,
+        "level": level,
         "rebirth_count": rebirth_count,
         "owned_skins": owned_skins,
         "selected_skin": selected_skin,
@@ -186,10 +186,10 @@ async def register_user(request: Request):
                 "max_energy": existing.get("max_energy", 500),
                 "profit_per_tap": existing.get("profit_per_tap", 1),
                 "profit_per_hour": existing.get("profit_per_hour", 100),
-                "multitap_level": existing.get("multitap_level", 0),
-                "profit_level": existing.get("profit_level", 0),
-                "energy_level": existing.get("energy_level", 0),
-                "level": existing.get("level", 0),
+                "multitap_level": resolve_progression_level(existing),
+                "profit_level": resolve_progression_level(existing),
+                "energy_level": resolve_progression_level(existing),
+                "level": resolve_progression_level(existing),
                 "rebirth_count": existing.get("rebirth_count", 0),
                 "owned_skins": _get_owned_skins(
                     _parse_extra(existing.get("extra_data", {}))
@@ -215,6 +215,12 @@ async def register_user(request: Request):
         user = await create_user(session, user_id, username, referrer_id)
         await session.commit()
 
+        resolved_level = max(
+            int(user.level or 0),
+            int(user.multitap_level or 0),
+            int(user.profit_level or 0),
+            int(user.energy_level or 0),
+        )
         return {
             "user_id": user.user_id,
             "coins": user.coins,
@@ -222,10 +228,10 @@ async def register_user(request: Request):
             "max_energy": user.max_energy,
             "profit_per_tap": user.profit_per_tap,
             "profit_per_hour": user.profit_per_hour,
-            "multitap_level": user.multitap_level,
-            "profit_level": user.profit_level,
-            "energy_level": user.energy_level,
-            "level": user.level,
+            "multitap_level": resolved_level,
+            "profit_level": resolved_level,
+            "energy_level": resolved_level,
+            "level": resolved_level,
             "rebirth_count": user.rebirth_count,
             "owned_skins": ["default.pngSP"],
             "selected_skin": "default.pngSP",

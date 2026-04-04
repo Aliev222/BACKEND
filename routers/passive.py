@@ -10,7 +10,7 @@ from fastapi import APIRouter, Request, HTTPException
 
 from core.config import AUTOCLICKER_COOLDOWN_MINUTES
 from core.utils import parse_extra_data
-from core.game_logic import normalize_dt, get_hour_value
+from core.game_logic import normalize_dt, get_profit_per_hour, resolve_progression_level
 from core.tasks import get_active_video_task_boost
 from schemas import PassiveIncomeRequest, AdActionClaimRequest
 from routers.legacy import (
@@ -68,7 +68,7 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
             extra, "passive_boost"
         )
         base_hour_value = int(
-            user.get("profit_per_hour", get_hour_value(user.get("profit_level", 0)))
+            user.get("profit_per_hour", get_profit_per_hour(resolve_progression_level(user)))
         )
         hour_value = (
             base_hour_value * max(1, passive_boost_multiplier)

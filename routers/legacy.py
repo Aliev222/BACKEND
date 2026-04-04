@@ -121,6 +121,7 @@ from core.game_logic import (
     mask_username,
     normalize_dt,
     resolve_max_energy,
+    resolve_progression_level,
 )
 from core.config import (
     DIAGNOSTICS_DURATION_WINDOW,
@@ -2635,7 +2636,7 @@ async def can_unlock_skin(user: dict, skin_id: str) -> bool:
             extra = {}
 
     if req["type"] == "level":
-        display_level = int(user.get("multitap_level", 0)) + 1
+        display_level = int(resolve_progression_level(user)) + 1
         return display_level >= int(req["value"])
 
     if req["type"] == "ads":

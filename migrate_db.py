@@ -33,6 +33,7 @@ def _get_sync_database_url() -> str:
 
 def migrate() -> None:
     engine = create_engine(_get_sync_database_url())
+    dialect_name = engine.dialect.name.lower()
 
     statements = [
         """
@@ -65,6 +66,10 @@ def migrate() -> None:
         """,
         """
         ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS level INTEGER DEFAULT 0
+        """,
+        """
+        ALTER TABLE users
         ADD COLUMN IF NOT EXISTS luck_level INTEGER DEFAULT 0
         """,
         """
@@ -89,6 +94,31 @@ def migrate() -> None:
         ON user_tasks (user_id, task_id)
         """,
     ]
+
+    if dialect_name == "postgresql":
+        statements.append(
+            """
+            UPDATE users
+            SET level = GREATEST(
+                COALESCE(level, 0),
+                COALESCE(multitap_level, 0),
+                COALESCE(profit_level, 0),
+                COALESCE(energy_level, 0)
+            )
+            """
+        )
+    else:
+        statements.append(
+            """
+            UPDATE users
+            SET level = MAX(
+                COALESCE(level, 0),
+                COALESCE(multitap_level, 0),
+                COALESCE(profit_level, 0),
+                COALESCE(energy_level, 0)
+            )
+            """
+        )
 
     with engine.begin() as conn:
         for statement in statements:

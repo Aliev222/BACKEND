@@ -73,9 +73,7 @@ if redis.call('EXISTS', user_hot_key) == 0 then
         'last_energy_ts', tostring(now_ts),
         'tap_power', '1',
         'energy_regen', tostring(regen_seconds),
-        'multitap_level', '0',
-        'profit_level', '0',
-        'energy_level', '0',
+        'level', '0',
         'rebirth_count', '0',
         'max_energy', tostring(base_max_energy),
         'click_streak', '0',
@@ -91,9 +89,7 @@ local hot_coins = tonumber(redis.call('HGET', user_hot_key, 'coins') or '0')
 local hot_energy = tonumber(redis.call('HGET', user_hot_key, 'energy') or tostring(base_max_energy))
 local hot_last_energy_ts = tonumber(redis.call('HGET', user_hot_key, 'last_energy_ts') or tostring(now_ts))
 local hot_tap_power = tonumber(redis.call('HGET', user_hot_key, 'tap_power') or '1')
-local multitap_level = tonumber(redis.call('HGET', user_hot_key, 'multitap_level') or '0')
-local profit_level = tonumber(redis.call('HGET', user_hot_key, 'profit_level') or '0')
-local energy_level = tonumber(redis.call('HGET', user_hot_key, 'energy_level') or '0')
+local level = tonumber(redis.call('HGET', user_hot_key, 'level') or '0')
 local rebirth_count = tonumber(redis.call('HGET', user_hot_key, 'rebirth_count') or '0')
 local hot_click_streak = tonumber(redis.call('HGET', user_hot_key, 'click_streak') or '0')
 local hot_suspicion_score = tonumber(redis.call('HGET', user_hot_key, 'suspicion_score') or '0')
@@ -113,7 +109,7 @@ if hot_version < 1 then
     hot_version = hot_state_version_default
 end
 
-local max_energy = math.min(1000, base_max_energy + (energy_level * 5))
+local max_energy = math.min(1000, base_max_energy + (level * 5))
 if max_energy <= 0 then
     max_energy = base_max_energy
 end
@@ -122,11 +118,11 @@ if computed_regen_seconds <= 0 then
     computed_regen_seconds = 1
 end
 local rebirth_bonus_per_level = 1 + math.max(0, rebirth_count)
-local tap_value = 1 + (multitap_level * rebirth_bonus_per_level)
+local tap_value = 1 + (level * rebirth_bonus_per_level)
 if tap_value <= 0 then
     tap_value = hot_tap_power
 end
-local profit_per_hour = 100 + (profit_level * 35) + (profit_level * profit_level * 7)
+local profit_per_hour = 100 + (level * 35) + (level * level * 7)
 
 local mega_boost_active = boosts['mega_boost_active'] == true
 local ghost_boost_active = boosts['ghost_boost_active'] == true

@@ -5,7 +5,12 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
 from core.upgrades.calculator import calc_upgrade_price, calc_upgrade_value
-from core.game_logic import get_tap_value_with_rebirth
+from core.game_logic import (
+    get_tap,
+    get_profit_per_hour,
+    get_max_energy,
+    resolve_progression_level,
+)
 from observability.metrics import observe_storage_error, observe_storage_timing
 
 
@@ -23,11 +28,7 @@ class UpgradesServiceDeps:
 
 
 def get_global_upgrade_level_service(user: dict) -> int:
-    return max(
-        int(user.get("multitap_level", 0)),
-        int(user.get("profit_level", 0)),
-        int(user.get("energy_level", 0)),
-    )
+    return resolve_progression_level(user)
 
 
 async def apply_global_upgrade_for_user_service(
@@ -45,23 +46,21 @@ async def apply_global_upgrade_for_user_service(
     new_level = current_level + 1
     new_values = calc_upgrade_value(new_level)
     rebirth_count = max(0, int(user.get("rebirth_count", 0)))
-    new_profit_per_tap = get_tap_value_with_rebirth(new_level, rebirth_count)
-    new_profit_per_hour = new_values.profit_per_hour
-    new_max_energy = new_values.max_energy
+    new_profit_per_tap = get_tap(new_level, rebirth_count)
+    new_profit_per_hour = get_profit_per_hour(new_level)
+    new_max_energy = get_max_energy(new_level)
     new_coins = current_coins - price
 
-    ml = int(user.get("multitap_level", 0))
-    pl = int(user.get("profit_level", 0))
-    el = int(user.get("energy_level", 0))
+    current_level_value = int(user.get("level", 0) or 0)
 
     expected = {
         "coins": current_coins,
-        "multitap_level": ml,
-        "profit_level": pl,
-        "energy_level": el,
+        "level": current_level_value,
     }
     updates = {
         "coins": new_coins,
+        "level": new_level,
+        # Deprecated mirrors kept for compatibility.
         "multitap_level": new_level,
         "profit_level": new_level,
         "energy_level": new_level,
@@ -97,15 +96,19 @@ async def apply_global_upgrade_for_user_service(
             pipe.hset(
                 f"user_hot:{user_id}",
                 mapping={
-                    "multitap_level": str(new_level),
-                    "profit_level": str(new_level),
-                    "energy_level": str(new_level),
+                    "level": str(new_level),
                     "tap_power": str(new_profit_per_tap),
                     "energy_regen": str(new_values.energy_regen),
                     "max_energy": str(new_max_energy),
                     "profit_per_hour": str(new_profit_per_hour),
                     "energy": str(new_max_energy),
                 },
+            )
+            pipe.hdel(
+                f"user_hot:{user_id}",
+                "multitap_level",
+                "profit_level",
+                "energy_level",
             )
             await pipe.execute()
             observe_storage_timing("redis", "energy_v2_hset", "upgrades", time.perf_counter() - t)
@@ -118,11 +121,8 @@ async def apply_global_upgrade_for_user_service(
         "success": True,
         "coins": int(updated_user.get("coins", new_coins)),
         "new_level": new_level,
-        "levels": {
-            "multitap": new_level,
-            "profit": new_level,
-            "energy": new_level,
-        },
+        "level": new_level,
+        "levels": {"multitap": new_level, "profit": new_level, "energy": new_level},
         "prices": {
             "global": next_cost,
         },

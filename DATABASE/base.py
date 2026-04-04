@@ -606,7 +606,17 @@ async def update_user(user_id: int, data: dict):
         if "max_energy" in data:
             user.max_energy = data["max_energy"]
         if "level" in data:
-            user.level = data["level"]
+            next_level = int(data["level"] or 0)
+            current_level = int(user.level or 0)
+            # Prevent silent level regression in generic update path.
+            # Legitimate reset is rebirth to level 0.
+            if next_level != 0 and next_level < current_level:
+                next_level = current_level
+            user.level = next_level
+            # Keep deprecated mirrors aligned while they still exist.
+            user.multitap_level = next_level
+            user.profit_level = next_level
+            user.energy_level = next_level
         if "multitap_level" in data:
             user.multitap_level = data["multitap_level"]
         if "profit_level" in data:
