@@ -3370,6 +3370,74 @@ async def _repair_user_hot_if_below_db(user_id: int, redis_conn) -> dict:
     }
 
 
+async def _repair_user_hot_exact_to_db_if_safe(user_id: int, redis_conn) -> dict:
+    """
+    One-time exact repair for drift where coins_hot != DB.
+    Safety:
+    - requires NO pending/flushing coins (to avoid dropping unflushed gains)
+    - updates only Redis hot-state (coins_hot + user_hot.coins)
+    - does not write DB
+    """
+    from workers.reconcile_coins import reconcile_user
+
+    before = await reconcile_user(user_id, redis_conn)
+    if int(before.pending_coins or 0) > 0 or int(before.flushing_coins or 0) > 0:
+        return {
+            "user_id": before.user_id,
+            "repaired": False,
+            "reason": "unsafe_pending_or_flushing_present",
+            "before": {
+                "db_coins": before.db_coins,
+                "hot_coins": before.hot_coins,
+                "pending_coins": before.pending_coins,
+                "flushing_coins": before.flushing_coins,
+                "mismatch_categories": before.mismatch_categories,
+            },
+        }
+
+    repair_lua = """
+    local hot_key = KEYS[1]
+    local user_hot_key = KEYS[2]
+    local db_coins = tonumber(ARGV[1]) or 0
+
+    redis.call('SET', hot_key, tostring(db_coins))
+    if redis.call('EXISTS', user_hot_key) == 1 then
+        redis.call('HSET', user_hot_key, 'coins', tostring(db_coins))
+    end
+    return db_coins
+    """
+    repaired_hot = int(
+        await redis_conn.eval(
+            repair_lua,
+            2,
+            f"coins_hot:{int(user_id)}",
+            f"user_hot:{int(user_id)}",
+            before.db_coins,
+        )
+    )
+    after = await reconcile_user(user_id, redis_conn)
+
+    return {
+        "user_id": before.user_id,
+        "repaired": True,
+        "before": {
+            "db_coins": before.db_coins,
+            "hot_coins": before.hot_coins,
+            "pending_coins": before.pending_coins,
+            "flushing_coins": before.flushing_coins,
+            "mismatch_categories": before.mismatch_categories,
+        },
+        "after": {
+            "db_coins": after.db_coins,
+            "hot_coins": after.hot_coins,
+            "pending_coins": after.pending_coins,
+            "flushing_coins": after.flushing_coins,
+            "mismatch_categories": after.mismatch_categories,
+        },
+        "repaired_hot": repaired_hot,
+    }
+
+
 @router.post("/api/admin/reconcile/coins/{user_id}/repair-hot")
 async def admin_reconcile_repair_hot_user(user_id: int, request: Request):
     """Repair one user if and only if confirmed drift exists (DB > coins_hot)."""
@@ -3379,6 +3447,21 @@ async def admin_reconcile_repair_hot_user(user_id: int, request: Request):
         return {"error": "Redis unavailable", "status": "error"}
 
     result = await _repair_user_hot_if_below_db(user_id, redis_conn)
+    return {"status": "ok", **result}
+
+
+@router.post("/api/admin/reconcile/coins/{user_id}/repair-hot-exact")
+async def admin_reconcile_repair_hot_exact_user(user_id: int, request: Request):
+    """
+    Force one user's Redis hot balance to DB coins, only when safe
+    (no pending/flushing deltas).
+    """
+    await require_admin_access(request)
+    redis_conn = await get_redis_or_none()
+    if not redis_conn:
+        return {"error": "Redis unavailable", "status": "error"}
+
+    result = await _repair_user_hot_exact_to_db_if_safe(user_id, redis_conn)
     return {"status": "ok", **result}
 
 
