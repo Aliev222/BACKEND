@@ -2733,9 +2733,6 @@ def _build_upgrades_service_deps() -> UpgradesServiceDeps:
         get_user=get_user,
         update_user_if_matches=update_user_if_matches,
         get_redis_or_none=get_redis_or_none,
-        get_tap_value=get_tap_value,
-        get_hour_value=get_hour_value,
-        get_max_energy=get_max_energy,
         logger=logger,
         GLOBAL_UPGRADE_PRICES=GLOBAL_UPGRADE_PRICES,
         MAX_UPGRADE_LEVEL=MAX_UPGRADE_LEVEL,
@@ -2746,7 +2743,7 @@ def _build_clicks_service_deps() -> ClicksServiceDeps:
     return ClicksServiceDeps(
         require_telegram_user=require_telegram_user,
         require_dual_rate_limit=require_dual_rate_limit,
-        get_user_cached=get_user_cached,
+        get_user=get_user,
         acquire_idempotency_key=acquire_idempotency_key,
         get_request_ip=get_request_ip,
         get_redis_or_none=get_redis_or_none,

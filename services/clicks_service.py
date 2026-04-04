@@ -165,7 +165,7 @@ return {0, new_coins, new_energy, effective_clicks, gained, allowed_clicks}
 class ClicksServiceDeps:
     require_telegram_user: Callable[..., Awaitable[Any]]
     require_dual_rate_limit: Callable[..., Awaitable[Any]]
-    get_user_cached: Callable[[int], Awaitable[dict | None]]
+    get_user: Callable[[int], Awaitable[dict | None]]
     acquire_idempotency_key: Callable[[str, int], Awaitable[bool]]
     get_request_ip: Callable[[Any], str]
     get_redis_or_none: Callable[[], Awaitable[Any]]
@@ -389,8 +389,8 @@ async def sync_energy_service(payload: Any, request: Any, deps: ClicksServiceDep
     try:
         await deps.require_telegram_user(request, payload.user_id)
         t = time.perf_counter()
-        user = await deps.get_user_cached(payload.user_id)
-        _observe_store("db", "get_user_cached", t)
+        user = await deps.get_user(payload.user_id)
+        _observe_store("db", "get_user", t)
 
         if not user:
             raise HTTPException(status_code=404, detail="User not found")

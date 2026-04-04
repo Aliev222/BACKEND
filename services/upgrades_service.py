@@ -4,6 +4,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
+from core.upgrades.calculator import calc_upgrade_price, calc_upgrade_value
 from observability.metrics import observe_storage_error, observe_storage_timing
 
 
@@ -15,9 +16,6 @@ class UpgradesServiceDeps:
     get_user: Callable[[int], Awaitable[dict | None]]
     update_user_if_matches: Callable[[int, dict, dict], Awaitable[dict | None]]
     get_redis_or_none: Callable[[], Awaitable[Any]]
-    get_tap_value: Callable[[int], int]
-    get_hour_value: Callable[[int], int]
-    get_max_energy: Callable[[int], int]
     logger: Any
     GLOBAL_UPGRADE_PRICES: list[int]
     MAX_UPGRADE_LEVEL: int
@@ -38,15 +36,16 @@ async def apply_global_upgrade_for_user_service(
     if current_level >= deps.MAX_UPGRADE_LEVEL:
         raise HTTPException(status_code=400, detail="Max level reached")
 
-    price = deps.GLOBAL_UPGRADE_PRICES[current_level]
+    price = calc_upgrade_price(current_level, deps.GLOBAL_UPGRADE_PRICES)
     current_coins = int(user.get("coins", 0))
     if current_coins < price:
         raise HTTPException(status_code=400, detail="Not enough coins")
 
     new_level = current_level + 1
-    new_profit_per_tap = deps.get_tap_value(new_level)
-    new_profit_per_hour = deps.get_hour_value(new_level)
-    new_max_energy = deps.get_max_energy(new_level)
+    new_values = calc_upgrade_value(new_level)
+    new_profit_per_tap = new_values.tap_power
+    new_profit_per_hour = new_values.profit_per_hour
+    new_max_energy = new_values.max_energy
     new_coins = current_coins - price
 
     ml = int(user.get("multitap_level", 0))
@@ -83,24 +82,36 @@ async def apply_global_upgrade_for_user_service(
         redis_conn = await deps.get_redis_or_none()
         if redis_conn:
             t = time.perf_counter()
-            await redis_conn.hset(
+            now_ts = str(datetime.utcnow().timestamp())
+            pipe = redis_conn.pipeline()
+            pipe.hset(
                 f"energy:v2:{user_id}",
                 mapping={
                     "value": str(new_max_energy),
-                    "updated_at": str(datetime.utcnow().timestamp()),
+                    "updated_at": now_ts,
                     "max_energy": str(new_max_energy),
                 },
             )
+            pipe.hset(
+                f"user_hot:{user_id}",
+                mapping={
+                    "multitap_level": str(new_level),
+                    "profit_level": str(new_level),
+                    "energy_level": str(new_level),
+                    "tap_power": str(new_profit_per_tap),
+                    "energy_regen": str(new_values.energy_regen),
+                    "max_energy": str(new_max_energy),
+                    "profit_per_hour": str(new_profit_per_hour),
+                    "energy": str(new_max_energy),
+                },
+            )
+            await pipe.execute()
             observe_storage_timing("redis", "energy_v2_hset", "upgrades", time.perf_counter() - t)
     except Exception:
         observe_storage_error("redis", "energy_v2_hset", "upgrades")
         pass
 
-    next_cost = (
-        deps.GLOBAL_UPGRADE_PRICES[new_level]
-        if new_level < len(deps.GLOBAL_UPGRADE_PRICES)
-        else 0
-    )
+    next_cost = calc_upgrade_price(new_level, deps.GLOBAL_UPGRADE_PRICES)
     return {
         "success": True,
         "coins": int(updated_user.get("coins", new_coins)),

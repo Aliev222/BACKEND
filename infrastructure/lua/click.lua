@@ -90,7 +90,6 @@ local hot_coins = tonumber(redis.call('HGET', user_hot_key, 'coins') or '0')
 local hot_energy = tonumber(redis.call('HGET', user_hot_key, 'energy') or tostring(base_max_energy))
 local hot_last_energy_ts = tonumber(redis.call('HGET', user_hot_key, 'last_energy_ts') or tostring(now_ts))
 local hot_tap_power = tonumber(redis.call('HGET', user_hot_key, 'tap_power') or '1')
-local hot_energy_regen = tonumber(redis.call('HGET', user_hot_key, 'energy_regen') or tostring(regen_seconds))
 local multitap_level = tonumber(redis.call('HGET', user_hot_key, 'multitap_level') or '0')
 local profit_level = tonumber(redis.call('HGET', user_hot_key, 'profit_level') or '0')
 local energy_level = tonumber(redis.call('HGET', user_hot_key, 'energy_level') or '0')
@@ -98,7 +97,6 @@ local hot_click_streak = tonumber(redis.call('HGET', user_hot_key, 'click_streak
 local hot_suspicion_score = tonumber(redis.call('HGET', user_hot_key, 'suspicion_score') or '0')
 local hot_version = tonumber(redis.call('HGET', user_hot_key, 'version') or tostring(hot_state_version_default))
 local skin_multiplier = tonumber(redis.call('HGET', user_hot_key, 'skin_multiplier') or '1')
-local max_energy = tonumber(redis.call('HGET', user_hot_key, 'max_energy') or tostring(base_max_energy))
 local boosts = json_decode_or_empty(redis.call('HGET', user_hot_key, 'boosts'))
 local flags = json_decode_or_empty(redis.call('HGET', user_hot_key, 'flags'))
 local click_guard = {}
@@ -113,12 +111,17 @@ if hot_version < 1 then
     hot_version = hot_state_version_default
 end
 
+local max_energy = math.min(1000, base_max_energy + (energy_level * 5))
 if max_energy <= 0 then
-    max_energy = math.min(1000, base_max_energy + (energy_level * 5))
+    max_energy = base_max_energy
 end
-local tap_value = hot_tap_power
+local computed_regen_seconds = regen_seconds
+if computed_regen_seconds <= 0 then
+    computed_regen_seconds = 1
+end
+local tap_value = 1 + multitap_level
 if tap_value <= 0 then
-    tap_value = 1 + multitap_level
+    tap_value = hot_tap_power
 end
 local profit_per_hour = 100 + (profit_level * 35) + (profit_level * profit_level * 7)
 
@@ -176,10 +179,7 @@ local elapsed = now_ts - stored_updated
 if elapsed < 0 then
     elapsed = 0
 end
-local effective_regen_seconds = hot_energy_regen
-if not effective_regen_seconds or effective_regen_seconds <= 0 then
-    effective_regen_seconds = regen_seconds
-end
+local effective_regen_seconds = computed_regen_seconds
 local regen = math.floor(elapsed / effective_regen_seconds)
 local current_energy = stored_value
 if regen > 0 then
