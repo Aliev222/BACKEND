@@ -849,7 +849,7 @@ ALLOWED_CORS_ORIGINS = _parse_csv_env(
     DEV_CORS_ORIGINS if APP_ENV != "production" else PROD_CORS_ORIGINS,
 )
 ALLOW_NULL_ORIGIN = _parse_bool_env("CORS_ALLOW_NULL_ORIGIN", APP_ENV != "production")
-MOBILE_ONLY_ENFORCED = _parse_bool_env("MOBILE_ONLY_ENFORCED", True)
+MOBILE_ONLY_ENFORCED = _parse_bool_env("MOBILE_ONLY_ENFORCED", False)
 MOBILE_TELEGRAM_PLATFORMS = {"android", "ios", "ipados"}
 DESKTOP_TELEGRAM_PLATFORMS = {
     "tdesktop",

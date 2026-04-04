@@ -27,7 +27,7 @@ SESSION_TOKEN_TTL_SECONDS = max(
 
 APP_ENV = os.getenv("APP_ENV", "production").strip().lower()
 
-MOBILE_ONLY_ENFORCED = os.getenv("MOBILE_ONLY_ENFORCED", "1").strip().lower() in {
+MOBILE_ONLY_ENFORCED = os.getenv("MOBILE_ONLY_ENFORCED", "0").strip().lower() in {
     "1",
     "true",
     "yes",
