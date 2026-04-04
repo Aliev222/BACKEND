@@ -1,0 +1,179 @@
+local user_rl_key = KEYS[1]
+local ip_rl_key = KEYS[2]
+local idem_key = KEYS[3]
+local energy_key = KEYS[4]
+local hot_key = KEYS[5]
+local pending_key = KEYS[6]
+local tournament_key = KEYS[7]
+local click_buf_key = KEYS[8]
+local referral_pending_key = KEYS[9]
+local activity_key = KEYS[10]
+local click_guard_key = KEYS[11]
+
+local user_limit = tonumber(ARGV[1])
+local ip_limit = tonumber(ARGV[2])
+local window_seconds = tonumber(ARGV[3])
+local idem_ttl = tonumber(ARGV[4])
+local now_ts = tonumber(ARGV[5])
+local now_iso = ARGV[6]
+local requested_clicks = tonumber(ARGV[7])
+local max_click_batch_size = tonumber(ARGV[8])
+local max_real_cps = tonumber(ARGV[9])
+local click_burst_allowance = tonumber(ARGV[10])
+local click_time_cap = tonumber(ARGV[11])
+local initial_click_allowance = tonumber(ARGV[12])
+local free_energy_clicks = tonumber(ARGV[13])
+local coin_per_tap = tonumber(ARGV[14])
+local baseline_click_ts = tonumber(ARGV[15])
+local max_energy = tonumber(ARGV[16])
+local init_energy = tonumber(ARGV[17])
+local suspicious_overshoot = tonumber(ARGV[18])
+local init_hot_coins = tonumber(ARGV[19])
+local referrer_id = tonumber(ARGV[20])
+local prev_suspicion_score = tonumber(ARGV[21])
+local suspicion_soft_limit = tonumber(ARGV[22])
+local regen_seconds = tonumber(ARGV[23])
+local user_id = ARGV[24]
+
+-- user rate limit
+local user_current = redis.call('INCR', user_rl_key)
+if user_current == 1 then
+    redis.call('EXPIRE', user_rl_key, window_seconds)
+end
+if user_current > user_limit then
+    return {1, 0, 0, 0, 0, 0, 0, prev_suspicion_score}
+end
+
+-- ip rate limit
+local ip_current = redis.call('INCR', ip_rl_key)
+if ip_current == 1 then
+    redis.call('EXPIRE', ip_rl_key, window_seconds)
+end
+if ip_current > ip_limit then
+    return {4, 0, 0, 0, 0, 0, 0, prev_suspicion_score}
+end
+
+-- idempotency
+local idempotent_ok = redis.call('SET', idem_key, '1', 'EX', idem_ttl, 'NX')
+if not idempotent_ok then
+    return {2, 0, 0, 0, 0, 0, 0, prev_suspicion_score}
+end
+
+if redis.call('EXISTS', energy_key) == 0 then
+    redis.call('HSET', energy_key,
+        'value', tostring(init_energy),
+        'updated_at', tostring(now_ts),
+        'max_energy', tostring(max_energy),
+        'click_updated_at', tostring(baseline_click_ts)
+    )
+end
+
+local stored_value = tonumber(redis.call('HGET', energy_key, 'value') or '0')
+local stored_updated = tonumber(redis.call('HGET', energy_key, 'updated_at') or tostring(now_ts))
+local stored_max = tonumber(redis.call('HGET', energy_key, 'max_energy') or tostring(max_energy))
+local click_updated = tonumber(redis.call('HGET', energy_key, 'click_updated_at') or tostring(baseline_click_ts))
+
+if stored_max ~= max_energy then
+    stored_max = max_energy
+    if stored_value > stored_max then
+        stored_value = stored_max
+    end
+end
+
+local elapsed = now_ts - stored_updated
+if elapsed < 0 then
+    elapsed = 0
+end
+local regen = math.floor(elapsed / regen_seconds)
+local current_energy = stored_value
+if regen > 0 then
+    current_energy = math.min(stored_max, stored_value + regen)
+end
+
+local allowed_clicks = 0
+if click_updated and click_updated > 0 then
+    local elapsed_click = now_ts - click_updated
+    if elapsed_click < 0 then
+        elapsed_click = 0
+    end
+    elapsed_click = math.min(elapsed_click, click_time_cap)
+    local allowed_by_time = math.floor(elapsed_click * max_real_cps) + click_burst_allowance
+    allowed_clicks = math.max(1, math.min(allowed_by_time, max_click_batch_size))
+    allowed_clicks = math.min(requested_clicks, allowed_clicks)
+else
+    allowed_clicks = math.min(requested_clicks, initial_click_allowance, max_click_batch_size)
+end
+
+if requested_clicks > (allowed_clicks + suspicious_overshoot)
+   and requested_clicks > math.max(allowed_clicks * 2, click_burst_allowance * 2) then
+    return {3, 0, current_energy, 0, 0, allowed_clicks, 0, prev_suspicion_score}
+end
+
+local effective_clicks = allowed_clicks
+if free_energy_clicks ~= 1 then
+    effective_clicks = math.min(allowed_clicks, current_energy)
+end
+
+local gained = effective_clicks * coin_per_tap
+local new_energy = current_energy
+if free_energy_clicks ~= 1 then
+    new_energy = math.max(0, current_energy - effective_clicks)
+end
+
+if redis.call('EXISTS', hot_key) == 0 then
+    redis.call('SET', hot_key, tostring(init_hot_coins))
+end
+
+local new_coins = redis.call('INCRBY', hot_key, gained)
+redis.call('INCRBY', pending_key, gained)
+redis.call('HSET', energy_key,
+    'value', tostring(new_energy),
+    'updated_at', tostring(now_ts),
+    'max_energy', tostring(max_energy),
+    'click_updated_at', tostring(now_ts)
+)
+
+local referral_bonus = 0
+if gained > 0 then
+    redis.call('ZINCRBY', tournament_key, gained, user_id)
+    redis.call('HINCRBY', click_buf_key, 'coins', gained)
+    redis.call('HINCRBY', click_buf_key, 'clicks', effective_clicks)
+    redis.call('EXPIRE', click_buf_key, 300)
+    if referrer_id and referrer_id > 0 then
+        referral_bonus = math.max(1, math.floor(gained * 0.05))
+        if referral_pending_key and string.len(referral_pending_key) > 0 then
+            redis.call('HINCRBY', referral_pending_key, 'coins', referral_bonus)
+            redis.call('HINCRBY', referral_pending_key, 'clicks', 1)
+            redis.call('EXPIRE', referral_pending_key, 300)
+        end
+    end
+end
+
+redis.call('SETEX', activity_key, 300, now_iso)
+
+local new_suspicion_score = prev_suspicion_score
+local last_reason = cjson.null
+if requested_clicks > allowed_clicks then
+    new_suspicion_score = math.min(12, prev_suspicion_score + 1)
+    last_reason = "requested_gt_allowed"
+elseif prev_suspicion_score > 0 then
+    new_suspicion_score = math.max(0, prev_suspicion_score - 1)
+end
+
+local guard_payload = {
+    suspicion_score = new_suspicion_score,
+    last_click_at = now_iso,
+    last_requested_clicks = requested_clicks,
+    last_allowed_clicks = allowed_clicks,
+    last_effective_clicks = effective_clicks,
+    updated_at = now_iso
+}
+if last_reason ~= cjson.null then
+    guard_payload["last_reason"] = last_reason
+end
+if new_suspicion_score >= suspicion_soft_limit then
+    guard_payload["flagged_at"] = now_iso
+end
+redis.call('SET', click_guard_key, cjson.encode(guard_payload), 'EX', 300)
+
+return {0, new_coins, new_energy, effective_clicks, gained, allowed_clicks, referral_bonus, new_suspicion_score}

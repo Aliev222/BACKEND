@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
+from infrastructure.click_executor import process_click_lua
 from observability.metrics import observe_storage_error, observe_storage_timing
 
 
@@ -201,53 +202,14 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
         mark("require_telegram_user", t)
 
         t = time.perf_counter()
-        await deps.require_dual_rate_limit(
-            "clicks", request, payload.user_id, 90, 60, ip_limit=180
-        )
-        mark("require_dual_rate_limit", t)
-        timings["require_user_action_lock"] = 0.0  # Click path currently does not use this lock.
-
-        t = time.perf_counter()
         user = await deps.get_user_cached(payload.user_id)
         mark("user_profile_hot_state_load", t)
+        timings["get_user_cached"] = timings["user_profile_hot_state_load"]
         _observe_store("db", "get_user_cached", t)
 
         if payload.clicks > deps.MAX_CLICK_BATCH_SIZE:
             flush_trace("too_many_clicks")
             raise HTTPException(status_code=400, detail="Too many clicks in batch")
-
-        batch_key = f"idem:clicks:{payload.user_id}:{payload.batch_id}"
-        t = time.perf_counter()
-        is_new_batch = await deps.acquire_idempotency_key(batch_key, ttl=86400)
-        mark("idempotency_check", t)
-        if not is_new_batch:
-            deps.logger.warning(
-                "FRAUD_SUSPECT duplicate_batch user=%s batch_id=%s ip=%s",
-                payload.user_id,
-                payload.batch_id,
-                deps.get_request_ip(request),
-            )
-            flush_trace("duplicate_batch")
-            raise HTTPException(status_code=409, detail="Duplicate batch")
-
-        t = time.perf_counter()
-        if deps.ENABLE_K6_FRAUD_HEURISTICS:
-            batch_parts = str(payload.batch_id).split("-")
-            if len(batch_parts) >= 2:
-                try:
-                    batch_vu = int(batch_parts[0])
-                    batch_iter = int(batch_parts[1])
-                    if batch_iter > 500 and batch_vu <= 5:
-                        deps.logger.warning(
-                            "FRAUD_SUSPECT high_iter_same_vu user=%s batch_id=%s vu=%s iter=%s",
-                            payload.user_id,
-                            payload.batch_id,
-                            batch_vu,
-                            batch_iter,
-                        )
-                except (ValueError, IndexError):
-                    pass
-        mark("anti_fraud_precheck", t)
 
         if not user:
             flush_trace("user_not_found")
@@ -256,7 +218,6 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
         t = time.perf_counter()
         now = datetime.utcnow()
         max_energy = deps.resolve_max_energy(user)
-
         redis_conn = await deps.get_redis_or_none()
         mark("precompute_and_redis_load", t)
         if not redis_conn:
@@ -265,7 +226,6 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
                 status_code=503,
                 detail="Redis unavailable: click processing temporarily disabled",
             )
-        energy_key = f"energy:v2:{payload.user_id}"
 
         multitap_level = int(user.get("multitap_level", 0))
         tap_value = deps.get_tap_value(multitap_level)
@@ -301,21 +261,33 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             coin_per_tap *= max(1, task_tap_boost_multiplier)
 
         safe_requested_clicks = min(payload.clicks, deps.MAX_CLICK_BATCH_SIZE)
-        coins_hot_key = f"coins_hot:{payload.user_id}"
-        coins_pending_key = f"coins_pending:{payload.user_id}"
         baseline_click_dt = last_click_at or deps.normalize_dt(user.get("last_energy_update"))
         baseline_click_ts = baseline_click_dt.timestamp() if baseline_click_dt else 0.0
         init_energy = deps.calculate_current_energy(user, now)
+        prev_suspicion_score = int(click_guard.get("suspicion_score", 0))
+        request_ip = deps.get_request_ip(request)
+        referrer_id = int(user.get("referrer_id") or 0)
 
-        t = time.perf_counter()
-        atomic_result = await redis_conn.eval(
-            ATOMIC_CLICK_MUTATION_LUA,
-            3,
-            energy_key,
-            coins_hot_key,
-            coins_pending_key,
+        keys = [
+            f"rl:clicks:{payload.user_id}",
+            f"rl:clicks:ip:{request_ip}",
+            f"idem:clicks:{payload.user_id}:{payload.batch_id}",
+            f"energy:v2:{payload.user_id}",
+            f"coins_hot:{payload.user_id}",
+            f"coins_pending:{payload.user_id}",
+            deps.TOURNAMENT_KEY,
+            f"click_buf:{payload.user_id}",
+            f"referral_pending:{referrer_id}" if referrer_id > 0 else "",
+            f"activity:{payload.user_id}",
+            f"click_guard:{payload.user_id}",
+        ]
+        args = [
+            "90",
+            "180",
+            "60",
+            "86400",
             str(now.timestamp()),
-            str(deps.ENERGY_REGEN_SECONDS),
+            now.isoformat(),
             str(safe_requested_clicks),
             str(deps.MAX_CLICK_BATCH_SIZE),
             str(deps.MAX_REAL_CLICKS_PER_SECOND),
@@ -328,166 +300,81 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             str(max_energy),
             str(init_energy),
             str(deps.CLICK_SUSPICIOUS_OVERSHOOT),
+            str(int(user.get("coins", 0))),
+            str(referrer_id),
+            str(prev_suspicion_score),
+            str(deps.CLICK_SUSPICION_SOFT_LIMIT),
+            str(deps.ENERGY_REGEN_SECONDS),
+            str(payload.user_id),
+        ]
+
+        t = time.perf_counter()
+        lua_result = await process_click_lua(
+            redis_conn,
+            user_id=payload.user_id,
+            clicks=safe_requested_clicks,
+            batch_id=payload.batch_id,
+            keys=keys,
+            args=args,
         )
+        mark("click_lua_eval", t)
         mark("atomic_redis_click_mutation", t)
-        _observe_store("redis", "atomic_click_mutation", t)
+        timings["require_dual_rate_limit"] = 0.0
+        timings["idempotency_check"] = 0.0
+        timings["post_mutation_redis_activity_and_guard"] = 0.0
+        timings["post_mutation_redis_side_effects"] = 0.0
+        _observe_store("redis", "click_lua_eval", t)
 
-        status = int(atomic_result[0])
-        if status == -1:
-            t = time.perf_counter()
-            await deps.ensure_coins_hot_initialized(
-                payload.user_id, int(user.get("coins", 0)), redis_conn
+        if lua_result.status == 1 or lua_result.status == 4:
+            flush_trace("rate_limited")
+            raise HTTPException(status_code=429, detail="Too many requests")
+        if lua_result.status == 2:
+            deps.logger.warning(
+                "FRAUD_SUSPECT duplicate_batch user=%s batch_id=%s ip=%s",
+                payload.user_id,
+                payload.batch_id,
+                request_ip,
             )
-            atomic_result = await redis_conn.eval(
-                ATOMIC_CLICK_MUTATION_LUA,
-                3,
-                energy_key,
-                coins_hot_key,
-                coins_pending_key,
-                str(now.timestamp()),
-                str(deps.ENERGY_REGEN_SECONDS),
-                str(safe_requested_clicks),
-                str(deps.MAX_CLICK_BATCH_SIZE),
-                str(deps.MAX_REAL_CLICKS_PER_SECOND),
-                str(deps.CLICK_BURST_ALLOWANCE),
-                str(deps.CLICK_TIME_ACCUMULATION_CAP_SECONDS),
-                str(deps.INITIAL_CLICK_BATCH_ALLOWANCE),
-                "1" if free_energy_clicks else "0",
-                str(coin_per_tap),
-                str(baseline_click_ts),
-                str(max_energy),
-                str(init_energy),
-                str(deps.CLICK_SUSPICIOUS_OVERSHOOT),
-            )
-            mark("atomic_redis_click_mutation_reinit", t)
-            _observe_store("redis", "atomic_click_mutation_reinit", t)
-            status = int(atomic_result[0])
-
-        if status == -2:
-            allowed_clicks = int(atomic_result[5])
-            click_guard["hard_rejections"] = (
-                int(click_guard.get("hard_rejections", 0)) + 1
-            )
-            click_guard["last_rejection_at"] = now.isoformat()
-            click_guard["last_reason"] = (
-                f"Click batch overshoot: requested={safe_requested_clicks}, allowed={allowed_clicks}"
-            )
-            deps.write_click_guard_state(extra, click_guard)
-            t = time.perf_counter()
-            await deps.update_user(payload.user_id, {"extra_data": extra})
-            mark("anti_fraud_db_update", t)
-            _observe_store("db", "update_user_anti_fraud", t)
+            flush_trace("duplicate_batch")
+            raise HTTPException(status_code=409, detail="Duplicate batch")
+        if lua_result.status == 3:
             deps.logger.warning(
                 "Rejected suspicious click batch user=%s ip=%s requested=%s allowed=%s",
                 payload.user_id,
-                deps.get_request_ip(request),
+                request_ip,
                 safe_requested_clicks,
-                allowed_clicks,
+                lua_result.allowed_clicks,
             )
             flush_trace("rate_limited_overshoot")
             raise HTTPException(status_code=429, detail="Click rate too high")
-
-        if status != 0:
+        if lua_result.status != 0:
             deps.logger.error(
-                "Atomic click mutation failed user=%s status=%s result=%s",
+                "Click lua mutation failed user=%s status=%s",
                 payload.user_id,
-                status,
-                atomic_result,
+                lua_result.status,
             )
             flush_trace("atomic_mutation_failed")
-            raise HTTPException(status_code=500, detail="Atomic click mutation failed")
-
-        new_coins = int(atomic_result[1])
-        new_energy = int(atomic_result[2])
-        effective_clicks = int(atomic_result[3])
-        gained = int(atomic_result[4])
-        allowed_clicks = int(atomic_result[5])
-
-        suspicion_score = int(click_guard.get("suspicion_score", 0))
-        if safe_requested_clicks > allowed_clicks:
-            suspicion_score += 1
-            click_guard["last_reason"] = (
-                f"Requested {safe_requested_clicks} clicks while server allowed {allowed_clicks}"
-            )
-        elif suspicion_score > 0:
-            suspicion_score -= 1
-            click_guard.pop("last_reason", None)
-
-        click_guard["suspicion_score"] = min(12, max(0, suspicion_score))
-        click_guard["last_click_at"] = now.isoformat()
-        click_guard["last_requested_clicks"] = safe_requested_clicks
-        click_guard["last_allowed_clicks"] = allowed_clicks
-        click_guard["last_effective_clicks"] = effective_clicks
-        click_guard["updated_at"] = now.isoformat()
-        if click_guard["suspicion_score"] >= deps.CLICK_SUSPICION_SOFT_LIMIT:
-            click_guard["flagged_at"] = now.isoformat()
-
-        t = time.perf_counter()
-        deps.write_click_guard_state(extra, click_guard)
-        mark("anti_fraud_guard_update", t)
-
-        t = time.perf_counter()
-        try:
-            async with redis_conn.pipeline(transaction=False) as pipe:
-                pipe.setex(f"activity:{payload.user_id}", 300, now.isoformat())
-                pipe.set(
-                    f"click_guard:{payload.user_id}",
-                    json.dumps(click_guard),
-                    ex=300,
-                )
-                await pipe.execute()
-            _observe_store("redis", "post_mutation_activity_guard", t)
-        except Exception as e:
-            deps.logger.warning("Redis activity/click_guard write failed (non-critical): %s", e)
-            _observe_store("redis", "post_mutation_activity_guard", t, outcome="error")
-            observe_storage_error("redis", "post_mutation_activity_guard", "clicks")
-        mark("post_mutation_redis_activity_and_guard", t)
-
-        t = time.perf_counter()
-        if gained > 0:
-            click_buf_key = f"click_buf:{payload.user_id}"
-            async with redis_conn.pipeline(transaction=False) as pipe:
-                pipe.zincrby(deps.TOURNAMENT_KEY, gained, str(payload.user_id))
-                pipe.hincrby(click_buf_key, "coins", gained)
-                pipe.hincrby(click_buf_key, "clicks", effective_clicks)
-                pipe.expire(click_buf_key, 300)
-
-                referral_bonus = 0
-                referrer_id = user.get("referrer_id")
-                if referrer_id:
-                    referral_bonus = max(1, int(gained * 0.05))
-                    referral_pending_key = f"referral_pending:{referrer_id}"
-                    pipe.hincrby(referral_pending_key, "coins", referral_bonus)
-                    pipe.hincrby(referral_pending_key, "clicks", 1)
-                    pipe.expire(referral_pending_key, 300)
-
-                await pipe.execute()
-            _observe_store("redis", "post_mutation_side_effects", t)
-        else:
-            referral_bonus = 0
-            _observe_store("redis", "post_mutation_side_effects", t)
-        mark("post_mutation_redis_side_effects", t)
+            raise HTTPException(status_code=500, detail="Click mutation failed")
 
         t = time.perf_counter()
         boosts = deps.get_all_boost_states(deps.parse_extra_data(user.get("extra_data")))
-        tap_value = deps.get_tap_value(int(user.get("multitap_level", 0)))
         profit_per_hour = deps.get_hour_value(int(user.get("profit_level", 0)))
         mark("response_assembly_prepare", t)
 
         t = time.perf_counter()
         response_payload = await deps.build_click_response_state(
             user_id=payload.user_id,
-            coins_after=new_coins,
-            energy_after=int(new_energy),
+            coins_after=lua_result.new_coins,
+            energy_after=int(lua_result.new_energy),
             max_energy=max_energy,
-            gained=gained,
-            effective_clicks=effective_clicks,
+            gained=lua_result.gained,
+            effective_clicks=lua_result.effective_clicks,
             coin_per_tap=coin_per_tap,
             tap_value=tap_value,
             profit_per_hour=profit_per_hour,
             boosts=boosts,
-            suspicion_score=click_guard["suspicion_score"],
-            referral_bonus=referral_bonus,
+            suspicion_score=lua_result.suspicion_score,
+            referral_bonus=lua_result.referral_bonus,
         )
         mark("response_assembly", t)
         flush_trace("ok")
