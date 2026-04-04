@@ -1,9 +1,27 @@
 import json
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
+
+
+def _is_trace_enabled() -> bool:
+    return (os.getenv("CLICK_TRACE_TIMING", "0") or "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+CLICK_TRACE_TIMING = _is_trace_enabled()
+
+
+def _ms_since(start_ts: float) -> float:
+    return round((time.perf_counter() - start_ts) * 1000, 2)
 
 
 ATOMIC_CLICK_MUTATION_LUA = """
@@ -149,18 +167,47 @@ class ClicksServiceDeps:
 
 
 async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksServiceDeps):
+    request_started_at = time.perf_counter()
+    timings: dict[str, float] = {}
+
+    def mark(name: str, started_at: float) -> None:
+        timings[name] = _ms_since(started_at)
+
+    def flush_trace(status: str) -> None:
+        if not CLICK_TRACE_TIMING:
+            return
+        deps.logger.info(
+            "CLICK_TIMING user=%s status=%s timings_ms=%s total_ms=%.2f",
+            payload.user_id,
+            status,
+            timings,
+            _ms_since(request_started_at),
+        )
+
     try:
+        t = time.perf_counter()
         await deps.require_telegram_user(request, payload.user_id)
+        mark("require_telegram_user", t)
+
+        t = time.perf_counter()
         await deps.require_dual_rate_limit(
             "clicks", request, payload.user_id, 90, 60, ip_limit=180
         )
+        mark("require_dual_rate_limit", t)
+        timings["require_user_action_lock"] = 0.0  # Click path currently does not use this lock.
+
+        t = time.perf_counter()
         user = await deps.get_user_cached(payload.user_id)
+        mark("user_profile_hot_state_load", t)
 
         if payload.clicks > deps.MAX_CLICK_BATCH_SIZE:
+            flush_trace("too_many_clicks")
             raise HTTPException(status_code=400, detail="Too many clicks in batch")
 
         batch_key = f"idem:clicks:{payload.user_id}:{payload.batch_id}"
+        t = time.perf_counter()
         is_new_batch = await deps.acquire_idempotency_key(batch_key, ttl=86400)
+        mark("idempotency_check", t)
         if not is_new_batch:
             deps.logger.warning(
                 "FRAUD_SUSPECT duplicate_batch user=%s batch_id=%s ip=%s",
@@ -168,8 +215,10 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
                 payload.batch_id,
                 deps.get_request_ip(request),
             )
+            flush_trace("duplicate_batch")
             raise HTTPException(status_code=409, detail="Duplicate batch")
 
+        t = time.perf_counter()
         if deps.ENABLE_K6_FRAUD_HEURISTICS:
             batch_parts = str(payload.batch_id).split("-")
             if len(batch_parts) >= 2:
@@ -186,15 +235,20 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
                         )
                 except (ValueError, IndexError):
                     pass
+        mark("anti_fraud_precheck", t)
 
         if not user:
+            flush_trace("user_not_found")
             raise HTTPException(status_code=404, detail="User not found")
 
+        t = time.perf_counter()
         now = datetime.utcnow()
         max_energy = deps.resolve_max_energy(user)
 
         redis_conn = await deps.get_redis_or_none()
+        mark("precompute_and_redis_load", t)
         if not redis_conn:
+            flush_trace("redis_unavailable")
             raise HTTPException(
                 status_code=503,
                 detail="Redis unavailable: click processing temporarily disabled",
@@ -241,6 +295,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
         baseline_click_ts = baseline_click_dt.timestamp() if baseline_click_dt else 0.0
         init_energy = deps.calculate_current_energy(user, now)
 
+        t = time.perf_counter()
         atomic_result = await redis_conn.eval(
             ATOMIC_CLICK_MUTATION_LUA,
             3,
@@ -262,9 +317,11 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             str(init_energy),
             str(deps.CLICK_SUSPICIOUS_OVERSHOOT),
         )
+        mark("atomic_redis_click_mutation", t)
 
         status = int(atomic_result[0])
         if status == -1:
+            t = time.perf_counter()
             await deps.ensure_coins_hot_initialized(
                 payload.user_id, int(user.get("coins", 0)), redis_conn
             )
@@ -289,6 +346,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
                 str(init_energy),
                 str(deps.CLICK_SUSPICIOUS_OVERSHOOT),
             )
+            mark("atomic_redis_click_mutation_reinit", t)
             status = int(atomic_result[0])
 
         if status == -2:
@@ -301,7 +359,9 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
                 f"Click batch overshoot: requested={safe_requested_clicks}, allowed={allowed_clicks}"
             )
             deps.write_click_guard_state(extra, click_guard)
+            t = time.perf_counter()
             await deps.update_user(payload.user_id, {"extra_data": extra})
+            mark("anti_fraud_db_update", t)
             deps.logger.warning(
                 "Rejected suspicious click batch user=%s ip=%s requested=%s allowed=%s",
                 payload.user_id,
@@ -309,6 +369,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
                 safe_requested_clicks,
                 allowed_clicks,
             )
+            flush_trace("rate_limited_overshoot")
             raise HTTPException(status_code=429, detail="Click rate too high")
 
         if status != 0:
@@ -318,6 +379,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
                 status,
                 atomic_result,
             )
+            flush_trace("atomic_mutation_failed")
             raise HTTPException(status_code=500, detail="Atomic click mutation failed")
 
         new_coins = int(atomic_result[1])
@@ -345,46 +407,55 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
         if click_guard["suspicion_score"] >= deps.CLICK_SUSPICION_SOFT_LIMIT:
             click_guard["flagged_at"] = now.isoformat()
 
+        t = time.perf_counter()
         deps.write_click_guard_state(extra, click_guard)
+        mark("anti_fraud_guard_update", t)
 
+        t = time.perf_counter()
         try:
-            await redis_conn.setex(f"activity:{payload.user_id}", 300, now.isoformat())
-        except Exception as e:
-            deps.logger.warning("Redis activity write failed (non-critical): %s", e)
-
-        try:
-            await redis_conn.set(
-                f"click_guard:{payload.user_id}",
-                json.dumps(click_guard),
-                ex=300,
-            )
-        except Exception as e:
-            deps.logger.warning("Redis click_guard write failed (non-critical): %s", e)
-
-        if gained > 0:
-            await redis_conn.zincrby(deps.TOURNAMENT_KEY, gained, str(payload.user_id))
-            await redis_conn.hincrby(f"click_buf:{payload.user_id}", "coins", gained)
-            await redis_conn.hincrby(
-                f"click_buf:{payload.user_id}", "clicks", effective_clicks
-            )
-            await redis_conn.expire(f"click_buf:{payload.user_id}", 300)
-            referral_bonus = 0
-            referrer_id = user.get("referrer_id")
-            if referrer_id:
-                referral_bonus = max(1, int(gained * 0.05))
-                await redis_conn.hincrby(
-                    f"referral_pending:{referrer_id}", "coins", referral_bonus
+            async with redis_conn.pipeline(transaction=False) as pipe:
+                pipe.setex(f"activity:{payload.user_id}", 300, now.isoformat())
+                pipe.set(
+                    f"click_guard:{payload.user_id}",
+                    json.dumps(click_guard),
+                    ex=300,
                 )
-                await redis_conn.hincrby(f"referral_pending:{referrer_id}", "clicks", 1)
-                await redis_conn.expire(f"referral_pending:{referrer_id}", 300)
+                await pipe.execute()
+        except Exception as e:
+            deps.logger.warning("Redis activity/click_guard write failed (non-critical): %s", e)
+        mark("post_mutation_redis_activity_and_guard", t)
+
+        t = time.perf_counter()
+        if gained > 0:
+            click_buf_key = f"click_buf:{payload.user_id}"
+            async with redis_conn.pipeline(transaction=False) as pipe:
+                pipe.zincrby(deps.TOURNAMENT_KEY, gained, str(payload.user_id))
+                pipe.hincrby(click_buf_key, "coins", gained)
+                pipe.hincrby(click_buf_key, "clicks", effective_clicks)
+                pipe.expire(click_buf_key, 300)
+
+                referral_bonus = 0
+                referrer_id = user.get("referrer_id")
+                if referrer_id:
+                    referral_bonus = max(1, int(gained * 0.05))
+                    referral_pending_key = f"referral_pending:{referrer_id}"
+                    pipe.hincrby(referral_pending_key, "coins", referral_bonus)
+                    pipe.hincrby(referral_pending_key, "clicks", 1)
+                    pipe.expire(referral_pending_key, 300)
+
+                await pipe.execute()
         else:
             referral_bonus = 0
+        mark("post_mutation_redis_side_effects", t)
 
+        t = time.perf_counter()
         boosts = deps.get_all_boost_states(deps.parse_extra_data(user.get("extra_data")))
         tap_value = deps.get_tap_value(int(user.get("multitap_level", 0)))
         profit_per_hour = deps.get_hour_value(int(user.get("profit_level", 0)))
+        mark("response_assembly_prepare", t)
 
-        return await deps.build_click_response_state(
+        t = time.perf_counter()
+        response_payload = await deps.build_click_response_state(
             user_id=payload.user_id,
             coins_after=new_coins,
             energy_after=int(new_energy),
@@ -398,10 +469,15 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             suspicion_score=click_guard["suspicion_score"],
             referral_bonus=referral_bonus,
         )
+        mark("response_assembly", t)
+        flush_trace("ok")
+        return response_payload
     except HTTPException:
+        flush_trace("http_exception")
         raise
     except Exception as e:
         deps.logger.error(f"Error in process_clicks_batch: {e}")
+        flush_trace("unexpected_exception")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
