@@ -1,4 +1,5 @@
 import os
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import create_engine, text
 
@@ -8,8 +9,25 @@ def _get_sync_database_url() -> str:
     if not database_url:
         raise RuntimeError("DATABASE_URL is not set")
 
-    return database_url.replace("postgresql+asyncpg://", "postgresql://").replace(
+    sync_url = database_url.replace("postgresql+asyncpg://", "postgresql://").replace(
         "sqlite+aiosqlite:///", "sqlite:///"
+    )
+    if not sync_url.startswith(("postgresql://", "postgres://")):
+        return sync_url
+
+    # psycopg2 doesn't accept `ssl=` query option; normalize to `sslmode=...`.
+    parts = urlsplit(sync_url)
+    params = dict(parse_qsl(parts.query, keep_blank_values=True))
+    ssl_value = params.pop("ssl", None)
+    if ssl_value is not None and "sslmode" not in params:
+        normalized = str(ssl_value).strip().lower()
+        if normalized in {"1", "true", "yes", "on", "require", "required"}:
+            params["sslmode"] = "require"
+        elif normalized in {"0", "false", "no", "off", "disable", "disabled"}:
+            params["sslmode"] = "disable"
+
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment)
     )
 
 
