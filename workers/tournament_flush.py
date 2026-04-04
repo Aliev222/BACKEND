@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 FLUSH_INTERVAL = 60  # seconds
 LEADERBOARD_LIMIT = 1000
 WORKER_NAME = "tournament_flush"
+FLUSH_TIMEOUT_SECONDS = 50
 
 
 async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
@@ -130,7 +131,9 @@ async def tournament_flush_loop():
             flushed = 0
 
             try:
-                flushed = await flush_tournament_to_db(redis_conn)
+                flushed = await asyncio.wait_for(
+                    flush_tournament_to_db(redis_conn), timeout=FLUSH_TIMEOUT_SECONDS
+                )
                 if flushed > 0:
                     logger.info("Flushed %d tournament entries to DB", flushed)
             except Exception as e:

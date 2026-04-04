@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 FLUSH_INTERVAL = 30  # seconds
 WORKER_NAME = "coins_flush"
+FLUSH_TIMEOUT_SECONDS = 25
 
 
 async def _ensure_flush_log_table():
@@ -217,7 +218,9 @@ async def coins_flush_loop():
             flushed = 0
 
             try:
-                flushed = await flush_coins_to_db(redis_conn)
+                flushed = await asyncio.wait_for(
+                    flush_coins_to_db(redis_conn), timeout=FLUSH_TIMEOUT_SECONDS
+                )
                 if flushed > 0:
                     logger.info("Flushed coins for %d users", flushed)
             except Exception as e:

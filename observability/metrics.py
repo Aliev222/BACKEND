@@ -79,52 +79,61 @@ def normalize_metrics_path(path: str) -> str:
 def observe_http_request(
     method: str, path: str, status_code: int, duration_seconds: float
 ) -> None:
-    safe_method = str(method or "GET").upper()
-    endpoint = normalize_metrics_path(path)
-    if (safe_method, endpoint) not in _TARGET_ENDPOINTS:
-        return
+    try:
+        safe_method = str(method or "GET").upper()
+        endpoint = normalize_metrics_path(path)
+        if (safe_method, endpoint) not in _TARGET_ENDPOINTS:
+            return
 
-    safe_status_code = int(status_code or 500)
-    status_code_label = str(safe_status_code)
-    status_class = f"{safe_status_code // 100}xx"
+        safe_status_code = int(status_code or 500)
+        status_code_label = str(safe_status_code)
+        status_class = f"{safe_status_code // 100}xx"
 
-    API_ENDPOINT_DURATION_SECONDS.labels(
-        method=safe_method,
-        endpoint=endpoint,
-    ).observe(max(0.0, float(duration_seconds or 0.0)))
-
-    API_ENDPOINT_REQUESTS_TOTAL.labels(
-        method=safe_method,
-        endpoint=endpoint,
-        status_class=status_class,
-        status_code=status_code_label,
-    ).inc()
-
-    if status_code_label in _EXPLICIT_STATUSES:
-        API_ENDPOINT_EXPLICIT_ERRORS_TOTAL.labels(
+        API_ENDPOINT_DURATION_SECONDS.labels(
             method=safe_method,
             endpoint=endpoint,
+        ).observe(max(0.0, float(duration_seconds or 0.0)))
+
+        API_ENDPOINT_REQUESTS_TOTAL.labels(
+            method=safe_method,
+            endpoint=endpoint,
+            status_class=status_class,
             status_code=status_code_label,
         ).inc()
+
+        if status_code_label in _EXPLICIT_STATUSES:
+            API_ENDPOINT_EXPLICIT_ERRORS_TOTAL.labels(
+                method=safe_method,
+                endpoint=endpoint,
+                status_code=status_code_label,
+            ).inc()
+    except Exception:
+        return
 
 
 def observe_storage_timing(
     store: str, operation: str, domain: str, duration_seconds: float, outcome: str = "ok"
 ) -> None:
-    STORAGE_OPERATION_DURATION_SECONDS.labels(
-        store=store,
-        operation=operation,
-        domain=domain,
-        outcome=outcome,
-    ).observe(max(0.0, float(duration_seconds or 0.0)))
+    try:
+        STORAGE_OPERATION_DURATION_SECONDS.labels(
+            store=store,
+            operation=operation,
+            domain=domain,
+            outcome=outcome,
+        ).observe(max(0.0, float(duration_seconds or 0.0)))
+    except Exception:
+        return
 
 
 def observe_storage_error(store: str, operation: str, domain: str) -> None:
-    STORAGE_OPERATION_ERRORS_TOTAL.labels(
-        store=store,
-        operation=operation,
-        domain=domain,
-    ).inc()
+    try:
+        STORAGE_OPERATION_ERRORS_TOTAL.labels(
+            store=store,
+            operation=operation,
+            domain=domain,
+        ).inc()
+    except Exception:
+        return
 
 
 def observe_worker_loop(
@@ -135,16 +144,18 @@ def observe_worker_loop(
     error: Exception | str | None = None,
     flushed: int | None = None,
 ) -> None:
-    WORKER_LOOP_DURATION_SECONDS.labels(worker=worker, phase=phase).observe(
-        max(0.0, float(duration_seconds or 0.0))
-    )
-    if error is not None:
-        error_type = error.__class__.__name__ if isinstance(error, Exception) else "error"
-        WORKER_ERRORS_TOTAL.labels(
-            worker=worker,
-            phase=phase,
-            error_type=error_type,
-        ).inc()
-    if flushed and int(flushed) > 0:
-        WORKER_FLUSHED_ITEMS_TOTAL.labels(worker=worker).inc(int(flushed))
-
+    try:
+        WORKER_LOOP_DURATION_SECONDS.labels(worker=worker, phase=phase).observe(
+            max(0.0, float(duration_seconds or 0.0))
+        )
+        if error is not None:
+            error_type = error.__class__.__name__ if isinstance(error, Exception) else "error"
+            WORKER_ERRORS_TOTAL.labels(
+                worker=worker,
+                phase=phase,
+                error_type=error_type,
+            ).inc()
+        if flushed and int(flushed) > 0:
+            WORKER_FLUSHED_ITEMS_TOTAL.labels(worker=worker).inc(int(flushed))
+    except Exception:
+        return

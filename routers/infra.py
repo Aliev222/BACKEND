@@ -1,8 +1,9 @@
 """
 Infrastructure routes extracted from legacy.py (Patch 7.2).
 
-- GET /metrics — Prometheus metrics export
-- GET /health — health check (Redis + DB)
+- GET /metrics - Prometheus metrics export
+- GET /health /healthz - liveness-friendly status
+- GET /readyz - readiness check (Redis + DB)
 """
 
 import asyncio
@@ -10,12 +11,7 @@ import logging
 
 from fastapi import APIRouter
 from fastapi.responses import Response
-from prometheus_client import (
-    Counter,
-    Histogram,
-    generate_latest,
-    CONTENT_TYPE_LATEST,
-)
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from sqlalchemy import select
 
 from DATABASE.base import AsyncSessionLocal
@@ -31,39 +27,61 @@ async def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
-@router.get("/health")
-async def health():
-    details: dict[str, str] = {}
-    overall = "ok"
+async def _check_redis() -> tuple[bool, str]:
+    if not REDIS_URL:
+        return True, "skipped"
 
-    # Redis check
-    redis_status = "skipped"
-    if REDIS_URL:
-        try:
-            conn = await get_redis_or_none()
-            if conn:
-                await asyncio.wait_for(conn.ping(), timeout=0.5)
-                redis_status = "ok"
-            else:
-                redis_status = "unavailable"
-        except Exception as e:
-            redis_status = f"error: {e}"
-            logger.warning(f"Health redis check failed: {e}")
-            REDIS_ERRORS.inc()
-    details["redis"] = redis_status
+    try:
+        conn = await get_redis_or_none()
+        if conn:
+            await asyncio.wait_for(conn.ping(), timeout=0.5)
+            return True, "ok"
+        return False, "unavailable"
+    except Exception as e:
+        logger.warning(f"Health redis check failed: {e}")
+        REDIS_ERRORS.inc()
+        return False, f"error: {e}"
 
-    # DB check
-    db_status = "ok"
+
+async def _check_db() -> tuple[bool, str]:
     try:
         async with AsyncSessionLocal() as session:
             await asyncio.wait_for(session.execute(select(1)), timeout=0.5)
+        return True, "ok"
     except Exception as e:
-        db_status = f"error: {e}"
         logger.warning(f"Health db check failed: {e}")
         DB_ERRORS.inc()
-    details["db"] = db_status
+        return False, f"error: {e}"
 
-    if any(s != "ok" and not str(s).startswith("skipped") for s in details.values()):
-        overall = "degraded"
 
-    return {"status": overall, "details": details}
+@router.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+
+@router.get("/readyz")
+async def readyz():
+    redis_ok, redis_status = await _check_redis()
+    db_ok, db_status = await _check_db()
+    ready = redis_ok and db_ok
+    return {
+        "status": "ready" if ready else "not_ready",
+        "checks": {
+            "redis": redis_status,
+            "db": db_status,
+        },
+    }
+
+
+@router.get("/health")
+async def health():
+    redis_ok, redis_status = await _check_redis()
+    db_ok, db_status = await _check_db()
+
+    return {
+        "status": "ok" if redis_ok and db_ok else "degraded",
+        "details": {
+            "redis": redis_status,
+            "db": db_status,
+        },
+    }

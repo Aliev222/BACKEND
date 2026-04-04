@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from infrastructure.database import engine, AsyncSessionLocal, healthcheck_db
 from infrastructure.redis import init_redis, close_redis
+from core.startup_validation import validate_startup_config, StartupValidationError
 from routers import legacy
 from routers.admin_legacy import router as admin_legacy_router
 from routers.infra import router as infra_router
@@ -52,8 +53,18 @@ async def lifespan(app: FastAPI):
     global WORKER_TASKS
 
     logger.info("Starting SPIRIT API (legacy endpoints)")
+    try:
+        validate_startup_config(bot_mode=BOT_MODE)
+    except StartupValidationError as e:
+        logger.critical("Startup configuration validation failed: %s", e)
+        raise
 
-    await init_redis()
+    redis_conn = await init_redis()
+    if BOT_MODE == "api" and redis_conn is None:
+        logger.critical(
+            "Redis is unavailable at startup while BOT_MODE=api; refusing to start"
+        )
+        raise RuntimeError("Redis unavailable at startup")
 
     if BOT_MODE == "api":
         WORKER_TASKS = [
@@ -124,20 +135,26 @@ async def api_metrics_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
     except Exception:
+        try:
+            observe_http_request(
+                request.method,
+                request.url.path,
+                500,
+                time.perf_counter() - started_at,
+            )
+        except Exception:
+            pass
+        raise
+
+    try:
         observe_http_request(
             request.method,
             request.url.path,
-            500,
+            response.status_code,
             time.perf_counter() - started_at,
         )
-        raise
-
-    observe_http_request(
-        request.method,
-        request.url.path,
-        response.status_code,
-        time.perf_counter() - started_at,
-    )
+    except Exception:
+        pass
     return response
 
 
