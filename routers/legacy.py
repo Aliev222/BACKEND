@@ -2431,7 +2431,9 @@ async def process_upgrade_all(payload: UserIdRequest, request: Request):
             "upgrade_all", request, payload.user_id, 25, 60, ip_limit=50
         )
         await require_user_action_lock("upgrade_all", payload.user_id, ttl=0.35)
-        user = await get_user_cached(payload.user_id)
+        # Upgrade-all needs authoritative coins from DB.
+        # user:cache intentionally excludes hot-state fields like coins.
+        user = await get_user(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         return await apply_global_upgrade_for_user(payload.user_id, user)
