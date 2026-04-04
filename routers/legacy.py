@@ -185,6 +185,12 @@ from services.tournament_service import (
     get_weekly_tournament_overview_service,
     get_weekly_tournament_results_service,
 )
+from services.upgrades_service import (
+    UpgradesServiceDeps,
+    get_global_upgrade_level_service,
+    process_upgrade_all_service,
+    process_upgrade_service,
+)
 
 
 router = APIRouter()
@@ -2370,136 +2376,17 @@ async def increment_ads_watched(payload: AdActionClaimRequest, request: Request)
     )
 
 
-def get_global_upgrade_level(user: dict) -> int:
-    return max(
-        int(user.get("multitap_level", 0)),
-        int(user.get("profit_level", 0)),
-        int(user.get("energy_level", 0)),
-    )
-
-
-async def apply_global_upgrade_for_user(user_id: int, user: dict) -> dict:
-    current_level = get_global_upgrade_level(user)
-    if current_level >= MAX_UPGRADE_LEVEL:
-        raise HTTPException(status_code=400, detail="Max level reached")
-
-    price = GLOBAL_UPGRADE_PRICES[current_level]
-    current_coins = int(user.get("coins", 0))
-    if current_coins < price:
-        raise HTTPException(status_code=400, detail="Not enough coins")
-
-    new_level = current_level + 1
-    new_profit_per_tap = get_tap_value(new_level)
-    new_profit_per_hour = get_hour_value(new_level)
-    new_max_energy = get_max_energy(new_level)
-    new_coins = current_coins - price
-
-    ml = int(user.get("multitap_level", 0))
-    pl = int(user.get("profit_level", 0))
-    el = int(user.get("energy_level", 0))
-
-    expected = {
-        "coins": current_coins,
-        "multitap_level": ml,
-        "profit_level": pl,
-        "energy_level": el,
-    }
-    updates = {
-        "coins": new_coins,
-        "multitap_level": new_level,
-        "profit_level": new_level,
-        "energy_level": new_level,
-        "profit_per_tap": new_profit_per_tap,
-        "profit_per_hour": new_profit_per_hour,
-        "max_energy": new_max_energy,
-        "energy": new_max_energy,
-    }
-
-    updated_user = await update_user_if_matches(user_id, expected, updates)
-    if not updated_user:
-        raise HTTPException(status_code=409, detail="Upgrade state changed, retry")
-    # NOTE: Not invalidating cache — energy/max_energy are excluded from
-    # user:cache. Cache only stores static profile fields.
-
-    # Update energy:v2 immediately — upgrade changes max_energy and resets energy to full.
-    try:
-        redis_conn = await get_redis_or_none()
-        if redis_conn:
-            await redis_conn.hset(
-                f"energy:v2:{user_id}",
-                mapping={
-                    "value": str(new_max_energy),
-                    "updated_at": str(datetime.utcnow().timestamp()),
-                    "max_energy": str(new_max_energy),
-                },
-            )
-    except Exception:
-        pass
-
-    next_cost = (
-        GLOBAL_UPGRADE_PRICES[new_level]
-        if new_level < len(GLOBAL_UPGRADE_PRICES)
-        else 0
-    )
-    return {
-        "success": True,
-        "coins": int(updated_user.get("coins", new_coins)),
-        "new_level": new_level,
-        "levels": {
-            "multitap": new_level,
-            "profit": new_level,
-            "energy": new_level,
-        },
-        "prices": {
-            "global": next_cost,
-        },
-        "next_cost": next_cost,
-        "profit_per_tap": new_profit_per_tap,
-        "profit_per_hour": new_profit_per_hour,
-        "max_energy": new_max_energy,
-        "energy": new_max_energy,
-        "server_time": datetime.utcnow().isoformat(),
-    }
-
 
 @router.post("/api/upgrade")
 async def process_upgrade(payload: UpgradeRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit(
-            "upgrade", request, payload.user_id, 25, 60, ip_limit=50
-        )
-        await require_user_action_lock("upgrade", payload.user_id, ttl=0.35)
-        user = await get_user_cached(payload.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        return await apply_global_upgrade_for_user(payload.user_id, user)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in process_upgrade: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    return await process_upgrade_service(payload, request, _build_upgrades_service_deps())
 
 
 @router.post("/api/upgrade-all")
 async def process_upgrade_all(payload: UserIdRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit(
-            "upgrade_all", request, payload.user_id, 25, 60, ip_limit=50
-        )
-        await require_user_action_lock("upgrade_all", payload.user_id, ttl=0.35)
-        # Upgrade-all needs authoritative coins from DB.
-        # user:cache intentionally excludes hot-state fields like coins.
-        user = await get_user(payload.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        return await apply_global_upgrade_for_user(payload.user_id, user)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in process_upgrade_all: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    return await process_upgrade_all_service(
+        payload, request, _build_upgrades_service_deps()
+    )
 
 
 @router.post("/api/update-energy")
@@ -2818,6 +2705,23 @@ def _build_ads_boosts_service_deps() -> AdsBoostsServiceDeps:
     )
 
 
+def _build_upgrades_service_deps() -> UpgradesServiceDeps:
+    return UpgradesServiceDeps(
+        require_telegram_user=require_telegram_user,
+        require_dual_rate_limit=require_dual_rate_limit,
+        require_user_action_lock=require_user_action_lock,
+        get_user=get_user,
+        update_user_if_matches=update_user_if_matches,
+        get_redis_or_none=get_redis_or_none,
+        get_tap_value=get_tap_value,
+        get_hour_value=get_hour_value,
+        get_max_energy=get_max_energy,
+        logger=logger,
+        GLOBAL_UPGRADE_PRICES=GLOBAL_UPGRADE_PRICES,
+        MAX_UPGRADE_LEVEL=MAX_UPGRADE_LEVEL,
+    )
+
+
 def _build_clicks_service_deps() -> ClicksServiceDeps:
     return ClicksServiceDeps(
         require_telegram_user=require_telegram_user,
@@ -2878,7 +2782,7 @@ async def get_upgrade_prices(user_id: int, request: Request):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        global_level = get_global_upgrade_level(user)
+        global_level = get_global_upgrade_level_service(user)
         global_price = (
             GLOBAL_UPGRADE_PRICES[global_level]
             if global_level < len(GLOBAL_UPGRADE_PRICES)
