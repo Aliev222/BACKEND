@@ -237,75 +237,18 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
                 detail="Redis unavailable: click processing temporarily disabled",
             )
 
-        user_hot_key = f"user_hot:{payload.user_id}"
-        user = await redis_conn.hgetall(user_hot_key)
         mark("user_profile_hot_state_load", t)
-        _observe_store("redis", "user_hot_hgetall", t)
 
         if payload.clicks > deps.MAX_CLICK_BATCH_SIZE:
             flush_trace("too_many_clicks")
             raise HTTPException(status_code=400, detail="Too many clicks in batch")
 
-        if not user:
-            deps.logger.error(
-                "CLICK_PATH_DB_ACCESS = ERROR user=%s reason=user_hot_missing_no_db_fallback",
-                payload.user_id,
-            )
-            flush_trace("user_not_found")
-            raise HTTPException(
-                status_code=503,
-                detail="User hot state is not initialized",
-            )
-
         t = time.perf_counter()
         now = datetime.utcnow()
-
-        boosts = _safe_json_dict(user.get("boosts"))
-        flags = _safe_json_dict(user.get("flags"))
-
-        multitap_level = _safe_int(user.get("multitap_level"), 0)
-        profit_level = _safe_int(user.get("profit_level"), 0)
-        energy_level = _safe_int(user.get("energy_level"), 0)
-
-        max_energy = _safe_int(user.get("max_energy"), 0)
-        if max_energy <= 0:
-            max_energy = deps.get_max_energy(energy_level)
-
         mark("precompute_and_redis_load", t)
-
-        tap_value = deps.get_tap_value(multitap_level)
-        click_guard = _safe_json_dict(flags.get("click_guard"))
-        owned_skins = deps.normalize_owned_skins(
-            flags.get("owned_skins", [deps.DEFAULT_SKIN_ID])
-        )
-        selected_skin = deps.normalize_selected_skin(
-            str(flags.get("selected_skin") or deps.DEFAULT_SKIN_ID), owned_skins
-        )
-        skin_multiplier = float(deps.SKIN_MULTIPLIERS.get(selected_skin, 1.0))
-
-        mega_boost_active = bool(boosts.get("mega_boost_active", False))
-        ghost_boost_active = bool(boosts.get("ghost_boost_active", False))
-        task_tap_boost_active = bool(boosts.get("task_tap_boost_active", False))
-        task_tap_boost_multiplier = max(1, _safe_int(boosts.get("task_tap_boost_multiplier"), 1))
-        daily_infinite_energy_active = bool(boosts.get("daily_infinite_energy_active", False))
-        free_energy_clicks = (
-            mega_boost_active or daily_infinite_energy_active or ghost_boost_active
-        )
-
-        coin_per_tap = max(1, int(tap_value * skin_multiplier))
-        if mega_boost_active:
-            coin_per_tap *= 2
-        if ghost_boost_active:
-            coin_per_tap *= deps.GHOST_BOOST_MULTIPLIER
-        if task_tap_boost_active:
-            coin_per_tap *= max(1, task_tap_boost_multiplier)
-
         safe_requested_clicks = min(payload.clicks, deps.MAX_CLICK_BATCH_SIZE)
-        baseline_click_ts = _safe_float(user.get("last_energy_ts"), now.timestamp())
-        init_energy = _safe_int(user.get("energy"), max_energy)
-        prev_suspicion_score = int(click_guard.get("suspicion_score", 0))
         request_ip = deps.get_request_ip(request)
-        referrer_id = _safe_int(flags.get("referrer_id"), 0)
+        user_hot_key = f"user_hot:{payload.user_id}"
 
         keys = [
             f"rl:clicks:{payload.user_id}",
@@ -316,7 +259,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             f"coins_pending:{payload.user_id}",
             deps.TOURNAMENT_KEY,
             f"click_buf:{payload.user_id}",
-            f"referral_pending:{referrer_id}" if referrer_id > 0 else "",
+            f"referral_pending:{payload.user_id}",
             f"activity:{payload.user_id}",
             f"click_guard:{payload.user_id}",
             user_hot_key,
@@ -334,18 +277,12 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             str(deps.CLICK_BURST_ALLOWANCE),
             str(deps.CLICK_TIME_ACCUMULATION_CAP_SECONDS),
             str(deps.INITIAL_CLICK_BATCH_ALLOWANCE),
-            "1" if free_energy_clicks else "0",
-            str(coin_per_tap),
-            str(baseline_click_ts),
-            str(max_energy),
-            str(init_energy),
             str(deps.CLICK_SUSPICIOUS_OVERSHOOT),
-            str(_safe_int(user.get("coins"), 0)),
-            str(referrer_id),
-            str(prev_suspicion_score),
             str(deps.CLICK_SUSPICION_SOFT_LIMIT),
             str(deps.ENERGY_REGEN_SECONDS),
             str(payload.user_id),
+            str(deps.get_max_energy(0)),
+            str(deps.GHOST_BOOST_MULTIPLIER),
         ]
 
         t = time.perf_counter()
@@ -397,7 +334,21 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             raise HTTPException(status_code=500, detail="Click mutation failed")
 
         t = time.perf_counter()
-        profit_per_hour = _safe_int(user.get("profit_per_hour"), deps.get_hour_value(profit_level))
+        boosts = {
+            "mega_boost_active": lua_result.mega_boost_active,
+            "mega_boost_expires_at": None,
+            "ghost_boost_active": lua_result.ghost_boost_active,
+            "ghost_boost_expires_at": None,
+            "ghost_boost_multiplier": lua_result.ghost_boost_multiplier,
+            "daily_infinite_energy_active": lua_result.daily_infinite_energy_active,
+            "daily_infinite_energy_expires_at": None,
+            "task_tap_boost_active": lua_result.task_tap_boost_active,
+            "task_tap_boost_expires_at": None,
+            "task_tap_boost_multiplier": lua_result.task_tap_boost_multiplier,
+            "task_passive_boost_active": False,
+            "task_passive_boost_expires_at": None,
+            "task_passive_boost_multiplier": 1,
+        }
         mark("response_assembly_prepare", t)
 
         t = time.perf_counter()
@@ -405,12 +356,12 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             user_id=payload.user_id,
             coins_after=lua_result.new_coins,
             energy_after=int(lua_result.new_energy),
-            max_energy=max_energy,
+            max_energy=lua_result.max_energy,
             gained=lua_result.gained,
             effective_clicks=lua_result.effective_clicks,
-            coin_per_tap=coin_per_tap,
-            tap_value=tap_value,
-            profit_per_hour=profit_per_hour,
+            coin_per_tap=lua_result.coin_per_tap,
+            tap_value=lua_result.tap_value,
+            profit_per_hour=lua_result.profit_per_hour,
             boosts=boosts,
             suspicion_score=lua_result.suspicion_score,
             referral_bonus=lua_result.referral_bonus,
@@ -422,6 +373,12 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
         flush_trace("http_exception")
         raise
     except Exception as e:
+        if "sqlalchemy" in f"{type(e)}".lower() or "asyncsession" in f"{e}".lower():
+            deps.logger.error(
+                "CLICK_PATH_DB_ACCESS = ERROR user=%s exception=%s",
+                payload.user_id,
+                e,
+            )
         deps.logger.error(f"Error in process_clicks_batch: {e}")
         observe_storage_error("app", "process_clicks_batch", "clicks")
         flush_trace("unexpected_exception")

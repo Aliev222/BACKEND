@@ -17,6 +17,16 @@ class ClickResult:
     allowed_clicks: int
     referral_bonus: int
     suspicion_score: int
+    tap_value: int
+    profit_per_hour: int
+    coin_per_tap: int
+    max_energy: int
+    mega_boost_active: bool
+    ghost_boost_active: bool
+    daily_infinite_energy_active: bool
+    task_tap_boost_active: bool
+    task_tap_boost_multiplier: int
+    ghost_boost_multiplier: int
 
 
 _LUA_PATH = Path(__file__).resolve().parent / "lua" / "click.lua"
@@ -34,7 +44,7 @@ async def process_click_lua(
 ) -> ClickResult:
     raw = await redis.eval(_CLICK_LUA, len(keys), *keys, *args)
     values = list(raw or [])
-    while len(values) < 8:
+    while len(values) < 18:
         values.append(0)
     return ClickResult(
         status=int(values[0]),
@@ -45,4 +55,14 @@ async def process_click_lua(
         allowed_clicks=int(values[5]),
         referral_bonus=int(values[6]),
         suspicion_score=int(values[7]),
+        tap_value=int(values[8]),
+        profit_per_hour=int(values[9]),
+        coin_per_tap=int(values[10]),
+        max_energy=int(values[11]),
+        mega_boost_active=int(values[12]) == 1,
+        ghost_boost_active=int(values[13]) == 1,
+        daily_infinite_energy_active=int(values[14]) == 1,
+        task_tap_boost_active=int(values[15]) == 1,
+        task_tap_boost_multiplier=int(values[16]),
+        ghost_boost_multiplier=int(values[17]),
     )

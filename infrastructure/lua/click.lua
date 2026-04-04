@@ -23,18 +23,23 @@ local max_real_cps = tonumber(ARGV[9])
 local click_burst_allowance = tonumber(ARGV[10])
 local click_time_cap = tonumber(ARGV[11])
 local initial_click_allowance = tonumber(ARGV[12])
-local free_energy_clicks = tonumber(ARGV[13])
-local coin_per_tap = tonumber(ARGV[14])
-local baseline_click_ts = tonumber(ARGV[15])
-local max_energy = tonumber(ARGV[16])
-local init_energy = tonumber(ARGV[17])
-local suspicious_overshoot = tonumber(ARGV[18])
-local init_hot_coins = tonumber(ARGV[19])
-local referrer_id = tonumber(ARGV[20])
-local prev_suspicion_score = tonumber(ARGV[21])
-local suspicion_soft_limit = tonumber(ARGV[22])
-local regen_seconds = tonumber(ARGV[23])
-local user_id = ARGV[24]
+local suspicious_overshoot = tonumber(ARGV[13])
+local suspicion_soft_limit = tonumber(ARGV[14])
+local regen_seconds = tonumber(ARGV[15])
+local user_id = ARGV[16]
+local base_max_energy = tonumber(ARGV[17])
+local ghost_boost_multiplier_default = tonumber(ARGV[18])
+
+local function json_decode_or_empty(raw)
+    if not raw or raw == '' then
+        return {}
+    end
+    local ok, parsed = pcall(cjson.decode, raw)
+    if ok and type(parsed) == 'table' then
+        return parsed
+    end
+    return {}
+end
 
 -- user rate limit
 local user_current = redis.call('INCR', user_rl_key)
@@ -42,7 +47,7 @@ if user_current == 1 then
     redis.call('EXPIRE', user_rl_key, window_seconds)
 end
 if user_current > user_limit then
-    return {1, 0, 0, 0, 0, 0, 0, prev_suspicion_score}
+    return {1, 0, 0, 0, 0, 0, 0, 0}
 end
 
 -- ip rate limit
@@ -51,28 +56,94 @@ if ip_current == 1 then
     redis.call('EXPIRE', ip_rl_key, window_seconds)
 end
 if ip_current > ip_limit then
-    return {4, 0, 0, 0, 0, 0, 0, prev_suspicion_score}
+    return {4, 0, 0, 0, 0, 0, 0, 0}
 end
 
 -- idempotency
 local idempotent_ok = redis.call('SET', idem_key, '1', 'EX', idem_ttl, 'NX')
 if not idempotent_ok then
-    return {2, 0, 0, 0, 0, 0, 0, prev_suspicion_score}
+    return {2, 0, 0, 0, 0, 0, 0, 0}
+end
+
+if redis.call('EXISTS', user_hot_key) == 0 then
+    redis.call('HSET', user_hot_key,
+        'coins', '0',
+        'energy', tostring(base_max_energy),
+        'last_energy_ts', tostring(now_ts),
+        'multitap_level', '0',
+        'profit_level', '0',
+        'energy_level', '0',
+        'max_energy', tostring(base_max_energy),
+        'skin_multiplier', '1',
+        'boosts', '{}',
+        'flags', '{}'
+    )
+end
+
+local hot_coins = tonumber(redis.call('HGET', user_hot_key, 'coins') or '0')
+local hot_energy = tonumber(redis.call('HGET', user_hot_key, 'energy') or tostring(base_max_energy))
+local hot_last_energy_ts = tonumber(redis.call('HGET', user_hot_key, 'last_energy_ts') or tostring(now_ts))
+local multitap_level = tonumber(redis.call('HGET', user_hot_key, 'multitap_level') or '0')
+local profit_level = tonumber(redis.call('HGET', user_hot_key, 'profit_level') or '0')
+local energy_level = tonumber(redis.call('HGET', user_hot_key, 'energy_level') or '0')
+local skin_multiplier = tonumber(redis.call('HGET', user_hot_key, 'skin_multiplier') or '1')
+local max_energy = tonumber(redis.call('HGET', user_hot_key, 'max_energy') or tostring(base_max_energy))
+local boosts = json_decode_or_empty(redis.call('HGET', user_hot_key, 'boosts'))
+local flags = json_decode_or_empty(redis.call('HGET', user_hot_key, 'flags'))
+local click_guard = {}
+if type(flags['click_guard']) == 'table' then
+    click_guard = flags['click_guard']
+end
+local prev_suspicion_score = tonumber(click_guard['suspicion_score'] or '0')
+
+if max_energy <= 0 then
+    max_energy = math.min(1000, base_max_energy + (energy_level * 5))
+end
+local tap_value = 1 + multitap_level
+local profit_per_hour = 100 + (profit_level * 35) + (profit_level * profit_level * 7)
+
+local mega_boost_active = boosts['mega_boost_active'] == true
+local ghost_boost_active = boosts['ghost_boost_active'] == true
+local daily_infinite_energy_active = boosts['daily_infinite_energy_active'] == true
+local task_tap_boost_active = boosts['task_tap_boost_active'] == true
+local task_tap_boost_multiplier = tonumber(boosts['task_tap_boost_multiplier'] or '1')
+if task_tap_boost_multiplier < 1 then
+    task_tap_boost_multiplier = 1
+end
+local ghost_boost_multiplier = tonumber(boosts['ghost_boost_multiplier'] or tostring(ghost_boost_multiplier_default))
+if ghost_boost_multiplier < 1 then
+    ghost_boost_multiplier = ghost_boost_multiplier_default
+end
+
+local free_energy_clicks = 0
+if mega_boost_active or ghost_boost_active or daily_infinite_energy_active then
+    free_energy_clicks = 1
+end
+
+local coin_per_tap = math.max(1, math.floor(tap_value * skin_multiplier))
+if mega_boost_active then
+    coin_per_tap = coin_per_tap * 2
+end
+if ghost_boost_active then
+    coin_per_tap = coin_per_tap * ghost_boost_multiplier
+end
+if task_tap_boost_active then
+    coin_per_tap = coin_per_tap * task_tap_boost_multiplier
 end
 
 if redis.call('EXISTS', energy_key) == 0 then
     redis.call('HSET', energy_key,
-        'value', tostring(init_energy),
+        'value', tostring(hot_energy),
         'updated_at', tostring(now_ts),
         'max_energy', tostring(max_energy),
-        'click_updated_at', tostring(baseline_click_ts)
+        'click_updated_at', tostring(hot_last_energy_ts)
     )
 end
 
-local stored_value = tonumber(redis.call('HGET', energy_key, 'value') or '0')
+local stored_value = tonumber(redis.call('HGET', energy_key, 'value') or tostring(hot_energy))
 local stored_updated = tonumber(redis.call('HGET', energy_key, 'updated_at') or tostring(now_ts))
 local stored_max = tonumber(redis.call('HGET', energy_key, 'max_energy') or tostring(max_energy))
-local click_updated = tonumber(redis.call('HGET', energy_key, 'click_updated_at') or tostring(baseline_click_ts))
+local click_updated = tonumber(redis.call('HGET', energy_key, 'click_updated_at') or tostring(hot_last_energy_ts))
 
 if stored_max ~= max_energy then
     stored_max = max_energy
@@ -122,7 +193,7 @@ if free_energy_clicks ~= 1 then
 end
 
 if redis.call('EXISTS', hot_key) == 0 then
-    redis.call('SET', hot_key, tostring(init_hot_coins))
+    redis.call('SET', hot_key, tostring(hot_coins))
 end
 
 local new_coins = redis.call('INCRBY', hot_key, gained)
@@ -140,6 +211,7 @@ if gained > 0 then
     redis.call('HINCRBY', click_buf_key, 'coins', gained)
     redis.call('HINCRBY', click_buf_key, 'clicks', effective_clicks)
     redis.call('EXPIRE', click_buf_key, 300)
+    local referrer_id = tonumber(flags['referrer_id'] or '0')
     if referrer_id and referrer_id > 0 then
         referral_bonus = math.max(1, math.floor(gained * 0.05))
         if referral_pending_key and string.len(referral_pending_key) > 0 then
@@ -152,7 +224,7 @@ end
 
 redis.call('SETEX', activity_key, 300, now_iso)
 
-local new_suspicion_score = prev_suspicion_score
+local new_suspicion_score = tonumber(prev_suspicion_score or '0')
 local last_reason = cjson.null
 if requested_clicks > allowed_clicks then
     new_suspicion_score = math.min(12, prev_suspicion_score + 1)
@@ -176,10 +248,35 @@ if new_suspicion_score >= suspicion_soft_limit then
     guard_payload["flagged_at"] = now_iso
 end
 redis.call('SET', click_guard_key, cjson.encode(guard_payload), 'EX', 300)
+flags['click_guard'] = guard_payload
+
 redis.call('HSET', user_hot_key,
     'coins', tostring(new_coins),
     'energy', tostring(new_energy),
-    'last_energy_ts', tostring(now_ts)
+    'last_energy_ts', tostring(now_ts),
+    'max_energy', tostring(max_energy),
+    'profit_per_hour', tostring(profit_per_hour),
+    'boosts', cjson.encode(boosts),
+    'flags', cjson.encode(flags)
 )
 
-return {0, new_coins, new_energy, effective_clicks, gained, allowed_clicks, referral_bonus, new_suspicion_score}
+return {
+    0,
+    new_coins,
+    new_energy,
+    effective_clicks,
+    gained,
+    allowed_clicks,
+    referral_bonus,
+    new_suspicion_score,
+    tap_value,
+    profit_per_hour,
+    coin_per_tap,
+    max_energy,
+    mega_boost_active and 1 or 0,
+    ghost_boost_active and 1 or 0,
+    daily_infinite_energy_active and 1 or 0,
+    task_tap_boost_active and 1 or 0,
+    task_tap_boost_multiplier,
+    ghost_boost_multiplier
+}
