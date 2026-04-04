@@ -150,6 +150,11 @@ from core.telegram_auth import verify_telegram_init_data
 from core.stars_skins import get_stars_skin_price
 from CONFIG.settings import BOT_TOKEN
 from infrastructure.coins_hot_sync import sync_hot_after_db_increment
+from services.clicks_service import (
+    ClicksServiceDeps,
+    process_clicks_batch_service,
+    sync_energy_service,
+)
 
 
 router = APIRouter()
@@ -168,102 +173,6 @@ ONLINE_USERS_KEY = "online:users"
 ONLINE_WINDOW_SECONDS = 75
 REFERRAL_SHARE_RATE = 0.05
 
-ATOMIC_CLICK_MUTATION_LUA = """
-local energy_key = KEYS[1]
-local hot_key = KEYS[2]
-local pending_key = KEYS[3]
-
-local now_ts = tonumber(ARGV[1])
-local regen_seconds = tonumber(ARGV[2])
-local requested_clicks = tonumber(ARGV[3])
-local max_click_batch_size = tonumber(ARGV[4])
-local max_real_cps = tonumber(ARGV[5])
-local click_burst_allowance = tonumber(ARGV[6])
-local click_time_cap = tonumber(ARGV[7])
-local initial_click_allowance = tonumber(ARGV[8])
-local free_energy_clicks = tonumber(ARGV[9])
-local coin_per_tap = tonumber(ARGV[10])
-local baseline_click_ts = tonumber(ARGV[11])
-local max_energy = tonumber(ARGV[12])
-local init_energy = tonumber(ARGV[13])
-local suspicious_overshoot = tonumber(ARGV[14])
-
-if redis.call('EXISTS', energy_key) == 0 then
-    redis.call('HSET', energy_key,
-        'value', tostring(init_energy),
-        'updated_at', tostring(now_ts),
-        'max_energy', tostring(max_energy),
-        'click_updated_at', tostring(baseline_click_ts)
-    )
-end
-
-local stored_value = tonumber(redis.call('HGET', energy_key, 'value') or '0')
-local stored_updated = tonumber(redis.call('HGET', energy_key, 'updated_at') or tostring(now_ts))
-local stored_max = tonumber(redis.call('HGET', energy_key, 'max_energy') or tostring(max_energy))
-local click_updated = tonumber(redis.call('HGET', energy_key, 'click_updated_at') or tostring(baseline_click_ts))
-
-if stored_max ~= max_energy then
-    stored_max = max_energy
-    if stored_value > stored_max then
-        stored_value = stored_max
-    end
-end
-
-local elapsed = now_ts - stored_updated
-if elapsed < 0 then
-    elapsed = 0
-end
-local regen = math.floor(elapsed / regen_seconds)
-local current_energy = stored_value
-if regen > 0 then
-    current_energy = math.min(stored_max, stored_value + regen)
-end
-
-local allowed_clicks = 0
-if click_updated and click_updated > 0 then
-    local elapsed_click = now_ts - click_updated
-    if elapsed_click < 0 then
-        elapsed_click = 0
-    end
-    elapsed_click = math.min(elapsed_click, click_time_cap)
-    local allowed_by_time = math.floor(elapsed_click * max_real_cps) + click_burst_allowance
-    allowed_clicks = math.max(1, math.min(allowed_by_time, max_click_batch_size))
-    allowed_clicks = math.min(requested_clicks, allowed_clicks)
-else
-    allowed_clicks = math.min(requested_clicks, initial_click_allowance, max_click_batch_size)
-end
-
-if requested_clicks > (allowed_clicks + suspicious_overshoot)
-   and requested_clicks > math.max(allowed_clicks * 2, click_burst_allowance * 2) then
-    return {-2, -1, current_energy, 0, 0, allowed_clicks}
-end
-
-local effective_clicks = allowed_clicks
-if free_energy_clicks ~= 1 then
-    effective_clicks = math.min(allowed_clicks, current_energy)
-end
-
-local gained = effective_clicks * coin_per_tap
-local new_energy = current_energy
-if free_energy_clicks ~= 1 then
-    new_energy = math.max(0, current_energy - effective_clicks)
-end
-
-if redis.call('EXISTS', hot_key) == 0 then
-    return {-1, -1, current_energy, effective_clicks, gained, allowed_clicks}
-end
-
-local new_coins = redis.call('INCRBY', hot_key, gained)
-redis.call('INCRBY', pending_key, gained)
-redis.call('HSET', energy_key,
-    'value', tostring(new_energy),
-    'updated_at', tostring(now_ts),
-    'max_energy', tostring(max_energy),
-    'click_updated_at', tostring(now_ts)
-)
-
-return {0, new_coins, new_energy, effective_clicks, gained, allowed_clicks}
-"""
 REFERRAL_DAILY_SHARE_LIMIT = 50000
 REFERRAL_SPECIAL_SKIN_ID = "refferal.pngSP"
 TELEGRAM_VERIFY_CHANNEL = os.getenv("TELEGRAM_VERIFY_CHANNEL", "@Spirit_cliker")
@@ -3104,98 +3013,10 @@ async def update_energy(payload: AdActionClaimRequest, request: Request):
 async def sync_energy(payload: EnergySyncRequest, request: Request):
     """
     Read-only energy sync. Returns current energy from energy:v2.
-    Does NOT write to energy:v2 — only the click path writes energy.
+    Does NOT write to energy:v2 - only the click path writes energy.
     This prevents sync-energy from racing with active click updates.
     """
-    try:
-        await require_telegram_user(request, payload.user_id)
-        user = await get_user_cached(payload.user_id)
-
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        now = datetime.utcnow()
-        energy_level = int(user.get("energy_level", 0))
-        max_energy = get_max_energy(energy_level)
-
-        # Read authoritative energy from energy:v2 (READ-ONLY)
-        redis_conn = await get_redis_or_none()
-        energy_key = f"energy:v2:{payload.user_id}"
-        current_energy = max_energy  # default if no cache
-        energy_updated_at = now.timestamp()  # fallback
-
-        if redis_conn:
-            cached = await redis_conn.hgetall(energy_key)
-            if cached:
-                cached_max = int(cached.get("max_energy", max_energy))
-                cached_value = int(cached.get("value", 0))
-                energy_updated_at = float(cached.get("updated_at", now.timestamp()))
-                elapsed = now.timestamp() - energy_updated_at
-                regen = int(elapsed // ENERGY_REGEN_SECONDS)
-                current_energy = min(cached_max, cached_value + regen)
-                max_energy = cached_max
-                logger.debug(
-                    "SYNC-ENERGY user=%s energy=%d max=%d source=energy:v2 updated_at=%.0f",
-                    payload.user_id,
-                    current_energy,
-                    max_energy,
-                    energy_updated_at,
-                )
-            else:
-                # energy:v2 missing — compute from DB but DO NOT write.
-                # The click path is the only writer of energy:v2.
-                db_energy = int(user.get("energy", 0))
-                last_update = normalize_dt(user.get("last_energy_update"))
-                if last_update:
-                    seconds_passed = max(0, int((now - last_update).total_seconds()))
-                    gained = seconds_passed // ENERGY_REGEN_SECONDS
-                    db_energy = min(max_energy, db_energy + gained)
-                    energy_updated_at = last_update.timestamp()
-                else:
-                    # No last_energy_update in DB — cannot determine a safe
-                    # ordering timestamp. Use 0 so the frontend will NEVER
-                    # treat this response as newer than a real click/profile
-                    # response (which always have state_updated_at > 0).
-                    energy_updated_at = 0
-                current_energy = min(db_energy, max_energy)
-                logger.info(
-                    "SYNC-ENERGY user=%s energy=%d max=%d source=DB (energy:v2 missing) updated_at=%.0f",
-                    payload.user_id,
-                    current_energy,
-                    max_energy,
-                    energy_updated_at,
-                )
-        else:
-            current_energy = calculate_current_energy(user, now)
-            energy_updated_at = now.timestamp()
-
-        # Persist max_energy to DB if changed (but don't invalidate cache)
-        update_data = {}
-        if int(user.get("max_energy", max_energy)) != max_energy:
-            update_data["max_energy"] = max_energy
-        if update_data:
-            await update_user(payload.user_id, update_data)
-
-        # Return state_updated_at as the actual energy:v2 updated_at timestamp,
-        # NOT the current time. This ensures the frontend ordering check
-        # correctly identifies this response as not-newer than a recent click.
-        state_updated_at = int(energy_updated_at * 1000)
-
-        return {
-            "success": True,
-            "energy": current_energy,
-            "max_energy": max_energy,
-            "regen_seconds": ENERGY_REGEN_SECONDS,
-            "server_time": now.isoformat(),
-            "state_updated_at": state_updated_at,
-            "state_version": state_updated_at,
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in sync_energy: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    return await sync_energy_service(payload, request, _build_clicks_service_deps())
 
 
 SKIN_MULTIPLIERS = {
@@ -3480,284 +3301,56 @@ async def ensure_coins_hot_initialized(user_id: int, db_coins: int, redis_conn) 
         pass
 
 
+def _build_clicks_service_deps() -> ClicksServiceDeps:
+    return ClicksServiceDeps(
+        require_telegram_user=require_telegram_user,
+        require_dual_rate_limit=require_dual_rate_limit,
+        get_user_cached=get_user_cached,
+        acquire_idempotency_key=acquire_idempotency_key,
+        get_request_ip=get_request_ip,
+        get_redis_or_none=get_redis_or_none,
+        parse_extra_data=parse_extra_data,
+        get_click_guard_state=get_click_guard_state,
+        parse_iso_datetime=parse_iso_datetime,
+        normalize_dt=normalize_dt,
+        calculate_current_energy=calculate_current_energy,
+        resolve_max_energy=resolve_max_energy,
+        get_tap_value=get_tap_value,
+        normalize_owned_skins=normalize_owned_skins,
+        normalize_selected_skin=normalize_selected_skin,
+        is_mega_boost_active=is_mega_boost_active,
+        get_ghost_boost_status=get_ghost_boost_status,
+        get_active_video_task_boost=get_active_video_task_boost,
+        is_daily_infinite_energy_active=is_daily_infinite_energy_active,
+        ensure_coins_hot_initialized=ensure_coins_hot_initialized,
+        update_user=update_user,
+        write_click_guard_state=write_click_guard_state,
+        get_all_boost_states=get_all_boost_states,
+        get_hour_value=get_hour_value,
+        build_click_response_state=build_click_response_state,
+        get_max_energy=get_max_energy,
+        logger=logger,
+        MAX_CLICK_BATCH_SIZE=MAX_CLICK_BATCH_SIZE,
+        ENERGY_REGEN_SECONDS=ENERGY_REGEN_SECONDS,
+        MAX_REAL_CLICKS_PER_SECOND=MAX_REAL_CLICKS_PER_SECOND,
+        CLICK_BURST_ALLOWANCE=CLICK_BURST_ALLOWANCE,
+        CLICK_TIME_ACCUMULATION_CAP_SECONDS=CLICK_TIME_ACCUMULATION_CAP_SECONDS,
+        INITIAL_CLICK_BATCH_ALLOWANCE=INITIAL_CLICK_BATCH_ALLOWANCE,
+        CLICK_SUSPICIOUS_OVERSHOOT=CLICK_SUSPICIOUS_OVERSHOOT,
+        CLICK_SUSPICION_SOFT_LIMIT=CLICK_SUSPICION_SOFT_LIMIT,
+        TOURNAMENT_KEY=TOURNAMENT_KEY,
+        GHOST_BOOST_MULTIPLIER=GHOST_BOOST_MULTIPLIER,
+        SKIN_MULTIPLIERS=SKIN_MULTIPLIERS,
+        DEFAULT_SKIN_ID=DEFAULT_SKIN_ID,
+        ENABLE_K6_FRAUD_HEURISTICS=ENABLE_K6_FRAUD_HEURISTICS,
+    )
+
+
 @router.post("/api/clicks")
 async def process_clicks_batch(payload: ClicksBatchRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_dual_rate_limit(
-            "clicks", request, payload.user_id, 90, 60, ip_limit=180
-        )
-        user = await get_user_cached(payload.user_id)
-
-        if payload.clicks > MAX_CLICK_BATCH_SIZE:
-            raise HTTPException(status_code=400, detail="Too many clicks in batch")
-
-        batch_key = f"idem:clicks:{payload.user_id}:{payload.batch_id}"
-        is_new_batch = await acquire_idempotency_key(batch_key, ttl=86400)
-        if not is_new_batch:
-            logger.warning(
-                "FRAUD_SUSPECT duplicate_batch user=%s batch_id=%s ip=%s",
-                payload.user_id,
-                payload.batch_id,
-                get_request_ip(request),
-            )
-            raise HTTPException(status_code=409, detail="Duplicate batch")
-
-        # Anti-fraud: detect suspicious batch_id patterns (k6 load-test heuristic)
-        # Gated behind ENABLE_K6_FRAUD_HEURISTICS — OFF by default in production.
-        # This heuristic is tied to k6's batch_id format (vu-iter-timestamp-random)
-        # and is not a reliable production fraud signal.
-        if ENABLE_K6_FRAUD_HEURISTICS:
-            batch_parts = str(payload.batch_id).split("-")
-            if len(batch_parts) >= 2:
-                try:
-                    batch_vu = int(batch_parts[0])
-                    batch_iter = int(batch_parts[1])
-                    if batch_iter > 500 and batch_vu <= 5:
-                        logger.warning(
-                            "FRAUD_SUSPECT high_iter_same_vu user=%s batch_id=%s vu=%s iter=%s",
-                            payload.user_id,
-                            payload.batch_id,
-                            batch_vu,
-                            batch_iter,
-                        )
-                except (ValueError, IndexError):
-                    pass
-
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        now = datetime.utcnow()
-
-        max_energy = resolve_max_energy(user)
-
-        # === REDIS HOT-STATE (single atomic mutation per batch) ===
-        redis_conn = await get_redis_or_none()
-        if not redis_conn:
-            raise HTTPException(
-                status_code=503,
-                detail="Redis unavailable: click processing temporarily disabled",
-            )
-        energy_key = f"energy:v2:{payload.user_id}"
-
-        multitap_level = int(user.get("multitap_level", 0))
-        tap_value = get_tap_value(multitap_level)
-
-        extra = parse_extra_data(user.get("extra_data"))
-        click_guard = get_click_guard_state(extra)
-        last_click_at = parse_iso_datetime(click_guard.get("last_click_at"))
-
-        owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
-        selected_skin = normalize_selected_skin(
-            extra.get("selected_skin", DEFAULT_SKIN_ID), owned_skins
-        )
-        skin_multiplier = float(SKIN_MULTIPLIERS.get(selected_skin, 1.0))
-
-        mega_boost_active = is_mega_boost_active(user)
-        ghost_boost_active, ghost_boost_expires_at = get_ghost_boost_status(user)
-        task_tap_boost_active, _, task_tap_boost_multiplier = (
-            get_active_video_task_boost(extra, "tap_boost")
-        )
-        daily_infinite_energy_active, _ = is_daily_infinite_energy_active(user)
-        free_energy_clicks = (
-            mega_boost_active or daily_infinite_energy_active or ghost_boost_active
-        )
-
-        coin_per_tap = max(1, int(tap_value * skin_multiplier))
-        if mega_boost_active:
-            coin_per_tap *= 2
-        if ghost_boost_active:
-            coin_per_tap *= GHOST_BOOST_MULTIPLIER
-        if task_tap_boost_active:
-            coin_per_tap *= max(1, task_tap_boost_multiplier)
-
-        # Keep client batch size hard-capped before atomic processing.
-        safe_requested_clicks = min(payload.clicks, MAX_CLICK_BATCH_SIZE)
-        coins_hot_key = f"coins_hot:{payload.user_id}"
-        coins_pending_key = f"coins_pending:{payload.user_id}"
-        baseline_click_dt = last_click_at or normalize_dt(user.get("last_energy_update"))
-        baseline_click_ts = baseline_click_dt.timestamp() if baseline_click_dt else 0.0
-        init_energy = calculate_current_energy(user, now)
-
-        atomic_result = await redis_conn.eval(
-            ATOMIC_CLICK_MUTATION_LUA,
-            3,
-            energy_key,
-            coins_hot_key,
-            coins_pending_key,
-            str(now.timestamp()),
-            str(ENERGY_REGEN_SECONDS),
-            str(safe_requested_clicks),
-            str(MAX_CLICK_BATCH_SIZE),
-            str(MAX_REAL_CLICKS_PER_SECOND),
-            str(CLICK_BURST_ALLOWANCE),
-            str(CLICK_TIME_ACCUMULATION_CAP_SECONDS),
-            str(INITIAL_CLICK_BATCH_ALLOWANCE),
-            "1" if free_energy_clicks else "0",
-            str(coin_per_tap),
-            str(baseline_click_ts),
-            str(max_energy),
-            str(init_energy),
-            str(CLICK_SUSPICIOUS_OVERSHOOT),
-        )
-
-        status = int(atomic_result[0])
-        if status == -1:
-            await ensure_coins_hot_initialized(
-                payload.user_id, int(user.get("coins", 0)), redis_conn
-            )
-            atomic_result = await redis_conn.eval(
-                ATOMIC_CLICK_MUTATION_LUA,
-                3,
-                energy_key,
-                coins_hot_key,
-                coins_pending_key,
-                str(now.timestamp()),
-                str(ENERGY_REGEN_SECONDS),
-                str(safe_requested_clicks),
-                str(MAX_CLICK_BATCH_SIZE),
-                str(MAX_REAL_CLICKS_PER_SECOND),
-                str(CLICK_BURST_ALLOWANCE),
-                str(CLICK_TIME_ACCUMULATION_CAP_SECONDS),
-                str(INITIAL_CLICK_BATCH_ALLOWANCE),
-                "1" if free_energy_clicks else "0",
-                str(coin_per_tap),
-                str(baseline_click_ts),
-                str(max_energy),
-                str(init_energy),
-                str(CLICK_SUSPICIOUS_OVERSHOOT),
-            )
-            status = int(atomic_result[0])
-
-        if status == -2:
-            allowed_clicks = int(atomic_result[5])
-            click_guard["hard_rejections"] = (
-                int(click_guard.get("hard_rejections", 0)) + 1
-            )
-            click_guard["last_rejection_at"] = now.isoformat()
-            click_guard["last_reason"] = (
-                f"Click batch overshoot: requested={safe_requested_clicks}, allowed={allowed_clicks}"
-            )
-            write_click_guard_state(extra, click_guard)
-            await update_user(payload.user_id, {"extra_data": extra})
-            logger.warning(
-                "Rejected suspicious click batch user=%s ip=%s requested=%s allowed=%s",
-                payload.user_id,
-                get_request_ip(request),
-                safe_requested_clicks,
-                allowed_clicks,
-            )
-            raise HTTPException(status_code=429, detail="Click rate too high")
-
-        if status != 0:
-            logger.error(
-                "Atomic click mutation failed user=%s status=%s result=%s",
-                payload.user_id,
-                status,
-                atomic_result,
-            )
-            raise HTTPException(status_code=500, detail="Atomic click mutation failed")
-
-        new_coins = int(atomic_result[1])
-        new_energy = int(atomic_result[2])
-        effective_clicks = int(atomic_result[3])
-        gained = int(atomic_result[4])
-        allowed_clicks = int(atomic_result[5])
-
-        suspicion_score = int(click_guard.get("suspicion_score", 0))
-        if safe_requested_clicks > allowed_clicks:
-            suspicion_score += 1
-            click_guard["last_reason"] = (
-                f"Requested {safe_requested_clicks} clicks while server allowed {allowed_clicks}"
-            )
-        elif suspicion_score > 0:
-            suspicion_score -= 1
-            click_guard.pop("last_reason", None)
-
-        click_guard["suspicion_score"] = min(12, max(0, suspicion_score))
-        click_guard["last_click_at"] = now.isoformat()
-        click_guard["last_requested_clicks"] = safe_requested_clicks
-        click_guard["last_allowed_clicks"] = allowed_clicks
-        click_guard["last_effective_clicks"] = effective_clicks
-        click_guard["updated_at"] = now.isoformat()
-        if click_guard["suspicion_score"] >= CLICK_SUSPICION_SOFT_LIMIT:
-            click_guard["flagged_at"] = now.isoformat()
-
-        write_click_guard_state(extra, click_guard)
-
-        # === REDIS ACTIVITY (best-effort, no DB write) ===
-        if redis_conn:
-            try:
-                await redis_conn.setex(
-                    f"activity:{payload.user_id}", 300, now.isoformat()
-                )
-            except Exception as e:
-                logger.warning("Redis activity write failed (non-critical): %s", e)
-
-        # === REDIS CLICK GUARD (best-effort, no extra_data write) ===
-        if redis_conn:
-            try:
-                await redis_conn.set(
-                    f"click_guard:{payload.user_id}",
-                    json.dumps(click_guard),
-                    ex=300,
-                )
-            except Exception as e:
-                logger.warning("Redis click_guard write failed (non-critical): %s", e)
-
-        conn = redis_conn
-        if gained > 0:
-            # Tournament: Redis only (no DB write per click)
-            await conn.zincrby(TOURNAMENT_KEY, gained, str(payload.user_id))
-            # Click buffer for coins flush
-            await conn.hincrby(f"click_buf:{payload.user_id}", "coins", gained)
-            await conn.hincrby(
-                f"click_buf:{payload.user_id}", "clicks", effective_clicks
-            )
-            await conn.expire(f"click_buf:{payload.user_id}", 300)
-            # Referral bonus buffer: accumulate in Redis, flush async later
-            referral_bonus = 0
-            referrer_id = user.get("referrer_id")
-            if referrer_id:
-                referral_bonus = max(1, int(gained * 0.05))  # 5% of gained
-                await conn.hincrby(
-                    f"referral_pending:{referrer_id}", "coins", referral_bonus
-                )
-                await conn.hincrby(f"referral_pending:{referrer_id}", "clicks", 1)
-                await conn.expire(f"referral_pending:{referrer_id}", 300)
-        else:
-            referral_bonus = 0
-
-        # REMOVED from sync path:
-        # - add_weekly_tournament_score (tournament in Redis only, ZINCRBY above)
-        # - grant_referral_share_bonus (buffered in Redis above, flush async later)
-        # - invalidate_user_cache (cache invalidation on explicit state changes only)
-
-        # Build authoritative click response from the realtime state assembler
-        boosts = get_all_boost_states(parse_extra_data(user.get("extra_data")))
-        tap_value = get_tap_value(int(user.get("multitap_level", 0)))
-        profit_per_hour = get_hour_value(int(user.get("profit_level", 0)))
-
-        return await build_click_response_state(
-            user_id=payload.user_id,
-            coins_after=new_coins,
-            energy_after=int(new_energy),
-            max_energy=max_energy,
-            gained=gained,
-            effective_clicks=effective_clicks,
-            coin_per_tap=coin_per_tap,
-            tap_value=tap_value,
-            profit_per_hour=profit_per_hour,
-            boosts=boosts,
-            suspicion_score=click_guard["suspicion_score"],
-            referral_bonus=referral_bonus,
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in process_clicks_batch: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    return await process_clicks_batch_service(
+        payload, request, _build_clicks_service_deps()
+    )
 
 
 @router.get("/api/upgrade-prices/{user_id}")
