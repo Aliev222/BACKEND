@@ -13,11 +13,23 @@ TON_WALLET_ALLOWED_CHARS = set(
 
 def is_valid_ton_wallet_address(address: str | None) -> bool:
     """Check if a TON wallet address looks valid."""
-    if not address:
+    value = (address or "").strip()
+    if not value:
         return False
-    if not re.match(r"^[A-Za-z0-9_-]{48}$", address):
-        return False
-    return True
+
+    # Raw TON address: "<workchain>:<64-hex>"
+    if ":" in value:
+        workchain_raw, account_id = value.split(":", 1)
+        workchain_raw = workchain_raw.strip()
+        account_id = account_id.strip().lower()
+        if not re.fullmatch(r"-?\d+", workchain_raw):
+            return False
+        if not re.fullmatch(r"[0-9a-f]{64}", account_id):
+            return False
+        return True
+
+    # Friendly TON address (base64url-like, 48 chars)
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{48}", value))
 
 
 def mask_ton_wallet(address: str | None) -> str | None:
