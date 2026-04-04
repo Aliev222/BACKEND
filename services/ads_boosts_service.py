@@ -48,38 +48,52 @@ async def create_ad_action_session_service(
     if action not in deps.AD_ACTIONS_ALLOWED:
         raise HTTPException(status_code=400, detail="Unknown ad action")
 
-    redis_conn = await deps.ensure_redis_available()
     ad_session_id = (
         f"{action}:{user_id}:{int(time.time())}:{random.randint(100000, 999999)}"
     )
     session_key = f"adsession:action:{ad_session_id}"
-
-    await redis_conn.setex(
-        session_key,
-        deps.AD_ACTION_SESSION_TTL_SECONDS,
-        json.dumps(
-            {
-                "user_id": user_id,
-                "action": action,
-                "claimed": False,
-                "verified": False,
-                "verified_at": None,
-                "created_at": time.time(),
-            }
-        ),
+    session_payload = json.dumps(
+        {
+            "user_id": user_id,
+            "action": action,
+            "claimed": False,
+            "verified": False,
+            "verified_at": None,
+            "created_at": time.time(),
+        }
     )
-    user_index_key = f"adsession:user:{user_id}"
-    active_session_key = deps.get_ad_action_active_session_key(user_id)
-    try:
-        await redis_conn.zadd(user_index_key, {ad_session_id: time.time()})
-        await redis_conn.expire(
-            user_index_key, max(deps.AD_ACTION_SESSION_TTL_SECONDS, 600)
-        )
+
+    async def _write_session_once(redis_conn):
         await redis_conn.setex(
-            active_session_key, deps.AD_ACTION_SESSION_TTL_SECONDS, ad_session_id
+            session_key,
+            deps.AD_ACTION_SESSION_TTL_SECONDS,
+            session_payload,
         )
+        user_index_key = f"adsession:user:{user_id}"
+        active_session_key = deps.get_ad_action_active_session_key(user_id)
+        try:
+            await redis_conn.zadd(user_index_key, {ad_session_id: time.time()})
+            await redis_conn.expire(
+                user_index_key, max(deps.AD_ACTION_SESSION_TTL_SECONDS, 600)
+            )
+            await redis_conn.setex(
+                active_session_key, deps.AD_ACTION_SESSION_TTL_SECONDS, ad_session_id
+            )
+        except Exception:
+            pass
+
+    redis_conn = await deps.ensure_redis_available()
+    try:
+        await _write_session_once(redis_conn)
     except Exception:
-        pass
+        # Transient Redis connection can drop mid-operation; retry once.
+        redis_conn = await deps.ensure_redis_available()
+        try:
+            await _write_session_once(redis_conn)
+        except Exception:
+            raise HTTPException(
+                status_code=503, detail="Ad session temporarily unavailable"
+            )
     return ad_session_id
 
 
@@ -283,7 +297,7 @@ async def ad_action_start_service(payload: Any, request: Any, deps: AdsBoostsSer
     except HTTPException:
         raise
     except Exception as e:
-        deps.logger.error(f"Error in ad_action_start: {e}")
+        deps.logger.exception("Error in ad_action_start")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

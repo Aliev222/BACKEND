@@ -1262,6 +1262,12 @@ def format_int(value: int) -> str:
     return f"{int(value or 0):,}".replace(",", " ")
 
 
+def format_duration(seconds: int) -> str:
+    total = max(0, int(seconds or 0))
+    minutes, secs = divmod(total, 60)
+    return f"{minutes}:{secs:02d}"
+
+
 async def get_rewarded_ad_user_counts(
     user_ids: list[int], *, hours: int
 ) -> dict[int, int]:
@@ -1439,12 +1445,15 @@ _USER_CACHE_EXCLUDE_FIELDS = frozenset(
 async def get_user_cached(user_id: int) -> dict | None:
     conn = await get_redis_or_none()
     if conn:
-        cached = await conn.get(f"{USER_CACHE_PREFIX}{user_id}")
-        if cached:
-            try:
-                return json.loads(cached)
-            except Exception:
-                pass
+        try:
+            cached = await conn.get(f"{USER_CACHE_PREFIX}{user_id}")
+            if cached:
+                try:
+                    return json.loads(cached)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning("User cache read failed for %s: %s", user_id, e)
 
     user = await get_user(user_id)
     if not user:
@@ -1452,15 +1461,18 @@ async def get_user_cached(user_id: int) -> dict | None:
 
     conn = await get_redis_or_none()
     if conn:
-        # Filter out hot-state fields before caching
-        cache_data = {
-            k: v for k, v in user.items() if k not in _USER_CACHE_EXCLUDE_FIELDS
-        }
-        await conn.setex(
-            f"{USER_CACHE_PREFIX}{user_id}",
-            USER_CACHE_TTL,
-            json.dumps(cache_data, default=str),
-        )
+        try:
+            # Filter out hot-state fields before caching
+            cache_data = {
+                k: v for k, v in user.items() if k not in _USER_CACHE_EXCLUDE_FIELDS
+            }
+            await conn.setex(
+                f"{USER_CACHE_PREFIX}{user_id}",
+                USER_CACHE_TTL,
+                json.dumps(cache_data, default=str),
+            )
+        except Exception as e:
+            logger.warning("User cache write failed for %s: %s", user_id, e)
 
     return user
 
