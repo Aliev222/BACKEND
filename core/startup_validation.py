@@ -24,7 +24,25 @@ def _require_positive_int(env_name: str) -> None:
         raise StartupValidationError(f"{env_name} must be > 0, got: {parsed}")
 
 
+def _require_non_negative_int(env_name: str) -> None:
+    raw = os.getenv(env_name)
+    if raw is None or str(raw).strip() == "":
+        return
+    try:
+        parsed = int(str(raw).strip())
+    except ValueError as e:
+        raise StartupValidationError(f"{env_name} must be integer, got: {raw}") from e
+    if parsed < 0:
+        raise StartupValidationError(f"{env_name} must be >= 0, got: {parsed}")
+
+
 def validate_startup_config(*, bot_mode: str) -> None:
+    app_env = (os.getenv("APP_ENV") or "production").strip().lower()
+    if app_env not in {"production", "staging", "development", "test"}:
+        raise StartupValidationError(
+            f"APP_ENV must be one of production/staging/development/test, got: {app_env}"
+        )
+
     database_url = (os.getenv("DATABASE_URL") or "").strip()
     if not database_url:
         raise StartupValidationError("DATABASE_URL is required")
@@ -54,3 +72,4 @@ def validate_startup_config(*, bot_mode: str) -> None:
     ):
         _require_positive_int(env_name)
 
+    _require_non_negative_int("REDIS_DB")

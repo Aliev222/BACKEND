@@ -29,7 +29,7 @@ async def metrics():
 
 async def _check_redis() -> tuple[bool, str]:
     if not REDIS_URL:
-        return True, "skipped"
+        return False, "missing_redis_url"
 
     try:
         conn = await get_redis_or_none()

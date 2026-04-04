@@ -7,16 +7,64 @@ services:
     autoDeploy: true
 
     buildCommand: pip install -r requirements.txt
-    startCommand: python migrate_db.py && uvicorn api:app --host 0.0.0.0 --port $PORT
+    startCommand: python migrate_db.py && uvicorn main_v2:app --host 0.0.0.0 --port $PORT
 
-    healthCheckPath: /health
+    healthCheckPath: /readyz
 
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: APP_ENV
+        value: production
+      - key: BOT_MODE
+        value: api
+      - key: REDIS_DB
+        value: 0
       - key: BOT_TOKEN
         sync: false
       - key: DATABASE_URL
         sync: false
       - key: REDIS_URL
+        sync: false
+      - key: SESSION_TOKEN_SECRET
+        sync: false
+      - key: TELEGRAM_BOT_USERNAME
+        sync: false
+      - key: TELEGRAM_VERIFY_CHANNEL
+        sync: false
+
+  # Isolated staging/load service for k6 and operational validation.
+  - type: web
+    name: ryoho-clicker-api-staging
+    runtime: python
+    plan: free
+    autoDeploy: false
+    branch: staging
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: python migrate_db.py && uvicorn main_v2:app --host 0.0.0.0 --port $PORT
+
+    healthCheckPath: /readyz
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: APP_ENV
+        value: staging
+      - key: BOT_MODE
+        value: api
+      # Use isolated Redis instance. If sharing Redis host intentionally, use separate DB index.
+      - key: REDIS_DB
+        value: 1
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: SESSION_TOKEN_SECRET
+        sync: false
+      - key: TELEGRAM_BOT_USERNAME
+        sync: false
+      - key: TELEGRAM_VERIFY_CHANNEL
         sync: false

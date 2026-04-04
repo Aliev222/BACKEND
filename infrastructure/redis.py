@@ -6,6 +6,7 @@ from fastapi import HTTPException
 logger = logging.getLogger(__name__)
 
 REDIS_URL = os.getenv("REDIS_URL")
+REDIS_DB = int((os.getenv("REDIS_DB", "0") or "0").strip())
 redis_client: redis.Redis | None = None
 
 
@@ -20,6 +21,7 @@ async def init_redis() -> redis.Redis | None:
             REDIS_URL,
             encoding="utf-8",
             decode_responses=True,
+            db=REDIS_DB,
             socket_timeout=2,
             socket_connect_timeout=2,
             retry_on_timeout=True,
@@ -57,6 +59,7 @@ async def get_redis_or_none() -> redis.Redis | None:
                 REDIS_URL,
                 encoding="utf-8",
                 decode_responses=True,
+                db=REDIS_DB,
                 socket_timeout=2,
                 socket_connect_timeout=2,
                 retry_on_timeout=True,

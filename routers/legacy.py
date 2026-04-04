@@ -197,6 +197,7 @@ router = APIRouter()
 
 
 REDIS_URL = os.getenv("REDIS_URL")
+REDIS_DB = int((os.getenv("REDIS_DB", "0") or "0").strip())
 redis_client = None
 LOCAL_LOCKS: dict[str, float] = {}
 LOCAL_IDEMPOTENCY_KEYS: dict[str, float] = {}
@@ -823,6 +824,7 @@ async def try_reconnect_redis() -> None:
         REDIS_URL,
         encoding="utf-8",
         decode_responses=True,
+        db=REDIS_DB,
         socket_timeout=2,
         socket_connect_timeout=2,
         retry_on_timeout=True,
