@@ -147,7 +147,10 @@ from core.realtime_state import (
 from core.telegram_auth import verify_telegram_init_data
 from core.stars_skins import get_stars_skin_price
 from CONFIG.settings import BOT_TOKEN
-from infrastructure.coins_hot_sync import sync_hot_after_db_increment
+from infrastructure.coins_hot_sync import (
+    sync_hot_after_db_increment,
+    sync_hot_after_db_decrement,
+)
 from services.clicks_service import (
     ClicksServiceDeps,
     process_clicks_batch_service,
@@ -1574,6 +1577,8 @@ async def update_user_if_matches(user_id: int, expected: dict, data: dict):
         await session.commit()
     if coin_delta and coin_delta > 0:
         await sync_hot_after_db_increment(user_id, int(coin_delta), int(new_coins))
+    elif coin_delta and coin_delta < 0:
+        await sync_hot_after_db_decrement(user_id, int(-coin_delta), int(new_coins))
 
     return await get_user(user_id)
 

@@ -21,7 +21,10 @@ import logging
 from CONFIG.settings import DATABASE_URL
 from core.game_config import BASE_MAX_ENERGY
 from core.game_logic import get_hour_value, get_max_energy, get_tap_value
-from infrastructure.coins_hot_sync import sync_hot_after_db_increment
+from infrastructure.coins_hot_sync import (
+    sync_hot_after_db_increment,
+    sync_hot_after_db_decrement,
+)
 
 import ssl
 
@@ -648,6 +651,12 @@ async def update_user(user_id: int, data: dict):
             await sync_hot_after_db_increment(
                 user_id,
                 new_coins - old_coins,
+                new_coins,
+            )
+        elif "coins" in data and new_coins < old_coins:
+            await sync_hot_after_db_decrement(
+                user_id,
+                old_coins - new_coins,
                 new_coins,
             )
 

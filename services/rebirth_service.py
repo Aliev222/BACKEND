@@ -56,19 +56,18 @@ async def _sync_rebirth_hot_state(
     local user_hot_key = KEYS[2]
     local energy_key = KEYS[3]
 
-    local rebirth_cost = tonumber(ARGV[1])
-    local db_coins_after = tonumber(ARGV[2])
-    local rebirth_count = tonumber(ARGV[3])
-    local tap_power = tonumber(ARGV[4])
-    local level = tonumber(ARGV[5])
-    local profit_per_hour = tonumber(ARGV[6])
-    local max_energy = tonumber(ARGV[7])
-    local energy = tonumber(ARGV[8])
+    local db_coins_after = tonumber(ARGV[1])
+    local rebirth_count = tonumber(ARGV[2])
+    local tap_power = tonumber(ARGV[3])
+    local level = tonumber(ARGV[4])
+    local profit_per_hour = tonumber(ARGV[5])
+    local max_energy = tonumber(ARGV[6])
+    local energy = tonumber(ARGV[7])
 
     local hot_coins = db_coins_after
     if redis.call('EXISTS', coins_hot_key) == 1 then
         local current_hot = tonumber(redis.call('GET', coins_hot_key) or tostring(db_coins_after))
-        hot_coins = current_hot - rebirth_cost
+        hot_coins = current_hot
         if hot_coins < db_coins_after then
             hot_coins = db_coins_after
         end
@@ -102,7 +101,6 @@ async def _sync_rebirth_hot_state(
                 f"coins_hot:{user_id}",
                 f"user_hot:{user_id}",
                 f"energy:v2:{user_id}",
-                str(REBIRTH_COST_COINS),
                 str(db_coins_after),
                 str(rebirth_count),
                 str(tap_power),
