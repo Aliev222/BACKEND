@@ -18,6 +18,9 @@ from sqlalchemy.exc import IntegrityError
 import json
 from datetime import datetime, timedelta
 import logging
+import asyncio
+import random
+from typing import Literal, Any
 from CONFIG.settings import DATABASE_URL
 from core.game_config import BASE_MAX_ENERGY
 from core.game_logic import get_hour_value, get_max_energy, get_tap_value
@@ -365,6 +368,168 @@ async def get_user(user_id: int):
         return None
 
 
+# ==================== ATOMIC EXTRA_DATA UPDATES ====================
+
+
+async def update_extra_data_atomic(
+    user_id: int,
+    field_path: str,
+    operation: Literal["set", "append_unique", "increment"],
+    value: Any = None,
+    max_retries: int = 3,
+    allow_lossy_fallback: bool = False,
+) -> Any:
+    """
+    Atomically update extra_data field with optimistic locking.
+
+    Args:
+        user_id: User ID
+        field_path: Field name (e.g., "selected_skin", "owned_skins")
+        operation: Update operation type
+        value: Value to set/append/increment
+        max_retries: Retry attempts on conflict
+        allow_lossy_fallback: If True, re-read and re-apply on final retry
+
+    Returns:
+        New value after update, or None if failed
+
+    Operations:
+        - "set": Set scalar value
+        - "append_unique": Append to array if not exists
+        - "increment": Increment counter (value = delta, default 1)
+    """
+    for attempt in range(max_retries):
+        async with AsyncSessionLocal() as session:
+            # Read current extra_data
+            result = await session.execute(
+                select(User.extra_data).where(User.user_id == user_id)
+            )
+            row = result.one_or_none()
+            if not row:
+                return None
+
+            current_extra_json = row[0]
+            current_extra = json.loads(current_extra_json) if current_extra_json else {}
+
+            # Apply operation
+            new_extra = current_extra.copy()
+
+            if operation == "set":
+                new_extra[field_path] = value
+                result_value = value
+
+            elif operation == "append_unique":
+                current_array = new_extra.get(field_path, [])
+                if not isinstance(current_array, list):
+                    current_array = []
+                if value not in current_array:
+                    new_array = current_array.copy()
+                    new_array.append(value)
+                    new_extra[field_path] = new_array
+                    result_value = new_array
+                else:
+                    # Already exists, idempotent
+                    return current_array
+
+            elif operation == "increment":
+                delta = value if value is not None else 1
+                current_value = new_extra.get(field_path, 0)
+                if not isinstance(current_value, int):
+                    current_value = 0
+                new_value = current_value + delta
+                new_extra[field_path] = new_value
+                result_value = new_value
+
+            else:
+                raise ValueError(f"Unknown operation: {operation}")
+
+            new_extra_json = json.dumps(new_extra)
+
+            # Optimistic lock: UPDATE WHERE extra_data = old_value
+            update_result = await session.execute(
+                update(User)
+                .where(User.user_id == user_id)
+                .where(User.extra_data == current_extra_json)
+                .values(extra_data=new_extra_json)
+            )
+
+            if update_result.rowcount == 1:
+                await session.commit()
+                return result_value
+
+            # Conflict detected
+            if attempt < max_retries - 1:
+                # Jitter: random sleep 5-15ms
+                await asyncio.sleep(random.uniform(0.005, 0.015))
+                continue
+            else:
+                # Max retries exhausted
+                if allow_lossy_fallback:
+                    # LOSSY FALLBACK: Re-read latest state, re-apply operation
+                    logging.warning(
+                        f"EXTRA_DATA_LOSSY_FALLBACK user={user_id} field={field_path} "
+                        f"operation={operation} retries={max_retries}"
+                    )
+
+                    # Re-read latest state
+                    latest_result = await session.execute(
+                        select(User.extra_data).where(User.user_id == user_id)
+                    )
+                    latest_row = latest_result.one_or_none()
+                    if not latest_row:
+                        return None
+
+                    latest_extra_json = latest_row[0]
+                    latest_extra = (
+                        json.loads(latest_extra_json) if latest_extra_json else {}
+                    )
+
+                    # Re-apply operation on latest state
+                    final_extra = latest_extra.copy()
+
+                    if operation == "set":
+                        final_extra[field_path] = value
+                        final_result = value
+
+                    elif operation == "append_unique":
+                        latest_array = final_extra.get(field_path, [])
+                        if not isinstance(latest_array, list):
+                            latest_array = []
+                        if value not in latest_array:
+                            latest_array.append(value)
+                            final_extra[field_path] = latest_array
+                        final_result = latest_array
+
+                    elif operation == "increment":
+                        delta = value if value is not None else 1
+                        latest_value = final_extra.get(field_path, 0)
+                        if not isinstance(latest_value, int):
+                            latest_value = 0
+                        final_extra[field_path] = latest_value + delta
+                        final_result = final_extra[field_path]
+
+                    final_extra_json = json.dumps(final_extra)
+
+                    # Force write (no WHERE clause on extra_data)
+                    await session.execute(
+                        update(User)
+                        .where(User.user_id == user_id)
+                        .values(extra_data=final_extra_json)
+                    )
+                    await session.commit()
+
+                    return final_result
+                else:
+                    # STRICT MODE: Fail without overwrite
+                    logging.error(
+                        f"EXTRA_DATA_STRICT_FAIL user={user_id} field={field_path} "
+                        f"operation={operation} retries={max_retries}"
+                    )
+                    return None
+
+    return None
+
+
 # ==================== РЕФЕРАЛЬНАЯ СИСТЕМА ====================
 
 
@@ -372,9 +537,9 @@ async def add_referral_bonus(referrer_id: int, referral_id: int):
     """Начисление бонуса рефереру за нового реферала"""
     try:
         async with AsyncSessionLocal() as session:
-            # Получаем реферера
+            # Получаем реферера с SELECT FOR UPDATE
             result = await session.execute(
-                select(User).where(User.user_id == referrer_id)
+                select(User).where(User.user_id == referrer_id).with_for_update()
             )
             referrer = result.scalar_one_or_none()
 
@@ -394,47 +559,42 @@ async def add_referral_bonus(referrer_id: int, referral_id: int):
                 and referrer.referrer_id == referral_id
             ):
                 logging.error(
-                    f"вќЊ РћС‚РєР»РѕРЅРµРЅ РІР·Р°РёРјРЅС‹Р№ СЂРµС„РµСЂР°Р»СЊРЅС‹Р№ С†РёРєР»: {referrer_id} <-> {referral_id}"
+                    f"❌ Отклонен взаимный реферальный цикл: {referrer_id} <-> {referral_id}"
                 )
                 return False
 
-            extra_data = {}
-            if referrer.extra_data:
-                try:
-                    extra_data = json.loads(referrer.extra_data)
-                except json.JSONDecodeError:
-                    extra_data = {}
-
-            owned_skins = extra_data.get("owned_skins", ["default.pngSP"])
-            if not isinstance(owned_skins, list):
-                owned_skins = ["default.pngSP"]
-            owned_skins = [
-                "refferal.pngSP" if skin_id == "referral-special.pngSP" else skin_id
-                for skin_id in owned_skins
-            ]
-            if REFERRAL_SPECIAL_SKIN_ID not in owned_skins:
-                owned_skins.append(REFERRAL_SPECIAL_SKIN_ID)
-            extra_data["owned_skins"] = owned_skins
-
+            # Update coins/counts atomically (protected by FOR UPDATE)
             referrer.coins += REFERRAL_SIGNUP_BONUS
             referrer.referral_count += 1
             referrer.referral_earnings += REFERRAL_SIGNUP_BONUS
-            referrer.extra_data = json.dumps(extra_data)
 
             await session.commit()
-            await sync_hot_after_db_increment(
-                referrer_id,
-                REFERRAL_SIGNUP_BONUS,
-                int(referrer.coins or 0),
-            )
-            logging.info(
-                f"✅ Реферер {referrer_id} получил +{REFERRAL_SIGNUP_BONUS} монет за реферала {referral_id}"
-            )
-            logging.info(
-                f"📊 Теперь у реферера {referrer_id}: coins={referrer.coins}, count={referrer.referral_count}"
+
+        # Grant special skin (separate transaction, strict mode)
+        skin_result = await update_extra_data_atomic(
+            referrer_id,
+            "owned_skins",
+            "append_unique",
+            REFERRAL_SPECIAL_SKIN_ID,
+            allow_lossy_fallback=False,
+        )
+
+        if skin_result is None:
+            logging.error(
+                f"REFERRAL_SKIN_GRANT_FAIL user={referrer_id} referral={referral_id} "
+                f"coins_credited={REFERRAL_SIGNUP_BONUS} skin_not_granted"
             )
 
-            return True
+        await sync_hot_after_db_increment(
+            referrer_id,
+            REFERRAL_SIGNUP_BONUS,
+            int(referrer.coins or 0),
+        )
+        logging.info(
+            f"✅ Реферер {referrer_id} получил +{REFERRAL_SIGNUP_BONUS} монет за реферала {referral_id}"
+        )
+
+        return True
 
     except Exception as e:
         logging.error(

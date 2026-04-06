@@ -76,17 +76,23 @@ async def select_skin(
     user: dict,
     skin_id: str,
 ) -> dict:
-    extra = _get_extra(user)
+    from DATABASE.base import update_extra_data_atomic
+
     owned = await get_owned_skins(user)
 
     if skin_id not in owned:
         raise HTTPException(status_code=400, detail="Skin not owned")
 
-    extra["selected_skin"] = skin_id
+    # Update selected_skin atomically (strict mode)
+    result = await update_extra_data_atomic(
+        user_id, "selected_skin", "set", skin_id, allow_lossy_fallback=False
+    )
 
-    updated = await update_user_atomic(session, user_id, extra_data=extra)
-    if not updated:
-        raise HTTPException(status_code=409, detail="Concurrent modification")
+    if result is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Failed to select skin due to concurrent update, please retry",
+        )
 
     return {
         "success": True,

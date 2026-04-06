@@ -30,6 +30,8 @@ async def complete_task_reward_atomically_service(
     user_updates: dict | None,
     deps: TasksRewardsServiceDeps,
 ) -> dict:
+    from DATABASE.base import update_extra_data_atomic
+
     user_updates = user_updates or {}
     sync_delta = 0
     sync_new_coins = None
@@ -53,15 +55,32 @@ async def complete_task_reward_atomically_service(
             raise HTTPException(status_code=400, detail="Task already completed")
 
         session.add(deps.UserTask(user_id=user_id, task_id=task_id))
+
+        # Apply updates except extra_data (handled separately)
         for field, value in user_updates.items():
-            setattr(
-                user_row, field, json.dumps(value) if field == "extra_data" else value
-            )
+            if field != "extra_data":
+                setattr(user_row, field, value)
 
         await session.commit()
         if "coins" in user_updates:
             sync_new_coins = int(user_row.coins or 0)
             sync_delta = sync_new_coins - old_coins
+
+    # Update extra_data.completed_tasks atomically (strict mode)
+    if "extra_data" in user_updates:
+        result = await update_extra_data_atomic(
+            user_id,
+            "completed_tasks",
+            "append_unique",
+            task_id,
+            allow_lossy_fallback=False,
+        )
+        if result is None:
+            deps.logger.warning(
+                f"Failed to update extra_data.completed_tasks for user {user_id}, "
+                f"task {task_id} (strict mode conflict). UserTask table is authoritative."
+            )
+
     if sync_delta > 0 and sync_new_coins is not None:
         await deps.sync_hot_after_db_increment(user_id, sync_delta, sync_new_coins)
 

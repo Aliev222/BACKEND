@@ -114,7 +114,9 @@ async def mark_ad_action_session_verified_service(
     session_key = f"adsession:action:{ad_session_id}"
     t = time.perf_counter()
     raw = await redis_conn.get(session_key)
-    observe_storage_timing("redis", "ad_session_get_for_verify", "ads_boosts", time.perf_counter() - t)
+    observe_storage_timing(
+        "redis", "ad_session_get_for_verify", "ads_boosts", time.perf_counter() - t
+    )
     if not raw:
         return False
 
@@ -131,7 +133,9 @@ async def mark_ad_action_session_verified_service(
     ttl = await redis_conn.ttl(session_key)
     ttl = max(int(ttl or 0), 300)
     await redis_conn.setex(session_key, ttl, json.dumps(session))
-    observe_storage_timing("redis", "ad_session_verify_write", "ads_boosts", time.perf_counter() - t)
+    observe_storage_timing(
+        "redis", "ad_session_verify_write", "ads_boosts", time.perf_counter() - t
+    )
     return True
 
 
@@ -147,7 +151,9 @@ async def mark_ad_action_session_verified_for_user_service(
     session_key = f"adsession:action:{ad_session_id}"
     t = time.perf_counter()
     raw = await redis_conn.get(session_key)
-    observe_storage_timing("redis", "ad_session_get_for_consume", "ads_boosts", time.perf_counter() - t)
+    observe_storage_timing(
+        "redis", "ad_session_get_for_consume", "ads_boosts", time.perf_counter() - t
+    )
     if not raw:
         return False
 
@@ -164,7 +170,10 @@ async def mark_ad_action_session_verified_for_user_service(
 
     if enforce_min_wait:
         created_at = float(session.get("created_at") or 0)
-        if created_at <= 0 or (time.time() - created_at) < deps.AD_SESSION_MIN_WAIT_SECONDS:
+        if (
+            created_at <= 0
+            or (time.time() - created_at) < deps.AD_SESSION_MIN_WAIT_SECONDS
+        ):
             return False
 
     return await mark_ad_action_session_verified_service(
@@ -277,26 +286,37 @@ async def consume_ad_action_session_service(
     else:
         if session.get("verified") is not True:
             created_at = float(session.get("created_at") or 0)
-            if created_at <= 0 or (time.time() - created_at) < deps.AD_SESSION_MIN_WAIT_SECONDS:
-                raise HTTPException(status_code=400, detail="Ad watch is not completed yet")
+            if (
+                created_at <= 0
+                or (time.time() - created_at) < deps.AD_SESSION_MIN_WAIT_SECONDS
+            ):
+                raise HTTPException(
+                    status_code=400, detail="Ad watch is not completed yet"
+                )
 
     session["claimed"] = True
     t = time.perf_counter()
     await redis_conn.setex(session_key, 60, json.dumps(session))
-    observe_storage_timing("redis", "ad_session_consume_write", "ads_boosts", time.perf_counter() - t)
+    observe_storage_timing(
+        "redis", "ad_session_consume_write", "ads_boosts", time.perf_counter() - t
+    )
     try:
         t = time.perf_counter()
         active_session_id = await redis_conn.get(active_session_key)
         if active_session_id == ad_session_id:
             await redis_conn.delete(active_session_key)
-        observe_storage_timing("redis", "ad_session_active_cleanup", "ads_boosts", time.perf_counter() - t)
+        observe_storage_timing(
+            "redis", "ad_session_active_cleanup", "ads_boosts", time.perf_counter() - t
+        )
     except Exception:
         observe_storage_error("redis", "ad_session_active_cleanup", "ads_boosts")
         pass
     return session
 
 
-async def ad_action_start_service(payload: Any, request: Any, deps: AdsBoostsServiceDeps):
+async def ad_action_start_service(
+    payload: Any, request: Any, deps: AdsBoostsServiceDeps
+):
     try:
         await deps.require_telegram_user(request, payload.user_id)
         await deps.require_dual_rate_limit(
@@ -305,7 +325,9 @@ async def ad_action_start_service(payload: Any, request: Any, deps: AdsBoostsSer
 
         t = time.perf_counter()
         user = await deps.get_user_cached(payload.user_id)
-        observe_storage_timing("db", "get_user_cached", "ads_boosts", time.perf_counter() - t)
+        observe_storage_timing(
+            "db", "get_user_cached", "ads_boosts", time.perf_counter() - t
+        )
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -356,7 +378,9 @@ async def adsgram_complete_locally_service(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-async def activate_mega_boost_service(payload: Any, request: Any, deps: AdsBoostsServiceDeps):
+async def activate_mega_boost_service(
+    payload: Any, request: Any, deps: AdsBoostsServiceDeps
+):
     try:
         await deps.require_telegram_user(request, payload.user_id)
         await deps.require_dual_rate_limit(
@@ -367,7 +391,9 @@ async def activate_mega_boost_service(payload: Any, request: Any, deps: AdsBoost
         )
         t = time.perf_counter()
         user = await deps.get_user_cached(payload.user_id)
-        observe_storage_timing("db", "get_user_cached", "ads_boosts", time.perf_counter() - t)
+        observe_storage_timing(
+            "db", "get_user_cached", "ads_boosts", time.perf_counter() - t
+        )
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -383,7 +409,9 @@ async def activate_mega_boost_service(payload: Any, request: Any, deps: AdsBoost
 
         if "mega_boost" in active_boosts:
             try:
-                expires = datetime.fromisoformat(active_boosts["mega_boost"]["expires_at"])
+                expires = datetime.fromisoformat(
+                    active_boosts["mega_boost"]["expires_at"]
+                )
                 if now < expires:
                     remaining = int((expires - now).total_seconds())
                     return {
@@ -413,7 +441,9 @@ async def activate_mega_boost_service(payload: Any, request: Any, deps: AdsBoost
         extra["active_boosts"] = active_boosts
         t = time.perf_counter()
         await deps.update_user(payload.user_id, {"extra_data": extra})
-        observe_storage_timing("db", "update_user", "ads_boosts", time.perf_counter() - t)
+        observe_storage_timing(
+            "db", "update_user", "ads_boosts", time.perf_counter() - t
+        )
         await deps.invalidate_user_cache(payload.user_id)
         await deps.record_rewarded_ad_claim(
             payload.user_id, "boost", {"source_action": "mega_boost"}
@@ -434,7 +464,9 @@ async def activate_mega_boost_service(payload: Any, request: Any, deps: AdsBoost
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-async def activate_ghost_boost_service(payload: Any, request: Any, deps: AdsBoostsServiceDeps):
+async def activate_ghost_boost_service(
+    payload: Any, request: Any, deps: AdsBoostsServiceDeps
+):
     try:
         await deps.require_telegram_user(request, payload.user_id)
         await deps.require_dual_rate_limit(
@@ -445,7 +477,9 @@ async def activate_ghost_boost_service(payload: Any, request: Any, deps: AdsBoos
         )
         t = time.perf_counter()
         user = await deps.get_user_cached(payload.user_id)
-        observe_storage_timing("db", "get_user_cached", "ads_boosts", time.perf_counter() - t)
+        observe_storage_timing(
+            "db", "get_user_cached", "ads_boosts", time.perf_counter() - t
+        )
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -482,7 +516,9 @@ async def activate_ghost_boost_service(payload: Any, request: Any, deps: AdsBoos
 
         t = time.perf_counter()
         await deps.update_user(payload.user_id, {"extra_data": extra})
-        observe_storage_timing("db", "update_user", "ads_boosts", time.perf_counter() - t)
+        observe_storage_timing(
+            "db", "update_user", "ads_boosts", time.perf_counter() - t
+        )
         await deps.invalidate_user_cache(payload.user_id)
         await deps.record_rewarded_ad_claim(
             payload.user_id, "ghost", {"source_action": "ghost_boost"}
@@ -504,7 +540,10 @@ async def activate_ghost_boost_service(payload: Any, request: Any, deps: AdsBoos
 
 
 async def increment_ads_watched_service(
-    payload: Any, request: Any, deps: AdsBoostsServiceDeps, acquire_once_lock: Callable[..., Awaitable[bool]]
+    payload: Any,
+    request: Any,
+    deps: AdsBoostsServiceDeps,
+    acquire_once_lock: Callable[..., Awaitable[bool]],
 ):
     try:
         await deps.require_telegram_user(request, payload.user_id)
@@ -516,7 +555,9 @@ async def increment_ads_watched_service(
         )
         t = time.perf_counter()
         user = await deps.get_user_cached(payload.user_id)
-        observe_storage_timing("db", "get_user_cached", "ads_boosts", time.perf_counter() - t)
+        observe_storage_timing(
+            "db", "get_user_cached", "ads_boosts", time.perf_counter() - t
+        )
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -525,15 +566,27 @@ async def increment_ads_watched_service(
         if not locked:
             raise HTTPException(status_code=429, detail="Ad already being processed")
 
+        # Import update_extra_data_atomic
+        from DATABASE.base import update_extra_data_atomic
+
+        # Increment ads_watched atomically (lossy mode - counter is non-critical)
+        t = time.perf_counter()
+        ads_watched = await update_extra_data_atomic(
+            payload.user_id, "ads_watched", "increment", 1, allow_lossy_fallback=True
+        )
+        observe_storage_timing(
+            "db", "update_extra_data_atomic", "ads_boosts", time.perf_counter() - t
+        )
+
+        if ads_watched is None:
+            ads_watched = 1  # Fallback if user not found
+
         extra = user.get("extra_data", {}) or {}
         if isinstance(extra, str):
             try:
                 extra = json.loads(extra)
             except Exception:
                 extra = {}
-
-        ads_watched = int(extra.get("ads_watched", 0)) + 1
-        extra["ads_watched"] = ads_watched
 
         skin_id = (
             deps.LEGACY_SKIN_ID_MAP.get(payload.skin_id, payload.skin_id)
@@ -551,7 +604,9 @@ async def increment_ads_watched_service(
 
             progress = get_skin_ad_progress(extra)
             last_watch = get_skin_ad_last_watch(extra)
-            required_count = int(deps.SKIN_REQUIREMENTS.get(skin_id, {}).get("count", 1))
+            required_count = int(
+                deps.SKIN_REQUIREMENTS.get(skin_id, {}).get("count", 1)
+            )
             current_count = int(progress.get(skin_id, 0) or 0)
 
             if current_count >= required_count:
@@ -564,7 +619,9 @@ async def increment_ads_watched_service(
                         minutes=deps.SKIN_AD_COOLDOWN_MINUTES
                     )
                     if next_allowed > now:
-                        cooldown_remaining_seconds = int((next_allowed - now).total_seconds())
+                        cooldown_remaining_seconds = int(
+                            (next_allowed - now).total_seconds()
+                        )
                         raise HTTPException(
                             status_code=429,
                             detail=f"Skin ad cooldown {cooldown_remaining_seconds // 60}:{cooldown_remaining_seconds % 60:02d}",
@@ -579,7 +636,9 @@ async def increment_ads_watched_service(
 
         t = time.perf_counter()
         await deps.update_user(payload.user_id, {"extra_data": extra})
-        observe_storage_timing("db", "update_user", "ads_boosts", time.perf_counter() - t)
+        observe_storage_timing(
+            "db", "update_user", "ads_boosts", time.perf_counter() - t
+        )
         await deps.record_rewarded_ad_claim(
             payload.user_id,
             "skins",
@@ -619,14 +678,18 @@ async def update_energy_service(payload: Any, request: Any, deps: AdsBoostsServi
             raise HTTPException(status_code=400, detail="user_id required")
         t = time.perf_counter()
         user = await deps.get_user_cached(user_id)
-        observe_storage_timing("db", "get_user_cached", "ads_boosts", time.perf_counter() - t)
+        observe_storage_timing(
+            "db", "get_user_cached", "ads_boosts", time.perf_counter() - t
+        )
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
         now = datetime.utcnow()
         max_energy = deps.resolve_max_energy(user)
         extra = deps.parse_extra_data(user.get("extra_data"))
-        cooldown_until = deps.parse_iso_datetime(extra.get("energy_refill_cooldown_until"))
+        cooldown_until = deps.parse_iso_datetime(
+            extra.get("energy_refill_cooldown_until")
+        )
         if cooldown_until and now < cooldown_until:
             remaining = int((cooldown_until - now).total_seconds())
             raise HTTPException(
@@ -651,7 +714,9 @@ async def update_energy_service(payload: Any, request: Any, deps: AdsBoostsServi
                 "extra_data": extra,
             },
         )
-        observe_storage_timing("db", "update_user", "ads_boosts", time.perf_counter() - t)
+        observe_storage_timing(
+            "db", "update_user", "ads_boosts", time.perf_counter() - t
+        )
         try:
             redis_conn = await deps.get_redis_or_none()
             if redis_conn:
@@ -664,7 +729,9 @@ async def update_energy_service(payload: Any, request: Any, deps: AdsBoostsServi
                         "max_energy": str(max_energy),
                     },
                 )
-                observe_storage_timing("redis", "energy_v2_hset", "ads_boosts", time.perf_counter() - t)
+                observe_storage_timing(
+                    "redis", "energy_v2_hset", "ads_boosts", time.perf_counter() - t
+                )
         except Exception:
             observe_storage_error("redis", "energy_v2_hset", "ads_boosts")
             pass
