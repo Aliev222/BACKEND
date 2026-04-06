@@ -264,7 +264,7 @@ GHOST_BOOST_MINUTES = 1
 SKIN_AD_COOLDOWN_MINUTES = 10
 ENERGY_REFILL_COOLDOWN_MINUTES = 10
 AD_ACTION_SESSION_TTL_SECONDS = 180
-AD_SESSION_MIN_WAIT_SECONDS = 8
+AD_SESSION_MIN_WAIT_SECONDS = 3
 AD_ACTIONS_ALLOWED = {
     "energy_refill_max",
     "mega_boost",
@@ -2407,10 +2407,11 @@ async def increment_ads_watched(payload: AdActionClaimRequest, request: Request)
     )
 
 
-
 @router.post("/api/upgrade")
 async def process_upgrade(payload: UpgradeRequest, request: Request):
-    return await process_upgrade_service(payload, request, _build_upgrades_service_deps())
+    return await process_upgrade_service(
+        payload, request, _build_upgrades_service_deps()
+    )
 
 
 @router.post("/api/upgrade-all")
@@ -3345,7 +3346,9 @@ async def _repair_user_hot_if_below_db(user_id: int, redis_conn) -> dict:
     return current
     """
     repaired_hot = int(
-        await redis_conn.eval(repair_lua, 1, f"coins_hot:{int(user_id)}", before.db_coins)
+        await redis_conn.eval(
+            repair_lua, 1, f"coins_hot:{int(user_id)}", before.db_coins
+        )
     )
     after = await reconcile_user(user_id, redis_conn)
 
@@ -3538,4 +3541,3 @@ async def admin_flush_lag(request: Request):
 
 
 # ==================== Р—РђРџРЈРЎРљ ====================
-
