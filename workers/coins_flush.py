@@ -69,19 +69,19 @@ async def flush_coins_to_db(redis_conn: redis.Redis) -> int:
     """
     Flush accumulated coins from Redis to PostgreSQL.
     Uses ZSET queue for O(log N) performance instead of SCAN.
-    
+
     Migration safety:
     - Primary: Read from coins_pending_queue (fast)
     - Fallback: SCAN for legacy pending keys without queue membership
     - Cleanup: Remove from queue only after successful DB commit
-    
+
     Returns number of users flushed.
     """
     # Phase 1: Get pending user_ids from ZSET queue (O(log N))
     pending_user_ids = await redis_conn.zrange(
         "coins_pending_queue", 0, MAX_KEYS_PER_FLUSH - 1
     )
-    
+
     # Phase 1b: Migration fallback - check for legacy pending keys without queue
     # This handles keys created before ZSET queue was deployed
     legacy_pending_keys = []
@@ -100,18 +100,17 @@ async def flush_coins_to_db(redis_conn: redis.Redis) -> int:
                     # Backfill into queue for next time
                     try:
                         await redis_conn.zadd(
-                            "coins_pending_queue",
-                            {user_id_str: int(time.time())}
+                            "coins_pending_queue", {user_id_str: int(time.time())}
                         )
                     except Exception:
                         pass
             if cursor == 0 or len(legacy_pending_keys) >= scan_limit:
                 break
-        
+
         if legacy_pending_keys:
             logger.info(
                 "Migration: found %d legacy pending keys without queue membership",
-                len(legacy_pending_keys)
+                len(legacy_pending_keys),
             )
             pending_user_ids = list(pending_user_ids) + legacy_pending_keys
 
@@ -258,7 +257,24 @@ async def flush_coins_to_db(redis_conn: redis.Redis) -> int:
         flushed += 1
 
     return flushed
-                flushing_keys.append(k)
+
+
+async def _recover_orphaned_flushing_keys(
+    redis_conn,
+) -> list[tuple[str, int, int, str]]:
+    """Scan for orphaned flushing keys and prepare them for recovery."""
+    moved_data = []
+    flushing_keys = []
+    cursor = 0
+
+    while True:
+        cursor, keys = await redis_conn.scan(
+            cursor, match=f"{FLUSHING_KEY_PREFIX}*", count=100
+        )
+        for k in keys:
+            if isinstance(k, bytes):
+                k = k.decode("utf-8")
+            flushing_keys.append(k)
         if cursor == 0:
             break
 
