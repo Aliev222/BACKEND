@@ -450,7 +450,7 @@ async def activate_mega_boost_service(
                     UPDATE users 
                     SET extra_data = jsonb_set(
                         jsonb_set(
-                            COALESCE(extra_data, '{}'::jsonb),
+                            COALESCE(extra_data::jsonb, '{}'::jsonb),
                             '{active_boosts,mega_boost}',
                             CAST(:boost AS jsonb),
                             true
@@ -458,7 +458,7 @@ async def activate_mega_boost_service(
                         '{mega_boost_cooldown_until}',
                         CAST(:cooldown AS jsonb),
                         true
-                    )
+                    )::text
                     WHERE user_id = :uid
                 """),
                 {
@@ -547,11 +547,11 @@ async def activate_ghost_boost_service(
                 text("""
                     UPDATE users 
                     SET extra_data = jsonb_set(
-                        COALESCE(extra_data, '{}'::jsonb),
+                        COALESCE(extra_data::jsonb, '{}'::jsonb),
                         '{active_boosts,ghost_boost}',
                         CAST(:boost AS jsonb),
                         true
-                    )
+                    )::text
                     WHERE user_id = :uid
                 """),
                 {

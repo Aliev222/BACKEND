@@ -89,11 +89,11 @@ async def select_skin(
         text("""
             UPDATE users 
             SET extra_data = jsonb_set(
-                COALESCE(extra_data, '{}'::jsonb),
+                COALESCE(extra_data::jsonb, '{}'::jsonb),
                 '{selected_skin}',
                 CAST(:skin AS jsonb),
                 true
-            )
+            )::text
             WHERE user_id = :uid
         """),
         {
