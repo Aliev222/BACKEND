@@ -52,13 +52,13 @@ WEEKLY_LEAGUE_FUND_SPLITS = {
 WEEKLY_TOP_PAYOUT_SPLITS = {
     1: 0.30,
     2: 0.20,
-    3: 0.15,
+    3: 0.13,
 }
-WEEKLY_RANGE_PAYOUT_SPLITS = (
-    ((4, 10), 0.22),
-    ((11, 20), 0.10),
-    ((21, 50), 0.05),
-)
+WEEKLY_RANGE_PAYOUT_SPLITS = [
+    {"start": 4, "end": 10, "share": 0.22},
+    {"start": 11, "end": 20, "share": 0.10},
+    {"start": 21, "end": 50, "share": 0.05},
+]
 
 
 # Модель пользователя
@@ -1100,7 +1100,10 @@ async def finalize_weekly_tournament_season(season_key: str):
                 for rank, share in WEEKLY_TOP_PAYOUT_SPLITS.items()
             }
             range_payouts = []
-            for (start_rank, end_rank), share in WEEKLY_RANGE_PAYOUT_SPLITS:
+            for payout_range in WEEKLY_RANGE_PAYOUT_SPLITS:
+                start_rank = int(payout_range["start"])
+                end_rank = int(payout_range["end"])
+                share = float(payout_range["share"])
                 pool_cents = int(league_fund_cents * share)
                 eligible_entries = [
                     entry

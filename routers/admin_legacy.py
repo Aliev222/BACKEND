@@ -465,12 +465,8 @@ async def build_weekly_ton_payout_view(
                     "eligible_for_payout": bool(entry.get("eligible_for_payout", True)),
                     "fraud_flag": bool(entry.get("fraud_flag", False)),
                     "wallet_connected": wallet_connected,
-                    "wallet_address": wallet.get("address")
-                    if wallet_connected
-                    else None,
-                    "masked_wallet": wallet.get("masked_address")
-                    if wallet_connected
-                    else None,
+                    "wallet_address": wallet.get("address") if wallet else None,
+                    "masked_wallet": wallet.get("masked_address") if wallet else None,
                     "payout_cents": int(payout_cents),
                     "ton_amount_nano": int(ton_amount_nano),
                     "status": derived_status,
