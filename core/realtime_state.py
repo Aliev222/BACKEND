@@ -155,6 +155,7 @@ async def ensure_user_hot_progression_state(
     profit_per_hour: int,
     energy: int,
     coins: int,
+    boosts: dict,
 ) -> None:
     redis_conn = await get_redis_or_none()
     if not redis_conn:
@@ -169,6 +170,7 @@ async def ensure_user_hot_progression_state(
     local profit_per_hour = tonumber(ARGV[5])
     local energy = tonumber(ARGV[6])
     local coins = tonumber(ARGV[7])
+    local boosts_json = ARGV[8]
 
     local existing_level = tonumber(redis.call('HGET', key, 'level') or '0')
     local existing_rebirth = tonumber(redis.call('HGET', key, 'rebirth_count') or '0')
@@ -190,7 +192,8 @@ async def ensure_user_hot_progression_state(
             'max_energy', tostring(max_energy),
             'profit_per_hour', tostring(profit_per_hour),
             'energy', tostring(energy),
-            'coins', tostring(coins)
+            'coins', tostring(coins),
+            'boosts', boosts_json
         )
         redis.call('HDEL', key, 'multitap_level', 'profit_level', 'energy_level')
     end
@@ -208,6 +211,7 @@ async def ensure_user_hot_progression_state(
             str(profit_per_hour),
             str(energy),
             str(coins),
+            json.dumps(boosts),
         )
     except Exception as exc:
         logger.warning("Failed to ensure user_hot progression for %s: %s", user_id, exc)
@@ -379,6 +383,16 @@ async def build_realtime_player_state(user_id: int) -> dict | None:
     # 11. State ordering fields (timestamp-based)
     state_updated_at = int(time.time() * 1000)  # milliseconds
 
+    # Prepare boosts for user_hot sync
+    boosts_for_hot = {
+        "mega_boost_active": boosts["mega_boost_active"],
+        "ghost_boost_active": boosts["ghost_boost_active"],
+        "ghost_boost_multiplier": boosts["ghost_boost_multiplier"],
+        "daily_infinite_energy_active": boosts["daily_infinite_energy_active"],
+        "task_tap_boost_active": boosts["task_tap_boost_active"],
+        "task_tap_boost_multiplier": boosts["task_tap_boost_multiplier"],
+    }
+
     await ensure_user_hot_progression_state(
         user_id,
         level=level,
@@ -388,6 +402,7 @@ async def build_realtime_player_state(user_id: int) -> dict | None:
         profit_per_hour=profit_per_hour,
         energy=energy_state["energy"],
         coins=coins,
+        boosts=boosts_for_hot,
     )
 
     return {

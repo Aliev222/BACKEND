@@ -472,6 +472,26 @@ async def activate_mega_boost_service(
             "db", "update_user_atomic_jsonb", "ads_boosts", time.perf_counter() - t
         )
         await deps.invalidate_user_cache(payload.user_id)
+
+        # Sync boost to user_hot immediately so click path sees it
+        redis_conn = await deps.get_redis_or_none()
+        if redis_conn:
+            user_hot_key = f"user_hot:{payload.user_id}"
+            boosts_for_hot = {
+                "mega_boost_active": True,
+                "ghost_boost_active": False,
+                "ghost_boost_multiplier": deps.GHOST_BOOST_MULTIPLIER,
+                "daily_infinite_energy_active": False,
+                "task_tap_boost_active": False,
+                "task_tap_boost_multiplier": 1,
+            }
+            try:
+                await redis_conn.hset(
+                    user_hot_key, "boosts", json.dumps(boosts_for_hot)
+                )
+            except Exception as e:
+                deps.logger.warning(f"Failed to sync mega boost to user_hot: {e}")
+
         await deps.record_rewarded_ad_claim(
             payload.user_id, "boost", {"source_action": "mega_boost"}
         )
@@ -570,6 +590,26 @@ async def activate_ghost_boost_service(
             "db", "update_user_atomic_jsonb", "ads_boosts", time.perf_counter() - t
         )
         await deps.invalidate_user_cache(payload.user_id)
+
+        # Sync boost to user_hot immediately so click path sees it
+        redis_conn = await deps.get_redis_or_none()
+        if redis_conn:
+            user_hot_key = f"user_hot:{payload.user_id}"
+            boosts_for_hot = {
+                "mega_boost_active": False,
+                "ghost_boost_active": True,
+                "ghost_boost_multiplier": deps.GHOST_BOOST_MULTIPLIER,
+                "daily_infinite_energy_active": False,
+                "task_tap_boost_active": False,
+                "task_tap_boost_multiplier": 1,
+            }
+            try:
+                await redis_conn.hset(
+                    user_hot_key, "boosts", json.dumps(boosts_for_hot)
+                )
+            except Exception as e:
+                deps.logger.warning(f"Failed to sync ghost boost to user_hot: {e}")
+
         await deps.record_rewarded_ad_claim(
             payload.user_id, "ghost", {"source_action": "ghost_boost"}
         )

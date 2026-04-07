@@ -29,6 +29,7 @@ local regen_seconds = tonumber(ARGV[15])
 local user_id = ARGV[16]
 local base_max_energy = tonumber(ARGV[17])
 local ghost_boost_multiplier_default = tonumber(ARGV[18])
+local initial_boosts_json = ARGV[19] or '{}'
 local hot_state_version_default = 1
 
 local function json_decode_or_empty(raw)
@@ -80,7 +81,7 @@ if redis.call('EXISTS', user_hot_key) == 0 then
         'suspicion_score', '0',
         'version', tostring(hot_state_version_default),
         'skin_multiplier', '1',
-        'boosts', '{}',
+        'boosts', initial_boosts_json,
         'flags', '{}'
     )
 end

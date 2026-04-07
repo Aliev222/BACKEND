@@ -26,7 +26,9 @@ def _ms_since(start_ts: float) -> float:
     return round((time.perf_counter() - start_ts) * 1000, 2)
 
 
-def _observe_store(store: str, operation: str, started_at: float, outcome: str = "ok") -> None:
+def _observe_store(
+    store: str, operation: str, started_at: float, outcome: str = "ok"
+) -> None:
     observe_storage_timing(
         store,
         operation,
@@ -205,7 +207,9 @@ class ClicksServiceDeps:
     ENABLE_K6_FRAUD_HEURISTICS: bool
 
 
-async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksServiceDeps):
+async def process_clicks_batch_service(
+    payload: Any, request: Any, deps: ClicksServiceDeps
+):
     request_started_at = time.perf_counter()
     timings: dict[str, float] = {}
 
@@ -250,6 +254,19 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
         request_ip = deps.get_request_ip(request)
         user_hot_key = f"user_hot:{payload.user_id}"
 
+        # Prepare initial boosts JSON for user_hot initialization
+        initial_boosts = {
+            "mega_boost_active": False,
+            "ghost_boost_active": False,
+            "ghost_boost_multiplier": deps.GHOST_BOOST_MULTIPLIER,
+            "daily_infinite_energy_active": False,
+            "task_tap_boost_active": False,
+            "task_tap_boost_multiplier": 1,
+        }
+        import json
+
+        initial_boosts_json = json.dumps(initial_boosts)
+
         keys = [
             f"rl:clicks:{payload.user_id}",
             f"rl:clicks:ip:{request_ip}",
@@ -283,6 +300,7 @@ async def process_clicks_batch_service(payload: Any, request: Any, deps: ClicksS
             str(payload.user_id),
             str(deps.get_max_energy(0)),
             str(deps.GHOST_BOOST_MULTIPLIER),
+            initial_boosts_json,
         ]
 
         t = time.perf_counter()
