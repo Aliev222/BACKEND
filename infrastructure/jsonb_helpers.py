@@ -98,7 +98,7 @@ async def jsonb_append_to_array(
             SET extra_data = jsonb_set(
                 COALESCE(extra_data, '{}'::jsonb),
                 :path,
-                COALESCE(extra_data->:field, '[]'::jsonb) || :value::jsonb,
+                COALESCE(extra_data->:field, '[]'::jsonb) || CAST(:value AS jsonb),
                 true
             )
             WHERE user_id = :uid
@@ -143,7 +143,7 @@ async def jsonb_set_nested_field(
             SET extra_data = jsonb_set(
                 COALESCE(extra_data, '{}'::jsonb),
                 :path,
-                :value::jsonb,
+                CAST(:value AS jsonb),
                 true
             )
             WHERE user_id = :uid
@@ -183,7 +183,7 @@ async def jsonb_update_multiple_fields(
     await session.execute(
         text("""
             UPDATE users 
-            SET extra_data = COALESCE(extra_data, '{}'::jsonb) || :merge::jsonb
+            SET extra_data = COALESCE(extra_data, '{}'::jsonb) || CAST(:merge AS jsonb)
             WHERE user_id = :uid
         """),
         {

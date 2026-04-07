@@ -98,11 +98,11 @@ async def activate_mega_boost(
                 jsonb_set(
                     COALESCE(extra_data, '{}'::jsonb),
                     '{active_boosts,mega_boost}',
-                    :boost::jsonb,
+                    CAST(:boost AS jsonb),
                     true
                 ),
                 '{mega_boost_cooldown_until}',
-                :cooldown::jsonb,
+                CAST(:cooldown AS jsonb),
                 true
             )
             WHERE user_id = :uid
@@ -160,7 +160,7 @@ async def activate_ghost_boost(
             SET extra_data = jsonb_set(
                 COALESCE(extra_data, '{}'::jsonb),
                 '{active_boosts,ghost_boost}',
-                :boost::jsonb,
+                CAST(:boost AS jsonb),
                 true
             )
             WHERE user_id = :uid

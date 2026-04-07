@@ -91,7 +91,7 @@ async def select_skin(
             SET extra_data = jsonb_set(
                 COALESCE(extra_data, '{}'::jsonb),
                 '{selected_skin}',
-                :skin::jsonb,
+                CAST(:skin AS jsonb),
                 true
             )
             WHERE user_id = :uid
