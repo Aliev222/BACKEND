@@ -585,7 +585,7 @@ async def admin_overview(request: Request):
         now = datetime.utcnow()
         starts_at, ends_at = get_weekly_tournament_season_window(now)
         season_key = get_weekly_tournament_season_key(now)
-        from infrastructure.online import get_online_users_count
+        from routers.legacy import get_online_users_count
 
         online_now = await get_online_users_count()
         season_rows = await list_weekly_tournament_seasons(limit=12)
