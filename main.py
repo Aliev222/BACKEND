@@ -8,7 +8,13 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from CONFIG.settings import BOT_TOKEN
-from DATABASE.base import add_user, get_user, init_db, record_stars_skin_purchase, update_user
+from DATABASE.base import (
+    add_user,
+    get_user,
+    init_db,
+    record_stars_skin_purchase,
+    update_user,
+)
 from core.game_config import USER_CACHE_PREFIX
 from infrastructure.redis import get_redis_or_none
 from core.stars_skins import get_stars_skin_price
@@ -19,7 +25,9 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 REDIS_URL = os.getenv("REDIS_URL")
-REENGAGEMENT_RUNTIME = (os.getenv("REENGAGEMENT_RUNTIME", "webhook") or "webhook").strip().lower()
+REENGAGEMENT_RUNTIME = (
+    (os.getenv("REENGAGEMENT_RUNTIME", "webhook") or "webhook").strip().lower()
+)
 
 
 async def invalidate_user_cache(user_id: int) -> None:
@@ -130,7 +138,9 @@ async def handle_successful_payment(message: types.Message) -> None:
 
     user = await get_user(target_user_id)
     if not user:
-        await add_user(target_user_id, message.from_user.username or f"user_{target_user_id}")
+        await add_user(
+            target_user_id, message.from_user.username or f"user_{target_user_id}"
+        )
         user = await get_user(target_user_id)
     if not user:
         logger.error("Failed to load user after successful payment: %s", target_user_id)
@@ -146,8 +156,13 @@ async def handle_successful_payment(message: types.Message) -> None:
     owned_skins = list(extra.get("owned_skins", ["default.pngSP"]))
     if skin_id not in owned_skins:
         owned_skins.append(skin_id)
-        extra["owned_skins"] = owned_skins
-        await update_user(target_user_id, {"extra_data": extra})
+        # Use atomic JSONB update
+        from infrastructure.jsonb_helpers import jsonb_set_field
+        from DATABASE.base import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            await jsonb_set_field(session, target_user_id, "owned_skins", owned_skins)
+            await session.commit()
         await invalidate_user_cache(target_user_id)
 
     await record_stars_skin_purchase(
@@ -167,6 +182,7 @@ async def main() -> None:
     reengagement_task = None
     if REENGAGEMENT_RUNTIME == "polling":
         from core.reengagement import reengagement_loop
+
         reengagement_task = asyncio.create_task(reengagement_loop(bot))
         logger.info("Re-engagement loop started in polling runtime")
     logger.info("Starting bot polling")

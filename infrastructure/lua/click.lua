@@ -221,6 +221,7 @@ end
 
 local new_coins = redis.call('INCRBY', hot_key, gained)
 redis.call('INCRBY', pending_key, gained)
+redis.call('ZADD', 'coins_pending_queue', now_ts, user_id)
 redis.call('HSET', energy_key,
     'value', tostring(new_energy),
     'updated_at', tostring(now_ts),
@@ -241,6 +242,7 @@ if gained > 0 then
             redis.call('HINCRBY', referral_pending_key, 'coins', referral_bonus)
             redis.call('HINCRBY', referral_pending_key, 'clicks', 1)
             redis.call('EXPIRE', referral_pending_key, 300)
+            redis.call('ZADD', 'referral_pending_queue', now_ts, tostring(referrer_id))
         end
     end
 end

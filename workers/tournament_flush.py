@@ -12,6 +12,7 @@ Safety:
 import asyncio
 import logging
 import time
+import uuid
 import redis.asyncio as redis
 
 from DATABASE.base import (
@@ -25,6 +26,7 @@ from core.game_config import TOURNAMENT_KEY
 from infrastructure.redis import init_redis, close_redis
 from observability.metrics import observe_worker_loop
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import text
 from datetime import datetime
 from workers.worker_health import (
     worker_heartbeat,
@@ -44,9 +46,32 @@ WORKER_NAME = "tournament_flush"
 FLUSH_TIMEOUT_SECONDS = 50
 
 
+async def _ensure_flush_log_table():
+    """Ensure tournament_flush_log table exists (idempotent)."""
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            text("""
+            CREATE TABLE IF NOT EXISTS tournament_flush_log (
+                batch_id TEXT PRIMARY KEY,
+                season_key TEXT NOT NULL,
+                flushed_count INT NOT NULL,
+                flushed_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        )
+        await session.commit()
+
+
 async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
     """
-    Snapshot Redis ZSET leaderboard to PostgreSQL.
+    Snapshot Redis ZSET leaderboard to PostgreSQL with deterministic idempotency.
+
+    Idempotency model:
+    - batch_id is deterministic: season_key + flush_window (minute-level)
+    - Same logical snapshot = same batch_id
+    - UPSERT ensures score is absolute (not incremental)
+    - Crash recovery: restart sees same batch_id, skips if already processed
+
     Returns number of entries flushed.
     """
     flush_started_at = time.perf_counter()
@@ -61,9 +86,37 @@ async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
     season_key = get_weekly_tournament_season_key(starts_at)
     now = datetime.utcnow()
 
+    # Deterministic batch_id: season + minute-level window
+    # Same minute = same batch_id = idempotent
+    flush_window = now.strftime("%Y%m%d%H%M")
+    batch_id = f"{season_key}:flush:{flush_window}"
+
     async with AsyncSessionLocal() as session:
         await ensure_weekly_tournament_season(session, season_key, starts_at, ends_at)
 
+        # Phase 1: INSERT idempotency log first (atomic claim)
+        # If this batch_id already exists, skip entire flush
+        log_result = await session.execute(
+            text("""
+                INSERT INTO tournament_flush_log (batch_id, season_key, flushed_count)
+                VALUES (:bid, :sk, :count)
+                ON CONFLICT (batch_id) DO NOTHING
+                RETURNING batch_id
+            """),
+            {"bid": batch_id, "sk": season_key, "count": len(entries)},
+        )
+        inserted = log_result.scalar()
+
+        if not inserted:
+            # Batch already processed (crash recovery or duplicate run)
+            logger.info(
+                "Tournament flush batch %s already processed, skipping (crash recovery or duplicate)",
+                batch_id,
+            )
+            return 0
+
+        # Phase 2: Upsert entries (only if log insert succeeded)
+        # UPSERT with absolute score ensures repeated processing is safe
         flushed = 0
         for entry_data in entries:
             if isinstance(entry_data, tuple):
@@ -89,19 +142,22 @@ async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
                 created_at=now,
                 updated_at=now,
             )
+            # CRITICAL: UPSERT with absolute score (not increment)
+            # This makes repeated processing safe (idempotent)
             upsert_stmt = insert_stmt.on_conflict_do_update(
                 index_elements=[
                     WeeklyTournamentEntry.__table__.c.season_key,
                     WeeklyTournamentEntry.__table__.c.user_id,
                 ],
                 set_={
-                    "score": score,
+                    "score": score,  # Absolute value, not += delta
                     "updated_at": now,
                 },
             )
             await session.execute(upsert_stmt)
             flushed += 1
 
+        # Phase 3: Commit (log + entries are atomic)
         await session.commit()
 
     observe_worker_loop(
@@ -115,6 +171,7 @@ async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
 
 async def tournament_flush_loop():
     log_worker_start(WORKER_NAME, FLUSH_INTERVAL)
+    await _ensure_flush_log_table()
 
     redis_conn = None
     try:

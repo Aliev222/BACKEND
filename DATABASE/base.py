@@ -30,13 +30,55 @@ from infrastructure.coins_hot_sync import (
 )
 
 import ssl
+from urllib.parse import urlparse
 
 _ssl_context = ssl.create_default_context()
 _ssl_context.check_hostname = False
 _ssl_context.verify_mode = ssl.CERT_NONE
-engine = create_async_engine(
-    DATABASE_URL, echo=False, connect_args={"ssl": _ssl_context}
-)
+
+
+# Determine if SSL should be used based on database URL
+def _should_use_ssl(db_url: str) -> bool:
+    """
+    Determine if SSL should be used for database connection.
+
+    - SQLite: No SSL
+    - Local PostgreSQL (localhost, 127.0.0.1, postgres, postgres-test): No SSL
+    - Remote/managed PostgreSQL: Use SSL
+    """
+    if db_url.startswith("sqlite"):
+        return False
+
+    if db_url.startswith(("postgresql", "postgres")):
+        parsed = urlparse(db_url)
+        hostname = parsed.hostname or ""
+
+        # Local/test hosts don't need SSL
+        local_hosts = {"localhost", "127.0.0.1", "postgres", "postgres-test", "::1"}
+        if hostname.lower() in local_hosts:
+            return False
+
+        # Remote/managed hosts use SSL
+        return True
+
+    # For asyncpg driver (postgresql+asyncpg://), also check hostname
+    if "asyncpg" in db_url:
+        parsed = urlparse(db_url)
+        hostname = parsed.hostname or ""
+        local_hosts = {"localhost", "127.0.0.1", "postgres", "postgres-test", "::1"}
+        if hostname.lower() in local_hosts:
+            return False
+
+    return False
+
+
+# Create engine with appropriate SSL configuration
+if _should_use_ssl(DATABASE_URL):
+    engine = create_async_engine(
+        DATABASE_URL, echo=False, connect_args={"ssl": _ssl_context}
+    )
+else:
+    engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 

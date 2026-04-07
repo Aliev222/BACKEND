@@ -159,6 +159,8 @@ async def claim_daily_reward(request: Request):
             raise HTTPException(status_code=404, detail="User not found")
 
         import json
+        from infrastructure.jsonb_helpers import jsonb_update_multiple_fields, jsonb_set_nested_field, jsonb_append_to_array
+        from infrastructure.cache_invalidation import invalidate_user_cache
 
         extra = {}
         if user_db.extra_data:
@@ -180,34 +182,72 @@ async def claim_daily_reward(request: Request):
         day_number = len(claimed_days) + 1
         reward = day_number * DAILY_REWARD_BASE_COINS
 
+        # Atomic JSONB updates instead of full overwrite
         claimed_days.append(day_number)
-        extra["daily_reward_claimed_days"] = claimed_days
-        extra["daily_reward_last_claim_date"] = today
+        updates = {
+            "daily_reward_claimed_days": claimed_days,
+            "daily_reward_last_claim_date": today,
+        }
+        
+        user_db.coins += reward
+        await jsonb_update_multiple_fields(session, user_id, updates)
 
         if day_number % 7 == 0:
             expires_at = (
                 datetime.utcnow()
                 + timedelta(minutes=DAILY_REWARD_INFINITE_ENERGY_MINUTES)
             ).isoformat()
-            active_boosts = extra.get("active_boosts", {})
-            if not isinstance(active_boosts, dict):
-                active_boosts = {}
-            active_boosts["daily_infinite_energy"] = {
-                "active": True,
-                "expires_at": expires_at,
-            }
-            extra["active_boosts"] = active_boosts
+            await jsonb_set_nested_field(
+                session, user_id, "active_boosts", "daily_infinite_energy",
+                {"active": True, "expires_at": expires_at}
+            )
 
         if day_number == DAILY_REWARD_MAX_DAYS:
             owned_skins = extra.get("owned_skins", ["default.pngSP"])
             if not isinstance(owned_skins, list):
                 owned_skins = ["default.pngSP"]
             if DAILY_REWARD_SKIN_ID not in owned_skins:
-                owned_skins.append(DAILY_REWARD_SKIN_ID)
-            extra["owned_skins"] = owned_skins
+                await jsonb_append_to_array(session, user_id, "owned_skins", DAILY_REWARD_SKIN_ID)
+
+        await session.commit()
+        
+        # Invalidate cache after successful commit
+        await invalidate_user_cache(user_id)
+
+    return {
+        "success": True,
+        "day": day_number,
+        "reward": reward,
+        "coins": user_db.coins,
+        "infinite_energy": day_number % 7 == 0,
+        "skin_unlocked": day_number == DAILY_REWARD_MAX_DAYS,
+    }
 
         user_db.coins += reward
-        user_db.extra_data = json.dumps(extra)
+        await jsonb_update_multiple_fields(session, user_id, updates)
+
+        if day_number % 7 == 0:
+            expires_at = (
+                datetime.utcnow()
+                + timedelta(minutes=DAILY_REWARD_INFINITE_ENERGY_MINUTES)
+            ).isoformat()
+            await jsonb_set_nested_field(
+                session,
+                user_id,
+                "active_boosts",
+                "daily_infinite_energy",
+                {"active": True, "expires_at": expires_at},
+            )
+
+        if day_number == DAILY_REWARD_MAX_DAYS:
+            owned_skins = extra.get("owned_skins", ["default.pngSP"])
+            if not isinstance(owned_skins, list):
+                owned_skins = ["default.pngSP"]
+            if DAILY_REWARD_SKIN_ID not in owned_skins:
+                await jsonb_append_to_array(
+                    session, user_id, "owned_skins", DAILY_REWARD_SKIN_ID
+                )
+
         await session.commit()
 
     return {

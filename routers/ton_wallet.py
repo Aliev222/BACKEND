@@ -113,18 +113,28 @@ async def connect_ton_wallet(payload: TonWalletConnectRequest, request: Request)
             verification_error = None
             verified_at = existing_wallet.get("verified_at")
 
-        extra["ton_wallet"] = {
-            "address": wallet_address,
-            "provider": (payload.wallet_provider or "").strip(),
-            "app_name": (payload.wallet_app_name or "").strip(),
-            "network": (payload.wallet_network or "").strip(),
-            "connected_at": datetime.utcnow().isoformat(),
-            "verified": wallet_verified,
-            "verified_at": verified_at
-            or (datetime.utcnow().isoformat() if wallet_verified else None),
-            "verification_error": verification_error or None,
-        }
-        await update_user(payload.user_id, {"extra_data": extra})
+        # Use atomic JSONB update
+        from infrastructure.jsonb_helpers import jsonb_set_field
+        from DATABASE.base import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            await jsonb_set_field(
+                session,
+                payload.user_id,
+                "ton_wallet",
+                {
+                    "address": wallet_address,
+                    "provider": (payload.wallet_provider or "").strip(),
+                    "app_name": (payload.wallet_app_name or "").strip(),
+                    "network": (payload.wallet_network or "").strip(),
+                    "connected_at": datetime.utcnow().isoformat(),
+                    "verified": wallet_verified,
+                    "verified_at": verified_at
+                    or (datetime.utcnow().isoformat() if wallet_verified else None),
+                    "verification_error": verification_error or None,
+                },
+            )
+            await session.commit()
         await invalidate_user_cache(payload.user_id)
 
         return {
@@ -148,9 +158,13 @@ async def disconnect_ton_wallet(payload: TonWalletDisconnectRequest, request: Re
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        extra = parse_extra_data(user.get("extra_data"))
-        extra.pop("ton_wallet", None)
-        await update_user(payload.user_id, {"extra_data": extra})
+        # Use atomic JSONB update
+        from infrastructure.jsonb_helpers import jsonb_set_field
+        from DATABASE.base import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            await jsonb_set_field(session, payload.user_id, "ton_wallet", None)
+            await session.commit()
         await invalidate_user_cache(payload.user_id)
 
         return {

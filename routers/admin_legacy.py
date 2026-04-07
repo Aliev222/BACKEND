@@ -1474,19 +1474,20 @@ async def admin_send_wallet_reminders(
                     hours_until_deadline=int(payload.hours_until_deadline),
                 )
                 if ok:
-                    from routers.legacy import parse_extra_data
+                    from infrastructure.jsonb_helpers import jsonb_set_nested_field
 
-                    extra = parse_extra_data(user_row.extra_data)
-                    reminders_by_season = extra.get("ton_wallet_reminders") or {}
-                    if not isinstance(reminders_by_season, dict):
-                        reminders_by_season = {}
-                    reminders_by_season[season_key] = {
-                        "sent_at": datetime.utcnow().isoformat(),
-                        "league": str(row.get("league") or league_key or ""),
-                        "hours_until_deadline": int(payload.hours_until_deadline),
-                    }
-                    extra["ton_wallet_reminders"] = reminders_by_season
-                    user_row.extra_data = json.dumps(extra, ensure_ascii=False)
+                    # Atomic JSONB update instead of full overwrite
+                    await jsonb_set_nested_field(
+                        session,
+                        user_id,
+                        "ton_wallet_reminders",
+                        season_key,
+                        {
+                            "sent_at": datetime.utcnow().isoformat(),
+                            "league": str(row.get("league") or league_key or ""),
+                            "hours_until_deadline": int(payload.hours_until_deadline),
+                        },
+                    )
                     cache_ids_to_invalidate.append(user_id)
                 reminder_results.append(
                     {

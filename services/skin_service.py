@@ -76,23 +76,37 @@ async def select_skin(
     user: dict,
     skin_id: str,
 ) -> dict:
-    from DATABASE.base import update_extra_data_atomic
-
     owned = await get_owned_skins(user)
 
     if skin_id not in owned:
         raise HTTPException(status_code=400, detail="Skin not owned")
 
-    # Update selected_skin atomically (strict mode)
-    result = await update_extra_data_atomic(
-        user_id, "selected_skin", "set", skin_id, allow_lossy_fallback=False
-    )
+    # Use atomic JSONB update (no optimistic locking)
+    from sqlalchemy import text
+    import json
 
-    if result is None:
-        raise HTTPException(
-            status_code=409,
-            detail="Failed to select skin due to concurrent update, please retry",
-        )
+    await session.execute(
+        text("""
+            UPDATE users 
+            SET extra_data = jsonb_set(
+                COALESCE(extra_data, '{}'::jsonb),
+                '{selected_skin}',
+                :skin::jsonb,
+                true
+            )
+            WHERE user_id = :uid
+        """),
+        {
+            "uid": user_id,
+            "skin": json.dumps(skin_id),
+        },
+    )
+    await session.commit()
+
+    # Cache invalidation
+    from infrastructure.cache_invalidation import invalidate_user_cache
+
+    await invalidate_user_cache(user_id)
 
     return {
         "success": True,
@@ -152,9 +166,15 @@ async def unlock_skin_by_level(
     if not unlocked:
         return {"success": True, "unlocked": []}
 
-    extra["owned_skins"] = owned
-    updated = await update_user_atomic(session, user_id, extra_data=extra)
-    if not updated:
-        raise HTTPException(status_code=409, detail="Concurrent modification")
+    # Use atomic JSONB update
+    from infrastructure.jsonb_helpers import jsonb_set_field
+
+    await jsonb_set_field(session, user_id, "owned_skins", owned)
+    await session.commit()
+
+    # Cache invalidation
+    from infrastructure.cache_invalidation import invalidate_user_cache
+
+    await invalidate_user_cache(user_id)
 
     return {"success": True, "unlocked": unlocked}

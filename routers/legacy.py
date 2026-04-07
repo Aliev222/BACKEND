@@ -1658,11 +1658,21 @@ async def touch_user_activity(user_id: int, user: dict | None = None) -> None:
             pass
     now_iso = now.isoformat()
 
-    extra["last_activity_at"] = now_iso
-    extra["push_idle_stage"] = 0
-    extra["last_push_reason"] = None
+    # Use atomic JSONB update for activity tracking
+    from infrastructure.jsonb_helpers import jsonb_update_multiple_fields
+    from DATABASE.base import AsyncSessionLocal
 
-    await update_user(user_id, {"extra_data": extra})
+    async with AsyncSessionLocal() as session:
+        await jsonb_update_multiple_fields(
+            session,
+            user_id,
+            {
+                "last_activity_at": now_iso,
+                "push_idle_stage": 0,
+                "last_push_reason": None,
+            },
+        )
+        await session.commit()
 
 
 # ==================== МОДЕЛИ ====================
@@ -2116,9 +2126,17 @@ async def get_mega_boost_status(user_id: int, request: Request):
                     active_boosts["mega_boost"]["expires_at"]
                 )
                 if now > expires:
-                    del active_boosts["mega_boost"]
-                    extra["active_boosts"] = active_boosts
-                    await update_user(user_id, {"extra_data": extra})
+                    # Use atomic JSONB update to remove expired boost
+                    from infrastructure.jsonb_helpers import jsonb_set_nested_field
+                    from DATABASE.base import AsyncSessionLocal
+
+                    async with AsyncSessionLocal() as session:
+                        active_boosts_copy = dict(active_boosts)
+                        del active_boosts_copy["mega_boost"]
+                        await jsonb_set_nested_field(
+                            session, user_id, "active_boosts", "mega_boost", None
+                        )
+                        await session.commit()
                     await invalidate_user_cache(user_id)
                     # NOTE: Not invalidating cache — boost state is derived from
                     # expires_at in extra_data, read from DB in realtime assembler.
@@ -2156,8 +2174,15 @@ async def get_mega_boost_status(user_id: int, request: Request):
                 ),
             }
         if cooldown_until and cooldown_until <= now:
-            extra.pop("mega_boost_cooldown_until", None)
-            await update_user(user_id, {"extra_data": extra})
+            # Use atomic JSONB update to remove expired cooldown
+            from infrastructure.jsonb_helpers import jsonb_set_field
+            from DATABASE.base import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as session:
+                await jsonb_set_field(
+                    session, user_id, "mega_boost_cooldown_until", None
+                )
+                await session.commit()
             await invalidate_user_cache(user_id)
             # NOTE: Not invalidating cache — boost state is derived from
             # expires_at in extra_data, read from DB in realtime assembler.
@@ -3149,10 +3174,20 @@ async def select_skin(payload: SkinRequest, request: Request):
         if selected_skin not in owned_skins:
             raise HTTPException(status_code=400, detail="Skin not owned")
 
-        extra["owned_skins"] = owned_skins
-        extra["selected_skin"] = selected_skin
+        # Use atomic JSONB update
+        from infrastructure.jsonb_helpers import jsonb_update_multiple_fields
+        from DATABASE.base import AsyncSessionLocal
 
-        await update_user(payload.user_id, {"extra_data": extra})
+        async with AsyncSessionLocal() as session:
+            await jsonb_update_multiple_fields(
+                session,
+                payload.user_id,
+                {
+                    "owned_skins": owned_skins,
+                    "selected_skin": selected_skin,
+                },
+            )
+            await session.commit()
         await invalidate_user_cache(payload.user_id)
 
         return {"success": True, "selected_skin": selected_skin}

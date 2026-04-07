@@ -87,13 +87,38 @@ async def activate_mega_boost(
         now + timedelta(minutes=MEGA_BOOST_COOLDOWN_MINUTES)
     ).isoformat()
 
-    active_boosts["mega_boost"] = {"active": True, "expires_at": expires_at}
-    extra["active_boosts"] = active_boosts
-    extra["mega_boost_cooldown_until"] = cooldown_until_value
+    # Use nested path atomic JSONB updates to prevent boost merge race
+    from sqlalchemy import text
+    import json
 
-    updated = await update_user_atomic(session, user_id, extra_data=extra)
-    if not updated:
-        raise HTTPException(status_code=409, detail="Concurrent modification")
+    await session.execute(
+        text("""
+            UPDATE users 
+            SET extra_data = jsonb_set(
+                jsonb_set(
+                    COALESCE(extra_data, '{}'::jsonb),
+                    '{active_boosts,mega_boost}',
+                    :boost::jsonb,
+                    true
+                ),
+                '{mega_boost_cooldown_until}',
+                :cooldown::jsonb,
+                true
+            )
+            WHERE user_id = :uid
+        """),
+        {
+            "uid": user_id,
+            "boost": json.dumps({"active": True, "expires_at": expires_at}),
+            "cooldown": json.dumps(cooldown_until_value),
+        },
+    )
+    await session.commit()
+
+    # Cache invalidation
+    from infrastructure.cache_invalidation import invalidate_user_cache
+
+    await invalidate_user_cache(user_id)
 
     return {
         "success": True,
@@ -124,16 +149,39 @@ async def activate_ghost_boost(
         }
 
     expires_at = (now + timedelta(minutes=GHOST_BOOST_MINUTES)).isoformat()
-    active_boosts["ghost_boost"] = {
-        "active": True,
-        "expires_at": expires_at,
-        "multiplier": GHOST_BOOST_MULTIPLIER,
-    }
-    extra["active_boosts"] = active_boosts
 
-    updated = await update_user_atomic(session, user_id, extra_data=extra)
-    if not updated:
-        raise HTTPException(status_code=409, detail="Concurrent modification")
+    # Use nested path atomic JSONB updates to prevent boost merge race
+    from sqlalchemy import text
+    import json
+
+    await session.execute(
+        text("""
+            UPDATE users 
+            SET extra_data = jsonb_set(
+                COALESCE(extra_data, '{}'::jsonb),
+                '{active_boosts,ghost_boost}',
+                :boost::jsonb,
+                true
+            )
+            WHERE user_id = :uid
+        """),
+        {
+            "uid": user_id,
+            "boost": json.dumps(
+                {
+                    "active": True,
+                    "expires_at": expires_at,
+                    "multiplier": GHOST_BOOST_MULTIPLIER,
+                }
+            ),
+        },
+    )
+    await session.commit()
+
+    # Cache invalidation
+    from infrastructure.cache_invalidation import invalidate_user_cache
+
+    await invalidate_user_cache(user_id)
 
     return {
         "success": True,
@@ -161,11 +209,19 @@ async def activate_autoclicker(
     cooldown_until_value = (
         now + timedelta(minutes=AUTOCLICKER_COOLDOWN_MINUTES)
     ).isoformat()
-    extra["autoclicker_cooldown_until"] = cooldown_until_value
 
-    updated = await update_user_atomic(session, user_id, extra_data=extra)
-    if not updated:
-        raise HTTPException(status_code=409, detail="Concurrent modification")
+    # Use atomic JSONB update
+    from infrastructure.jsonb_helpers import jsonb_set_field
+
+    await jsonb_set_field(
+        session, user_id, "autoclicker_cooldown_until", cooldown_until_value
+    )
+    await session.commit()
+
+    # Cache invalidation
+    from infrastructure.cache_invalidation import invalidate_user_cache
+
+    await invalidate_user_cache(user_id)
 
     return {
         "success": True,
@@ -193,17 +249,32 @@ async def refill_energy(
         now + timedelta(minutes=ENERGY_REFILL_COOLDOWN_MINUTES)
     ).isoformat()
 
-    extra["energy_refill_cooldown_until"] = cooldown_until_value
+    # Use atomic JSONB update + regular field updates
+    from infrastructure.jsonb_helpers import jsonb_set_field
+    from sqlalchemy import text
 
-    updated = await update_user_atomic(
-        session,
-        user_id,
-        energy=max_energy,
-        last_energy_update=now,
-        extra_data=extra,
+    await jsonb_set_field(
+        session, user_id, "energy_refill_cooldown_until", cooldown_until_value
     )
-    if not updated:
-        raise HTTPException(status_code=409, detail="Concurrent modification")
+    await session.execute(
+        text("""
+            UPDATE users 
+            SET energy = :energy,
+                last_energy_update = :last_update
+            WHERE user_id = :uid
+        """),
+        {
+            "uid": user_id,
+            "energy": max_energy,
+            "last_update": now,
+        },
+    )
+    await session.commit()
+
+    # Cache invalidation
+    from infrastructure.cache_invalidation import invalidate_user_cache
+
+    await invalidate_user_cache(user_id)
 
     return {
         "success": True,

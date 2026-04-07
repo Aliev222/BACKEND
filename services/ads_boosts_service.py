@@ -436,13 +436,40 @@ async def activate_mega_boost_service(
         expires_at = (now + timedelta(minutes=deps.MEGA_BOOST_MINUTES)).isoformat()
         cooldown_minutes = deps.MEGA_BOOST_COOLDOWN_MAX_MINUTES
         cooldown_until_value = (now + timedelta(minutes=cooldown_minutes)).isoformat()
-        active_boosts["mega_boost"] = {"active": True, "expires_at": expires_at}
-        extra["mega_boost_cooldown_until"] = cooldown_until_value
-        extra["active_boosts"] = active_boosts
+
+        # Use nested path atomic JSONB updates to prevent boost merge race
+        from DATABASE.base import AsyncSessionLocal
+        from sqlalchemy import text
+        import json
+
         t = time.perf_counter()
-        await deps.update_user(payload.user_id, {"extra_data": extra})
+        async with AsyncSessionLocal() as session:
+            # Update nested path: active_boosts.mega_boost (not entire active_boosts)
+            await session.execute(
+                text("""
+                    UPDATE users 
+                    SET extra_data = jsonb_set(
+                        jsonb_set(
+                            COALESCE(extra_data, '{}'::jsonb),
+                            '{active_boosts,mega_boost}',
+                            :boost::jsonb,
+                            true
+                        ),
+                        '{mega_boost_cooldown_until}',
+                        :cooldown::jsonb,
+                        true
+                    )
+                    WHERE user_id = :uid
+                """),
+                {
+                    "uid": payload.user_id,
+                    "boost": json.dumps({"active": True, "expires_at": expires_at}),
+                    "cooldown": json.dumps(cooldown_until_value),
+                },
+            )
+            await session.commit()
         observe_storage_timing(
-            "db", "update_user", "ads_boosts", time.perf_counter() - t
+            "db", "update_user_atomic_jsonb", "ads_boosts", time.perf_counter() - t
         )
         await deps.invalidate_user_cache(payload.user_id)
         await deps.record_rewarded_ad_claim(
@@ -507,17 +534,40 @@ async def activate_ghost_boost_service(
                 pass
 
         expires_at = (now + timedelta(minutes=deps.GHOST_BOOST_MINUTES)).isoformat()
-        active_boosts["ghost_boost"] = {
-            "active": True,
-            "expires_at": expires_at,
-            "multiplier": deps.GHOST_BOOST_MULTIPLIER,
-        }
-        extra["active_boosts"] = active_boosts
+
+        # Use nested path atomic JSONB updates to prevent boost merge race
+        from DATABASE.base import AsyncSessionLocal
+        from sqlalchemy import text
+        import json
 
         t = time.perf_counter()
-        await deps.update_user(payload.user_id, {"extra_data": extra})
+        async with AsyncSessionLocal() as session:
+            # Update nested path: active_boosts.ghost_boost (not entire active_boosts)
+            await session.execute(
+                text("""
+                    UPDATE users 
+                    SET extra_data = jsonb_set(
+                        COALESCE(extra_data, '{}'::jsonb),
+                        '{active_boosts,ghost_boost}',
+                        :boost::jsonb,
+                        true
+                    )
+                    WHERE user_id = :uid
+                """),
+                {
+                    "uid": payload.user_id,
+                    "boost": json.dumps(
+                        {
+                            "active": True,
+                            "expires_at": expires_at,
+                            "multiplier": deps.GHOST_BOOST_MULTIPLIER,
+                        }
+                    ),
+                },
+            )
+            await session.commit()
         observe_storage_timing(
-            "db", "update_user", "ads_boosts", time.perf_counter() - t
+            "db", "update_user_atomic_jsonb", "ads_boosts", time.perf_counter() - t
         )
         await deps.invalidate_user_cache(payload.user_id)
         await deps.record_rewarded_ad_claim(
@@ -630,15 +680,30 @@ async def increment_ads_watched_service(
                 current_count = min(required_count, current_count + 1)
                 progress[skin_id] = current_count
                 last_watch[skin_id] = now.isoformat()
-                extra["skin_ad_progress"] = progress
-                extra["skin_ad_last_watch"] = last_watch
                 ready_to_unlock = current_count >= required_count
 
-        t = time.perf_counter()
-        await deps.update_user(payload.user_id, {"extra_data": extra})
-        observe_storage_timing(
-            "db", "update_user", "ads_boosts", time.perf_counter() - t
-        )
+                # Use atomic JSONB updates
+                from infrastructure.jsonb_helpers import jsonb_update_multiple_fields
+                from DATABASE.base import AsyncSessionLocal
+
+                t = time.perf_counter()
+                async with AsyncSessionLocal() as session:
+                    await jsonb_update_multiple_fields(
+                        session,
+                        payload.user_id,
+                        {
+                            "skin_ad_progress": progress,
+                            "skin_ad_last_watch": last_watch,
+                        },
+                    )
+                    await session.commit()
+                observe_storage_timing(
+                    "db",
+                    "update_user_atomic_jsonb",
+                    "ads_boosts",
+                    time.perf_counter() - t,
+                )
+                await deps.invalidate_user_cache(payload.user_id)
         await deps.record_rewarded_ad_claim(
             payload.user_id,
             "skins",
@@ -702,21 +767,37 @@ async def update_energy_service(payload: Any, request: Any, deps: AdsBoostsServi
         cooldown_until_value = (
             now + timedelta(minutes=deps.ENERGY_REFILL_COOLDOWN_MINUTES)
         ).isoformat()
-        extra["energy_refill_cooldown_until"] = cooldown_until_value
+
+        # Use atomic JSONB update + regular field updates
+        from infrastructure.jsonb_helpers import jsonb_set_field
+        from DATABASE.base import AsyncSessionLocal
+        from sqlalchemy import update, text
 
         t = time.perf_counter()
-        await deps.update_user(
-            user_id,
-            {
-                "max_energy": max_energy,
-                "energy": max_energy,
-                "last_energy_update": now,
-                "extra_data": extra,
-            },
-        )
+        async with AsyncSessionLocal() as session:
+            await jsonb_set_field(
+                session, user_id, "energy_refill_cooldown_until", cooldown_until_value
+            )
+            await session.execute(
+                text("""
+                    UPDATE users 
+                    SET max_energy = :max_energy,
+                        energy = :energy,
+                        last_energy_update = :last_update
+                    WHERE user_id = :uid
+                """),
+                {
+                    "uid": user_id,
+                    "max_energy": max_energy,
+                    "energy": max_energy,
+                    "last_update": now,
+                },
+            )
+            await session.commit()
         observe_storage_timing(
-            "db", "update_user", "ads_boosts", time.perf_counter() - t
+            "db", "update_user_atomic_jsonb", "ads_boosts", time.perf_counter() - t
         )
+        await deps.invalidate_user_cache(user_id)
         try:
             redis_conn = await deps.get_redis_or_none()
             if redis_conn:

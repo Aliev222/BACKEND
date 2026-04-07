@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 FLUSH_INTERVAL = 30  # seconds
 WORKER_NAME = "coins_flush"
 FLUSH_TIMEOUT_SECONDS = 25
+MAX_KEYS_PER_FLUSH = 1000  # Prevent OOM if too many pending keys
 
 
 async def _ensure_flush_log_table():
@@ -67,56 +68,113 @@ async def _ensure_flush_log_table():
 async def flush_coins_to_db(redis_conn: redis.Redis) -> int:
     """
     Flush accumulated coins from Redis to PostgreSQL.
+    Uses ZSET queue for O(log N) performance instead of SCAN.
+    
+    Migration safety:
+    - Primary: Read from coins_pending_queue (fast)
+    - Fallback: SCAN for legacy pending keys without queue membership
+    - Cleanup: Remove from queue only after successful DB commit
+    
     Returns number of users flushed.
     """
-    # Find all pending keys
-    pending_keys = []
-    cursor = 0
-    while True:
-        cursor, keys = await redis_conn.scan(cursor, match="coins_pending:*", count=500)
-        pending_keys.extend(keys)
-        if cursor == 0:
-            break
+    # Phase 1: Get pending user_ids from ZSET queue (O(log N))
+    pending_user_ids = await redis_conn.zrange(
+        "coins_pending_queue", 0, MAX_KEYS_PER_FLUSH - 1
+    )
+    
+    # Phase 1b: Migration fallback - check for legacy pending keys without queue
+    # This handles keys created before ZSET queue was deployed
+    legacy_pending_keys = []
+    if len(pending_user_ids) < MAX_KEYS_PER_FLUSH // 2:
+        # Only scan if queue is not full (avoid double work)
+        cursor = 0
+        scan_limit = 100  # Limit legacy scan
+        while True:
+            cursor, keys = await redis_conn.scan(
+                cursor, match="coins_pending:*", count=100
+            )
+            for key in keys:
+                user_id_str = key.split(":")[-1]
+                if user_id_str not in pending_user_ids:
+                    legacy_pending_keys.append(user_id_str)
+                    # Backfill into queue for next time
+                    try:
+                        await redis_conn.zadd(
+                            "coins_pending_queue",
+                            {user_id_str: int(time.time())}
+                        )
+                    except Exception:
+                        pass
+            if cursor == 0 or len(legacy_pending_keys) >= scan_limit:
+                break
+        
+        if legacy_pending_keys:
+            logger.info(
+                "Migration: found %d legacy pending keys without queue membership",
+                len(legacy_pending_keys)
+            )
+            pending_user_ids = list(pending_user_ids) + legacy_pending_keys
 
-    if not pending_keys:
+    if not pending_user_ids:
         return 0
+
+    if len(pending_user_ids) > MAX_KEYS_PER_FLUSH:
+        logger.warning(
+            "Limiting flush batch to %d keys (found %d in queue)",
+            MAX_KEYS_PER_FLUSH,
+            len(pending_user_ids),
+        )
+        pending_user_ids = pending_user_ids[:MAX_KEYS_PER_FLUSH]
 
     now = int(time.time())
     moved_data = []  # (flushing_key, user_id, delta, batch_id)
 
-    # Phase 1: MOVE pending → flushing (atomic Lua move)
+    # Phase 2: MOVE pending → flushing (atomic Lua move)
     move_lua = """
     local pending_key = KEYS[1]
     local flushing_key = KEYS[2]
+    local queue_key = KEYS[3]
+    local user_id = ARGV[1]
     local delta = redis.call('GET', pending_key)
     if not delta then
+        redis.call('ZREM', queue_key, user_id)
         return nil
     end
     if tonumber(delta) <= 0 then
         redis.call('DEL', pending_key)
+        redis.call('ZREM', queue_key, user_id)
         return nil
     end
     redis.call('SET', flushing_key, delta)
     redis.call('DEL', pending_key)
     return delta
     """
-    for key in pending_keys:
-        user_id = int(key.split(":")[-1])
+
+    for user_id_str in pending_user_ids:
+        user_id = int(user_id_str)
         batch_id = f"{user_id}:{now}:{uuid.uuid4().hex[:8]}"
         flushing_key = f"coins_flushing:{user_id}:{batch_id}"
+        pending_key = f"coins_pending:{user_id}"
 
         try:
-            delta = await redis_conn.eval(move_lua, 2, key, flushing_key)
+            delta = await redis_conn.eval(
+                move_lua,
+                3,
+                pending_key,
+                flushing_key,
+                "coins_pending_queue",
+                str(user_id),
+            )
             if delta is None:
                 continue
             moved_data.append((flushing_key, user_id, int(delta), batch_id))
         except Exception as e:
-            logger.warning("Failed to move coins key %s: %s", key, e)
+            logger.warning("Failed to move coins key %s: %s", pending_key, e)
 
     if not moved_data:
         return 0
 
-    # Phase 2: Recovery scan — process any leftover flushing keys
+    # Phase 3: Recovery scan — process any leftover flushing keys
     flushing_keys = []
     cursor = 0
     while True:
@@ -140,7 +198,7 @@ async def flush_coins_to_db(redis_conn: redis.Redis) -> int:
     if flushing_keys:
         log_worker_recovery(WORKER_NAME, len(flushing_keys))
 
-    # Phase 3: PROCESS (DB) — each batch in its own transaction
+    # Phase 4: PROCESS (DB) — each batch in its own transaction
     flushed = 0
     for flush_key, user_id, delta, batch_id in moved_data:
         async with AsyncSessionLocal() as session:
@@ -160,6 +218,8 @@ async def flush_coins_to_db(redis_conn: redis.Redis) -> int:
                 # Batch already processed (double-apply protection)
                 try:
                     await redis_conn.delete(flush_key)
+                    # Remove from queue if still there
+                    await redis_conn.zrem("coins_pending_queue", str(user_id))
                 except Exception:
                     pass
                 continue
@@ -185,9 +245,85 @@ async def flush_coins_to_db(redis_conn: redis.Redis) -> int:
             # Step 3: Commit (log + balance update are atomic)
             await session.commit()
 
-        # Step 4: Cleanup flushing key ONLY after successful commit
+        # Step 4: Cleanup flushing key AND remove from queue ONLY after successful commit
         try:
             await redis_conn.delete(flush_key)
+            await redis_conn.zrem("coins_pending_queue", str(user_id))
+        except Exception as e:
+            logger.warning(
+                "Failed to cleanup flushing key %s: %s (data flushed, safe)",
+                flush_key,
+                e,
+            )
+        flushed += 1
+
+    return flushed
+                flushing_keys.append(k)
+        if cursor == 0:
+            break
+
+    for flush_key in flushing_keys:
+        parts = flush_key.split(":")
+        user_id = int(parts[2])
+        batch_id = ":".join(parts[3:]) if len(parts) > 3 else f"{user_id}:recovery"
+        delta = await redis_conn.get(flush_key)
+        if delta and int(delta) > 0:
+            moved_data.append((flush_key, user_id, int(delta), batch_id))
+
+    if flushing_keys:
+        log_worker_recovery(WORKER_NAME, len(flushing_keys))
+
+    # Phase 4: PROCESS (DB) — each batch in its own transaction
+    flushed = 0
+    for flush_key, user_id, delta, batch_id in moved_data:
+        async with AsyncSessionLocal() as session:
+            # Step 1: INSERT log first (atomic claim)
+            log_result = await session.execute(
+                text("""
+                    INSERT INTO coins_flush_log (batch_id, user_id, delta)
+                    VALUES (:bid, :uid, :delta)
+                    ON CONFLICT (batch_id) DO NOTHING
+                    RETURNING batch_id
+                """),
+                {"bid": batch_id, "uid": user_id, "delta": delta},
+            )
+            inserted = log_result.scalar()
+
+            if not inserted:
+                # Batch already processed (double-apply protection)
+                try:
+                    await redis_conn.delete(flush_key)
+                    # Remove from queue if still there
+                    await redis_conn.zrem("coins_pending_queue", str(user_id))
+                except Exception:
+                    pass
+                continue
+
+            # Step 2: UPDATE users (only if log insert succeeded)
+            result = await session.execute(
+                update(User)
+                .where(User.user_id == user_id)
+                .values(coins=User.coins + delta)
+            )
+
+            if result.rowcount == 0:
+                # User not found. DO NOT commit.
+                # Session rollback removes the log INSERT automatically.
+                # Flushing key stays in Redis for retry/recovery.
+                logger.warning(
+                    "Coins flush: user %s not found, batch %s kept for retry",
+                    user_id,
+                    batch_id,
+                )
+                continue
+
+            # Step 3: Commit (log + balance update are atomic)
+            await session.commit()
+
+        # Step 4: Cleanup flushing key AND remove from queue ONLY after successful commit
+        try:
+            await redis_conn.delete(flush_key)
+            await redis_conn.zrem("coins_pending_queue", str(user_id))
         except Exception as e:
             logger.warning(
                 "Failed to cleanup flushing key %s: %s (data flushed, safe)",

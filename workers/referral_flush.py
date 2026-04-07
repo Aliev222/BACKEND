@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 FLUSH_INTERVAL = 30  # seconds
 WORKER_NAME = "referral_flush"
 FLUSH_TIMEOUT_SECONDS = 25
+MAX_KEYS_PER_FLUSH = 1000  # Prevent OOM if too many pending keys
 
 
 async def _ensure_flush_log_table():
@@ -56,17 +57,38 @@ async def _ensure_flush_log_table():
 
 async def flush_referral_pending(redis_conn: redis.Redis) -> int:
     """
-    Recovery-safe flush:
-    1. Atomic move: pending → processing (with batch_id)
-    2. DB update + log insert
-    3. Cleanup: DEL processing
+    Recovery-safe flush with ZSET queue for O(log N) performance.
+    1. Get user_ids from ZSET queue
+    2. Atomic move: pending → processing (with batch_id)
+    3. DB update + log insert
+    4. Cleanup: DEL processing + ZREM from queue
     """
     flush_started_at = time.perf_counter()
+
+    # Phase 1: Get pending referrer_ids from ZSET queue (O(log N))
+    pending_referrer_ids = await redis_conn.zrange(
+        "referral_pending_queue", 0, MAX_KEYS_PER_FLUSH - 1
+    )
+
+    if not pending_referrer_ids:
+        return 0
+
+    if len(pending_referrer_ids) > MAX_KEYS_PER_FLUSH:
+        logger.warning(
+            "Limiting flush batch to %d keys (found %d in queue)",
+            MAX_KEYS_PER_FLUSH,
+            len(pending_referrer_ids),
+        )
+        pending_referrer_ids = pending_referrer_ids[:MAX_KEYS_PER_FLUSH]
+
     # Lua: atomic move pending → processing
     move_script = """
     local pending_key = KEYS[1]
     local processing_key = KEYS[2]
-    local batch_id = ARGV[1]
+    local queue_key = KEYS[3]
+    local referrer_id = ARGV[1]
+    local batch_id = ARGV[2]
+    local moved_at = ARGV[3]
 
     -- Don't overwrite existing processing key (crash recovery safety)
     if redis.call('EXISTS', processing_key) == 1 then
@@ -75,40 +97,35 @@ async def flush_referral_pending(redis_conn: redis.Redis) -> int:
 
     local coins = redis.call('HGET', pending_key, 'coins')
     if not coins or tonumber(coins) <= 0 then
+        redis.call('ZREM', queue_key, referrer_id)
         return 0
     end
 
     -- Atomic move: RENAME pending → processing
-    redis.call('HSET', processing_key, 'coins', coins, 'batch_id', batch_id, 'moved_at', tostring(ARGV[2]))
+    redis.call('HSET', processing_key, 'coins', coins, 'batch_id', batch_id, 'moved_at', moved_at)
     redis.call('DEL', pending_key)
     return coins
     """
 
-    # Find all pending keys
-    pending_keys = []
-    cursor = 0
-    while True:
-        cursor, keys = await redis_conn.scan(
-            cursor, match="referral_pending:*", count=500
-        )
-        pending_keys.extend(keys)
-        if cursor == 0:
-            break
-
-    if not pending_keys:
-        return 0
-
     now = int(time.time())
     moved_data = []  # (processing_key, referrer_id, coins, batch_id)
 
-    # Phase 1: MOVE pending → processing
-    for key in pending_keys:
-        referrer_id = int(key.split(":")[-1])
+    # Phase 2: MOVE pending → processing
+    for referrer_id_str in pending_referrer_ids:
+        referrer_id = int(referrer_id_str)
         batch_id = f"{referrer_id}:{now}:{uuid.uuid4().hex[:8]}"
         processing_key = f"referral_processing:{referrer_id}"
+        pending_key = f"referral_pending:{referrer_id}"
 
         coins = await redis_conn.eval(
-            move_script, 2, key, processing_key, batch_id, str(now)
+            move_script,
+            3,
+            pending_key,
+            processing_key,
+            "referral_pending_queue",
+            str(referrer_id),
+            batch_id,
+            str(now),
         )
         coins = int(coins) if coins else 0
 
@@ -120,7 +137,7 @@ async def flush_referral_pending(redis_conn: redis.Redis) -> int:
     if not moved_data:
         return 0
 
-    # Phase 2: Recovery scan — also process any leftover processing keys
+    # Phase 3: Recovery scan — also process any leftover processing keys
     recovery_keys = []
     cursor = 0
     while True:
@@ -145,7 +162,7 @@ async def flush_referral_pending(redis_conn: redis.Redis) -> int:
     if recovery_keys:
         log_worker_recovery(WORKER_NAME, len(recovery_keys))
 
-    # Phase 3: PROCESS (DB) — each batch in its own transaction
+    # Phase 4: PROCESS (DB) — each batch in its own transaction
     flushed = 0
     for proc_key, referrer_id, coins, batch_id in moved_data:
         async with AsyncSessionLocal() as session:
@@ -166,6 +183,7 @@ async def flush_referral_pending(redis_conn: redis.Redis) -> int:
                 # Safe to cleanup since data is already in DB
                 try:
                     await redis_conn.delete(proc_key)
+                    await redis_conn.zrem("referral_pending_queue", str(referrer_id))
                 except Exception:
                     pass
                 continue
@@ -196,9 +214,10 @@ async def flush_referral_pending(redis_conn: redis.Redis) -> int:
             await session.commit()
             await sync_hot_after_db_increment(referrer_id, coins, int(new_coins))
 
-        # Step 4: Cleanup processing key ONLY after successful commit
+        # Step 4: Cleanup processing key AND remove from queue ONLY after successful commit
         try:
             await redis_conn.delete(proc_key)
+            await redis_conn.zrem("referral_pending_queue", str(referrer_id))
         except Exception as e:
             logger.warning(
                 "Failed to cleanup processing key %s: %s (data flushed, safe)",

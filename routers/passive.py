@@ -68,7 +68,9 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
             extra, "passive_boost"
         )
         base_hour_value = int(
-            user.get("profit_per_hour", get_profit_per_hour(resolve_progression_level(user)))
+            user.get(
+                "profit_per_hour", get_profit_per_hour(resolve_progression_level(user))
+            )
         )
         hour_value = (
             base_hour_value * max(1, passive_boost_multiplier)
@@ -114,10 +116,16 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
             referral_bonus = max(1, int(total_income * 0.05))
             redis_conn = await get_redis_or_none()
             if redis_conn:
+                import time
+
                 await redis_conn.hincrby(
                     f"referral_pending:{referrer_id}", "coins", referral_bonus
                 )
                 await redis_conn.expire(f"referral_pending:{referrer_id}", 300)
+                # Add to queue for flush worker
+                await redis_conn.zadd(
+                    "referral_pending_queue", {str(referrer_id): int(time.time())}
+                )
 
         return {
             "success": True,
@@ -159,14 +167,23 @@ async def activate_autoclicker(payload: AdActionClaimRequest, request: Request):
                 status_code=429,
                 detail=f"Autoclicker cooldown {remaining // 60}:{remaining % 60:02d}",
             )
-        if cooldown_until and now >= cooldown_until:
-            extra.pop("autoclicker_cooldown_until", None)
 
         cooldown_until_value = (
             now + timedelta(minutes=AUTOCLICKER_COOLDOWN_MINUTES)
         ).isoformat()
-        extra["autoclicker_cooldown_until"] = cooldown_until_value
-        await update_user(payload.user_id, {"extra_data": extra})
+
+        # Use atomic JSONB update
+        from infrastructure.jsonb_helpers import jsonb_set_field
+        from DATABASE.base import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            await jsonb_set_field(
+                session,
+                payload.user_id,
+                "autoclicker_cooldown_until",
+                cooldown_until_value,
+            )
+            await session.commit()
         await invalidate_user_cache(payload.user_id)
         await record_rewarded_ad_claim(
             payload.user_id, "autoclicker", {"source_action": "autoclicker"}
