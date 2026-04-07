@@ -39,6 +39,7 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
             "passive_income", request, payload.user_id, 20, 60, ip_limit=40
         )
         await require_user_action_lock("passive_income", payload.user_id, ttl=5)
+
         user = await get_user(payload.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -56,8 +57,15 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
                 raise HTTPException(
                     status_code=409, detail="Passive income baseline changed, retry"
                 )
+
             await invalidate_user_cache(payload.user_id)
-            return {"success": True, "coins": user["coins"], "income": 0, "message": ""}
+            return {
+                "success": True,
+                "coins": int(user.get("coins", 0)),
+                "income": 0,
+                "message": "",
+                "state_updated_at": int(time.time() * 1000),
+            }
 
         elapsed_seconds = max(0.0, (now - last_income).total_seconds())
         elapsed_seconds = min(elapsed_seconds, 24 * 3600)
@@ -67,31 +75,48 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
         passive_boost_active, _, passive_boost_multiplier = get_active_video_task_boost(
             extra, "passive_boost"
         )
+
         base_hour_value = int(
             user.get(
-                "profit_per_hour", get_profit_per_hour(resolve_progression_level(user))
+                "profit_per_hour",
+                get_profit_per_hour(resolve_progression_level(user)),
             )
         )
+
         hour_value = (
             base_hour_value * max(1, passive_boost_multiplier)
             if passive_boost_active
             else base_hour_value
         )
+
         if hour_value <= 0 or elapsed_seconds <= 0:
-            return {"success": True, "coins": user["coins"], "income": 0, "message": ""}
+            return {
+                "success": True,
+                "coins": int(user.get("coins", 0)),
+                "income": 0,
+                "message": "",
+                "state_updated_at": int(time.time() * 1000),
+            }
 
         total_income = int((hour_value * elapsed_seconds) // 3600)
         if total_income <= 0:
-            return {"success": True, "coins": user["coins"], "income": 0, "message": ""}
+            return {
+                "success": True,
+                "coins": int(user.get("coins", 0)),
+                "income": 0,
+                "message": "",
+                "state_updated_at": int(time.time() * 1000),
+            }
 
         consumed_seconds = (total_income * 3600) / hour_value
         new_last_income = min(now, last_income + timedelta(seconds=consumed_seconds))
-        new_coins = int(user.get("coins", 0)) + total_income
+        current_coins = int(user.get("coins", 0))
+        new_coins = current_coins + total_income
 
         updated_user = await update_user_if_matches(
             payload.user_id,
             {
-                "coins": int(user.get("coins", 0)),
+                "coins": current_coins,
                 "last_passive_income": last_income,
             },
             {
@@ -101,18 +126,17 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
         )
         if not updated_user:
             logger.warning(
-                "Atomic passive-income update conflict for user=%s", payload.user_id
+                "Atomic passive-income update conflict for user=%s",
+                payload.user_id,
             )
             raise HTTPException(
                 status_code=409, detail="Passive income state changed, retry"
             )
 
-        await invalidate_user_cache(payload.user_id)
-
-        # CRITICAL: Sync coins_hot after DB increment
+        # CRITICAL: sync hot balance after DB increment
         from infrastructure.coins_hot_sync import (
-            sync_hot_after_db_increment,
             get_hot_authoritative_coins,
+            sync_hot_after_db_increment,
         )
 
         await sync_hot_after_db_increment(payload.user_id, total_income, new_coins)
@@ -124,18 +148,18 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
             referral_bonus = max(1, int(total_income * 0.05))
             redis_conn = await get_redis_or_none()
             if redis_conn:
-                import time
-
                 await redis_conn.hincrby(
                     f"referral_pending:{referrer_id}", "coins", referral_bonus
                 )
                 await redis_conn.expire(f"referral_pending:{referrer_id}", 300)
-                # Add to queue for flush worker
                 await redis_conn.zadd(
-                    "referral_pending_queue", {str(referrer_id): int(time.time())}
+                    "referral_pending_queue",
+                    {str(referrer_id): int(time.time())},
                 )
 
-        # BUGFIX: Return hot authoritative coins, not stale DB coins
+        await invalidate_user_cache(payload.user_id)
+
+        # Return hot authoritative coins, not stale DB coins
         hot_coins = await get_hot_authoritative_coins(payload.user_id, new_coins)
 
         return {
@@ -146,6 +170,7 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
             "message": f"+{total_income} passive income",
             "state_updated_at": int(time.time() * 1000),
         }
+
     except HTTPException:
         raise
     except Exception as e:
