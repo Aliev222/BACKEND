@@ -30,6 +30,10 @@ local user_id = ARGV[16]
 local base_max_energy = tonumber(ARGV[17])
 local ghost_boost_multiplier_default = tonumber(ARGV[18])
 local canonical_boosts_json = ARGV[19] or '{}'
+local canonical_skin_multiplier = tonumber(ARGV[20] or '1')
+if canonical_skin_multiplier < 1 then
+    canonical_skin_multiplier = 1
+end
 local hot_state_version_default = 1
 
 local function json_decode_or_empty(raw)
@@ -80,7 +84,7 @@ if redis.call('EXISTS', user_hot_key) == 0 then
         'click_streak', '0',
         'suspicion_score', '0',
         'version', tostring(hot_state_version_default),
-        'skin_multiplier', '1',
+        'skin_multiplier', tostring(canonical_skin_multiplier),
         'boosts', canonical_boosts_json,
         'flags', '{}'
     )
@@ -88,7 +92,10 @@ end
 
 -- CRITICAL: Always update user_hot.boosts with canonical boosts from DB
 -- This ensures every click uses fresh boost state, not stale cached boosts
-redis.call('HSET', user_hot_key, 'boosts', canonical_boosts_json)
+redis.call('HSET', user_hot_key,
+    'boosts', canonical_boosts_json,
+    'skin_multiplier', tostring(canonical_skin_multiplier)
+)
 
 local hot_coins = tonumber(redis.call('HGET', user_hot_key, 'coins') or '0')
 local hot_energy = tonumber(redis.call('HGET', user_hot_key, 'energy') or tostring(base_max_energy))
@@ -99,7 +106,7 @@ local rebirth_count = tonumber(redis.call('HGET', user_hot_key, 'rebirth_count')
 local hot_click_streak = tonumber(redis.call('HGET', user_hot_key, 'click_streak') or '0')
 local hot_suspicion_score = tonumber(redis.call('HGET', user_hot_key, 'suspicion_score') or '0')
 local hot_version = tonumber(redis.call('HGET', user_hot_key, 'version') or tostring(hot_state_version_default))
-local skin_multiplier = tonumber(redis.call('HGET', user_hot_key, 'skin_multiplier') or '1')
+local skin_multiplier = canonical_skin_multiplier
 
 -- Use canonical boosts from DB (passed via ARGV), not stale user_hot boosts
 local boosts = json_decode_or_empty(canonical_boosts_json)

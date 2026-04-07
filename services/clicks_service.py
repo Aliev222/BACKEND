@@ -268,6 +268,18 @@ async def process_clicks_batch_service(
 
         extra = parse_extra_data(user.get("extra_data"))
 
+        # === FIX: canonical boosts + canonical skin multiplier from DB ===
+        owned_skins = deps.normalize_owned_skins(
+            extra.get("owned_skins", [deps.DEFAULT_SKIN_ID])
+        )
+        selected_skin = deps.normalize_selected_skin(
+            extra.get("selected_skin", deps.DEFAULT_SKIN_ID),
+            owned_skins,
+        )
+        skin_multiplier = float(deps.SKIN_MULTIPLIERS.get(selected_skin, 1.0))
+        if skin_multiplier < 1.0:
+            skin_multiplier = 1.0
+
         # Build canonical boosts JSON from authoritative DB state
         # This will be passed directly to Lua as the source of truth
         canonical_boosts = build_normalized_user_hot_boosts(
@@ -308,7 +320,8 @@ async def process_clicks_batch_service(
             str(payload.user_id),
             str(deps.get_max_energy(0)),
             str(deps.GHOST_BOOST_MULTIPLIER),
-            canonical_boosts_json,  # Canonical boosts from DB, not from stale user_hot
+            canonical_boosts_json,   # ARGV[19]
+            str(skin_multiplier),    # ARGV[20]
         ]
 
         t = time.perf_counter()
