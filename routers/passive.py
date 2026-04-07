@@ -109,6 +109,14 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
 
         await invalidate_user_cache(payload.user_id)
 
+        # CRITICAL: Sync coins_hot after DB increment
+        from infrastructure.coins_hot_sync import (
+            sync_hot_after_db_increment,
+            get_hot_authoritative_coins,
+        )
+
+        await sync_hot_after_db_increment(payload.user_id, total_income, new_coins)
+
         # Referral bonus (5% of income, buffered in Redis)
         referral_bonus = 0
         referrer_id = updated_user.get("referrer_id")
@@ -127,12 +135,16 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
                     "referral_pending_queue", {str(referrer_id): int(time.time())}
                 )
 
+        # BUGFIX: Return hot authoritative coins, not stale DB coins
+        hot_coins = await get_hot_authoritative_coins(payload.user_id, new_coins)
+
         return {
             "success": True,
-            "coins": int(updated_user.get("coins", new_coins)),
+            "coins": hot_coins,
             "income": total_income,
             "referral_bonus_paid": referral_bonus,
             "message": f"+{total_income} passive income",
+            "state_updated_at": int(time.time() * 1000),
         }
     except HTTPException:
         raise

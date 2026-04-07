@@ -78,6 +78,17 @@ async def apply_global_upgrade_for_user_service(
     if not updated_user:
         raise HTTPException(status_code=409, detail="Upgrade state changed, retry")
 
+    # CRITICAL: Sync coins_hot after DB decrement (spend)
+    from infrastructure.coins_hot_sync import (
+        sync_hot_after_db_decrement,
+        get_hot_authoritative_coins,
+    )
+
+    await sync_hot_after_db_decrement(user_id, price, new_coins)
+
+    # BUGFIX: Get hot authoritative coins for response
+    hot_coins = await get_hot_authoritative_coins(user_id, new_coins)
+
     # Keep energy:v2 in sync because upgrade resets energy to full max.
     try:
         redis_conn = await deps.get_redis_or_none()
@@ -111,7 +122,9 @@ async def apply_global_upgrade_for_user_service(
                 "energy_level",
             )
             await pipe.execute()
-            observe_storage_timing("redis", "energy_v2_hset", "upgrades", time.perf_counter() - t)
+            observe_storage_timing(
+                "redis", "energy_v2_hset", "upgrades", time.perf_counter() - t
+            )
     except Exception:
         observe_storage_error("redis", "energy_v2_hset", "upgrades")
         pass
@@ -119,7 +132,7 @@ async def apply_global_upgrade_for_user_service(
     next_cost = calc_upgrade_price(new_level, deps.GLOBAL_UPGRADE_PRICES)
     return {
         "success": True,
-        "coins": int(updated_user.get("coins", new_coins)),
+        "coins": hot_coins,
         "new_level": new_level,
         "level": new_level,
         "levels": {"multitap": new_level, "profit": new_level, "energy": new_level},
@@ -132,10 +145,13 @@ async def apply_global_upgrade_for_user_service(
         "max_energy": new_max_energy,
         "energy": new_max_energy,
         "server_time": datetime.utcnow().isoformat(),
+        "state_updated_at": int(time.time() * 1000),
     }
 
 
-async def process_upgrade_service(payload: Any, request: Any, deps: UpgradesServiceDeps):
+async def process_upgrade_service(
+    payload: Any, request: Any, deps: UpgradesServiceDeps
+):
     try:
         await deps.require_telegram_user(request, payload.user_id)
         await deps.require_dual_rate_limit(

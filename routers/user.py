@@ -107,64 +107,14 @@ async def get_user_data(request: Request):
     telegram_user = await require_telegram_user(request)
     user_id = int(telegram_user.get("id", 0))
 
-    async with AsyncSessionLocal() as session:
-        user = await get_user_by_id(session, user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+    # Use authoritative realtime state builder instead of manual assembly
+    from core.realtime_state import build_realtime_player_state
 
-    now = datetime.utcnow()
-    current_energy = calculate_current_energy(user, now)
-    max_energy = resolve_max_energy(user)
+    state = await build_realtime_player_state(user_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    extra = _parse_extra(user.get("extra_data", {}))
-    owned_skins = _get_owned_skins(extra)
-    selected_skin = _get_selected_skin(extra, owned_skins)
-
-    ghost_active, ghost_expires = _get_boost_status(extra, "ghost_boost")
-    daily_active, daily_expires = _get_boost_status(extra, "daily_infinite_energy")
-    task_tap_active, task_tap_expires, task_tap_mult = _get_video_task_boost(
-        extra, "tap_boost"
-    )
-    task_passive_active, task_passive_expires, task_passive_mult = (
-        _get_video_task_boost(extra, "passive_boost")
-    )
-
-    level = resolve_progression_level(user)
-    rebirth_count = max(0, int(user.get("rebirth_count", 0) or 0))
-
-    return {
-        "user_id": user["user_id"],
-        "username": user.get("username"),
-        "coins": user.get("coins", 0),
-        "energy": current_energy,
-        "max_energy": max_energy,
-        "profit_per_tap": get_tap(level, rebirth_count),
-        "profit_per_hour": get_profit_per_hour(level),
-        # Deprecated mirrors for backward compatibility.
-        "multitap_level": level,
-        "profit_level": level,
-        "energy_level": level,
-        "level": level,
-        "rebirth_count": rebirth_count,
-        "owned_skins": owned_skins,
-        "selected_skin": selected_skin,
-        "ads_watched": extra.get("ads_watched", 0),
-        "ghost_boost_active": ghost_active,
-        "ghost_boost_expires_at": ghost_expires,
-        "task_tap_boost_active": task_tap_active,
-        "task_tap_boost_expires_at": task_tap_expires,
-        "task_tap_boost_multiplier": task_tap_mult,
-        "task_passive_boost_active": task_passive_active,
-        "task_passive_boost_expires_at": task_passive_expires,
-        "task_passive_boost_multiplier": task_passive_mult,
-        "daily_infinite_energy_active": daily_active,
-        "daily_infinite_energy_expires_at": daily_expires,
-        "skin_ad_progress": _get_skin_ad_progress(extra),
-        "skin_ad_last_watch": _get_skin_ad_last_watch(extra),
-        "ton_wallet": _get_ton_wallet(extra),
-        "regen_seconds": ENERGY_REGEN_SECONDS,
-        "server_time": now.isoformat(),
-    }
+    return state
 
 
 @router.post("/user")

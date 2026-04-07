@@ -161,3 +161,28 @@ async def sync_hot_after_db_decrement(
             exc,
         )
         return None
+
+
+async def get_hot_authoritative_coins(user_id: int, db_fallback: int = 0) -> int:
+    """
+    Get authoritative hot coins for non-click response contract.
+
+    Returns coins_hot:{user_id} if exists, otherwise db_fallback.
+    This is the single source of truth for non-click coin mutation responses.
+    """
+    redis_conn = await get_redis_or_none()
+    if not redis_conn:
+        return int(db_fallback)
+
+    try:
+        hot_coins = await redis_conn.get(f"coins_hot:{int(user_id)}")
+        if hot_coins is not None:
+            return int(hot_coins)
+        return int(db_fallback)
+    except Exception as exc:
+        logger.warning(
+            "get_hot_authoritative_coins failed user=%s err=%s",
+            user_id,
+            exc,
+        )
+        return int(db_fallback)

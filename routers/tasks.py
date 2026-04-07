@@ -103,7 +103,24 @@ async def complete_task(request: Request):
         )
         await session.commit()
 
-    return {"success": True, "coins": new_coins, "reward": task_def["reward"]}
+    # CRITICAL: Sync coins_hot after DB increment
+    from infrastructure.coins_hot_sync import (
+        sync_hot_after_db_increment,
+        get_hot_authoritative_coins,
+    )
+    import time
+
+    await sync_hot_after_db_increment(user_id, task_def["reward"], new_coins)
+
+    # BUGFIX: Return hot authoritative coins, not stale DB coins
+    hot_coins = await get_hot_authoritative_coins(user_id, new_coins)
+
+    return {
+        "success": True,
+        "coins": hot_coins,
+        "reward": task_def["reward"],
+        "state_updated_at": int(time.time() * 1000),
+    }
 
 
 @router.get("/daily-reward")
@@ -223,13 +240,27 @@ async def claim_daily_reward(request: Request):
         # Invalidate cache after successful commit
         await invalidate_user_cache(user_id)
 
+        # CRITICAL: Sync coins_hot after DB increment
+        from infrastructure.coins_hot_sync import (
+            sync_hot_after_db_increment,
+            get_hot_authoritative_coins,
+        )
+        import time
+
+        new_coins = int(user_db.coins)
+        await sync_hot_after_db_increment(user_id, reward, new_coins)
+
+        # BUGFIX: Return hot authoritative coins, not stale DB coins
+        hot_coins = await get_hot_authoritative_coins(user_id, new_coins)
+
     return {
         "success": True,
         "day": day_number,
         "reward": reward,
-        "coins": user_db.coins,
+        "coins": hot_coins,
         "infinite_energy": day_number % 7 == 0,
         "skin_unlocked": day_number == DAILY_REWARD_MAX_DAYS,
+        "state_updated_at": int(time.time() * 1000),
     }
 
 
@@ -600,8 +631,24 @@ async def claim_video_task_legacy(payload: _VideoTaskClaimRequest, request: Requ
 
         await _update_user(payload.user_id, updates)
         await _invalidate_user_cache(payload.user_id)
-        refreshed_user = await _get_user_cached(payload.user_id)
-        response["coins"] = int((refreshed_user or {}).get("coins", response["coins"]))
+
+        # CRITICAL: Sync coins_hot after DB increment (only for coin_drop type)
+        if config["type"] == "coin_drop":
+            from infrastructure.coins_hot_sync import (
+                sync_hot_after_db_increment,
+                get_hot_authoritative_coins,
+            )
+            import time
+
+            reward = response["coins_reward"]
+            new_coins = response["coins"]
+            await sync_hot_after_db_increment(payload.user_id, reward, new_coins)
+
+            # BUGFIX: Return hot authoritative coins, not stale DB coins
+            hot_coins = await get_hot_authoritative_coins(payload.user_id, new_coins)
+            response["coins"] = hot_coins
+            response["state_updated_at"] = int(time.time() * 1000)
+
         await _record_rewarded_ad_claim(
             payload.user_id, "tasks", {"task_id": payload.task_id}
         )

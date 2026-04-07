@@ -143,15 +143,28 @@ async def claim_daily_reward(payload: UserIdRequest, request: Request):
 
         await update_user(payload.user_id, updates)
         await invalidate_user_cache(payload.user_id)
-        refreshed_user = await get_user_cached(payload.user_id)
+
+        # CRITICAL: Sync coins_hot after DB increment
+        from infrastructure.coins_hot_sync import (
+            sync_hot_after_db_increment,
+            get_hot_authoritative_coins,
+        )
+        import time
+
+        new_coins = int(user.get("coins", 0)) + coins_reward
+        await sync_hot_after_db_increment(payload.user_id, coins_reward, new_coins)
+
+        # BUGFIX: Return hot authoritative coins, not stale DB coins
+        hot_coins = await get_hot_authoritative_coins(payload.user_id, new_coins)
 
         return {
             "success": True,
             "day": next_day,
             "coins_reward": coins_reward,
-            "coins": int((refreshed_user or {}).get("coins", 0)),
+            "coins": hot_coins,
             "claimed_days": claimed_days,
             "all_claimed": claimed_days >= DAILY_REWARD_MAX_DAYS,
+            "state_updated_at": int(time.time() * 1000),
         }
     except HTTPException:
         raise
