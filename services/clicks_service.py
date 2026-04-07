@@ -254,51 +254,26 @@ async def process_clicks_batch_service(
         request_ip = deps.get_request_ip(request)
         user_hot_key = f"user_hot:{payload.user_id}"
 
-        # Prepare initial boosts JSON for user_hot initialization
-        # CRITICAL: Read fresh boost state from DB (not cache) to avoid stale boost state
+        # CRITICAL: Build canonical boosts from authoritative DB state
+        # Pass directly to Lua to guarantee next-click sees fresh boosts
         import json
 
-        try:
-            # Read fresh user data from DB to get accurate boost expiration times
-            user = await deps.get_user(payload.user_id)
-            if user:
-                from core.utils import parse_extra_data
+        from core.boost_sync import build_normalized_user_hot_boosts
+        from core.utils import parse_extra_data
 
-                extra = parse_extra_data(user.get("extra_data"))
-                boosts = deps.get_all_boost_states(extra)
+        # Read fresh user data from DB to get accurate boost expiration times
+        user = await deps.get_user(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
 
-                initial_boosts = {
-                    "mega_boost_active": boosts["mega_boost_active"],
-                    "ghost_boost_active": boosts["ghost_boost_active"],
-                    "ghost_boost_multiplier": boosts["ghost_boost_multiplier"],
-                    "daily_infinite_energy_active": boosts[
-                        "daily_infinite_energy_active"
-                    ],
-                    "task_tap_boost_active": boosts["task_tap_boost_active"],
-                    "task_tap_boost_multiplier": boosts["task_tap_boost_multiplier"],
-                }
-            else:
-                # Fallback if user not found
-                initial_boosts = {
-                    "mega_boost_active": False,
-                    "ghost_boost_active": False,
-                    "ghost_boost_multiplier": deps.GHOST_BOOST_MULTIPLIER,
-                    "daily_infinite_energy_active": False,
-                    "task_tap_boost_active": False,
-                    "task_tap_boost_multiplier": 1,
-                }
-        except Exception:
-            # Fallback on error
-            initial_boosts = {
-                "mega_boost_active": False,
-                "ghost_boost_active": False,
-                "ghost_boost_multiplier": deps.GHOST_BOOST_MULTIPLIER,
-                "daily_infinite_energy_active": False,
-                "task_tap_boost_active": False,
-                "task_tap_boost_multiplier": 1,
-            }
+        extra = parse_extra_data(user.get("extra_data"))
 
-        initial_boosts_json = json.dumps(initial_boosts)
+        # Build canonical boosts JSON from authoritative DB state
+        # This will be passed directly to Lua as the source of truth
+        canonical_boosts = build_normalized_user_hot_boosts(
+            extra, deps.GHOST_BOOST_MULTIPLIER
+        )
+        canonical_boosts_json = json.dumps(canonical_boosts)
 
         keys = [
             f"rl:clicks:{payload.user_id}",
@@ -333,7 +308,7 @@ async def process_clicks_batch_service(
             str(payload.user_id),
             str(deps.get_max_energy(0)),
             str(deps.GHOST_BOOST_MULTIPLIER),
-            initial_boosts_json,
+            canonical_boosts_json,  # Canonical boosts from DB, not from stale user_hot
         ]
 
         t = time.perf_counter()

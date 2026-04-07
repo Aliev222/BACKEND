@@ -331,14 +331,14 @@ async def build_realtime_player_state(user_id: int) -> dict | None:
     # 4. Read authoritative energy from energy:v2
     energy_state = await read_energy_v2(user_id, max_energy)
 
-    # 5. Check if we need DB fallback for coins or fresh extra_data
+    # 5. BUGFIX: Always read fresh DB user for boosts to avoid stale cache
+    # Coins can use hot state, but boosts MUST be fresh from DB
     hot_coins = None
     if redis_conn:
         hot_coins = await redis_conn.get(f"coins_hot:{user_id}")
 
-    # Fetch DB user AT MOST ONCE for fallback/freshness
-    needs_db = hot_coins is None
-    db_user = await get_user(user_id) if needs_db else None
+    # Always fetch DB user for fresh extra_data (boosts/cooldowns)
+    db_user = await get_user(user_id)
 
     # 6. Determine coins (Redis hot -> DB -> cache fallback)
     if hot_coins is not None:
@@ -348,7 +348,7 @@ async def build_realtime_player_state(user_id: int) -> dict | None:
     else:
         coins = int(profile.get("coins", 0))
 
-    # 7. Determine extra_data (prefer DB for freshness, fallback to cache)
+    # 7. Determine extra_data (ALWAYS prefer fresh DB over stale cache)
     extra = {}
     raw_extra = None
     if db_user and db_user.get("extra_data"):
@@ -383,15 +383,11 @@ async def build_realtime_player_state(user_id: int) -> dict | None:
     # 11. State ordering fields (timestamp-based)
     state_updated_at = int(time.time() * 1000)  # milliseconds
 
-    # Prepare boosts for user_hot sync
-    boosts_for_hot = {
-        "mega_boost_active": boosts["mega_boost_active"],
-        "ghost_boost_active": boosts["ghost_boost_active"],
-        "ghost_boost_multiplier": boosts["ghost_boost_multiplier"],
-        "daily_infinite_energy_active": boosts["daily_infinite_energy_active"],
-        "task_tap_boost_active": boosts["task_tap_boost_active"],
-        "task_tap_boost_multiplier": boosts["task_tap_boost_multiplier"],
-    }
+    # BUGFIX: Use canonical boost builder for user_hot sync
+    from core.boost_sync import build_normalized_user_hot_boosts
+    from core.game_config import GHOST_BOOST_MULTIPLIER
+
+    boosts_for_hot = build_normalized_user_hot_boosts(extra, GHOST_BOOST_MULTIPLIER)
 
     await ensure_user_hot_progression_state(
         user_id,

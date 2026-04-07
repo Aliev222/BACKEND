@@ -437,7 +437,7 @@ async def activate_mega_boost_service(
         cooldown_minutes = deps.MEGA_BOOST_COOLDOWN_MAX_MINUTES
         cooldown_until_value = (now + timedelta(minutes=cooldown_minutes)).isoformat()
 
-        # Use nested path atomic JSONB updates to prevent boost merge race
+        # Atomic DB update - this is the authoritative source of truth
         from DATABASE.base import AsyncSessionLocal
         from sqlalchemy import text
         import json
@@ -471,42 +471,32 @@ async def activate_mega_boost_service(
         observe_storage_timing(
             "db", "update_user_atomic_jsonb", "ads_boosts", time.perf_counter() - t
         )
-        await deps.invalidate_user_cache(payload.user_id)
 
-        # Sync boost to user_hot immediately so click path sees it
-        # Read fresh user to get updated extra_data with new boost
+        # Best-effort sync to user_hot for immediate click path visibility
+        # If this fails, clicks_service will repair from authoritative DB state
         redis_conn = await deps.get_redis_or_none()
         if redis_conn:
             try:
-                from core.realtime_state import get_all_boost_states
+                from core.boost_sync import sync_boosts_to_user_hot
                 from core.utils import parse_extra_data
 
-                # Re-fetch user to get fresh extra_data with the boost we just wrote
                 fresh_user = await deps.get_user_cached(payload.user_id)
                 if fresh_user:
                     fresh_extra = parse_extra_data(fresh_user.get("extra_data"))
-                    boosts = get_all_boost_states(fresh_extra)
-
-                    # Build normalized boosts for user_hot
-                    boosts_for_hot = {
-                        "mega_boost_active": boosts["mega_boost_active"],
-                        "ghost_boost_active": boosts["ghost_boost_active"],
-                        "ghost_boost_multiplier": boosts["ghost_boost_multiplier"],
-                        "daily_infinite_energy_active": boosts[
-                            "daily_infinite_energy_active"
-                        ],
-                        "task_tap_boost_active": boosts["task_tap_boost_active"],
-                        "task_tap_boost_multiplier": boosts[
-                            "task_tap_boost_multiplier"
-                        ],
-                    }
-
-                    user_hot_key = f"user_hot:{payload.user_id}"
-                    await redis_conn.hset(
-                        user_hot_key, "boosts", json.dumps(boosts_for_hot)
+                    await sync_boosts_to_user_hot(
+                        payload.user_id,
+                        fresh_extra,
+                        deps.GHOST_BOOST_MULTIPLIER,
+                        redis_conn,
                     )
             except Exception as e:
-                deps.logger.warning(f"Failed to sync mega boost to user_hot: {e}")
+                deps.logger.warning(
+                    f"Best-effort sync to user_hot failed for user {payload.user_id}: {e}. "
+                    "Click path will repair from DB."
+                )
+
+        # Invalidate cache after DB commit
+        await deps.invalidate_user_cache(payload.user_id)
 
         await deps.record_rewarded_ad_claim(
             payload.user_id, "boost", {"source_action": "mega_boost"}
@@ -571,7 +561,7 @@ async def activate_ghost_boost_service(
 
         expires_at = (now + timedelta(minutes=deps.GHOST_BOOST_MINUTES)).isoformat()
 
-        # Use nested path atomic JSONB updates to prevent boost merge race
+        # Atomic DB update - this is the authoritative source of truth
         from DATABASE.base import AsyncSessionLocal
         from sqlalchemy import text
         import json
@@ -605,42 +595,32 @@ async def activate_ghost_boost_service(
         observe_storage_timing(
             "db", "update_user_atomic_jsonb", "ads_boosts", time.perf_counter() - t
         )
-        await deps.invalidate_user_cache(payload.user_id)
 
-        # Sync boost to user_hot immediately so click path sees it
-        # Read fresh user to get updated extra_data with new boost
+        # Best-effort sync to user_hot for immediate click path visibility
+        # If this fails, clicks_service will repair from authoritative DB state
         redis_conn = await deps.get_redis_or_none()
         if redis_conn:
             try:
-                from core.realtime_state import get_all_boost_states
+                from core.boost_sync import sync_boosts_to_user_hot
                 from core.utils import parse_extra_data
 
-                # Re-fetch user to get fresh extra_data with the boost we just wrote
                 fresh_user = await deps.get_user_cached(payload.user_id)
                 if fresh_user:
                     fresh_extra = parse_extra_data(fresh_user.get("extra_data"))
-                    boosts = get_all_boost_states(fresh_extra)
-
-                    # Build normalized boosts for user_hot
-                    boosts_for_hot = {
-                        "mega_boost_active": boosts["mega_boost_active"],
-                        "ghost_boost_active": boosts["ghost_boost_active"],
-                        "ghost_boost_multiplier": boosts["ghost_boost_multiplier"],
-                        "daily_infinite_energy_active": boosts[
-                            "daily_infinite_energy_active"
-                        ],
-                        "task_tap_boost_active": boosts["task_tap_boost_active"],
-                        "task_tap_boost_multiplier": boosts[
-                            "task_tap_boost_multiplier"
-                        ],
-                    }
-
-                    user_hot_key = f"user_hot:{payload.user_id}"
-                    await redis_conn.hset(
-                        user_hot_key, "boosts", json.dumps(boosts_for_hot)
+                    await sync_boosts_to_user_hot(
+                        payload.user_id,
+                        fresh_extra,
+                        deps.GHOST_BOOST_MULTIPLIER,
+                        redis_conn,
                     )
             except Exception as e:
-                deps.logger.warning(f"Failed to sync ghost boost to user_hot: {e}")
+                deps.logger.warning(
+                    f"Best-effort sync to user_hot failed for user {payload.user_id}: {e}. "
+                    "Click path will repair from DB."
+                )
+
+        # Invalidate cache after DB commit
+        await deps.invalidate_user_cache(payload.user_id)
 
         await deps.record_rewarded_ad_claim(
             payload.user_id, "ghost", {"source_action": "ghost_boost"}
