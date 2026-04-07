@@ -1,7 +1,7 @@
 """
 Passive income and autoclicker routes extracted from legacy.py (Patch 7.3).
 """
-
+import time
 import json
 import logging
 from datetime import datetime, timedelta
