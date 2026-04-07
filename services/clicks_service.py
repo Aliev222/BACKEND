@@ -255,15 +255,48 @@ async def process_clicks_batch_service(
         user_hot_key = f"user_hot:{payload.user_id}"
 
         # Prepare initial boosts JSON for user_hot initialization
-        initial_boosts = {
-            "mega_boost_active": False,
-            "ghost_boost_active": False,
-            "ghost_boost_multiplier": deps.GHOST_BOOST_MULTIPLIER,
-            "daily_infinite_energy_active": False,
-            "task_tap_boost_active": False,
-            "task_tap_boost_multiplier": 1,
-        }
+        # CRITICAL: Read fresh boost state from DB (not cache) to avoid stale boost state
         import json
+
+        try:
+            # Read fresh user data from DB to get accurate boost expiration times
+            user = await deps.get_user(payload.user_id)
+            if user:
+                from core.utils import parse_extra_data
+
+                extra = parse_extra_data(user.get("extra_data"))
+                boosts = deps.get_all_boost_states(extra)
+
+                initial_boosts = {
+                    "mega_boost_active": boosts["mega_boost_active"],
+                    "ghost_boost_active": boosts["ghost_boost_active"],
+                    "ghost_boost_multiplier": boosts["ghost_boost_multiplier"],
+                    "daily_infinite_energy_active": boosts[
+                        "daily_infinite_energy_active"
+                    ],
+                    "task_tap_boost_active": boosts["task_tap_boost_active"],
+                    "task_tap_boost_multiplier": boosts["task_tap_boost_multiplier"],
+                }
+            else:
+                # Fallback if user not found
+                initial_boosts = {
+                    "mega_boost_active": False,
+                    "ghost_boost_active": False,
+                    "ghost_boost_multiplier": deps.GHOST_BOOST_MULTIPLIER,
+                    "daily_infinite_energy_active": False,
+                    "task_tap_boost_active": False,
+                    "task_tap_boost_multiplier": 1,
+                }
+        except Exception:
+            # Fallback on error
+            initial_boosts = {
+                "mega_boost_active": False,
+                "ghost_boost_active": False,
+                "ghost_boost_multiplier": deps.GHOST_BOOST_MULTIPLIER,
+                "daily_infinite_energy_active": False,
+                "task_tap_boost_active": False,
+                "task_tap_boost_multiplier": 1,
+            }
 
         initial_boosts_json = json.dumps(initial_boosts)
 

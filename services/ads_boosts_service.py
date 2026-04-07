@@ -474,21 +474,37 @@ async def activate_mega_boost_service(
         await deps.invalidate_user_cache(payload.user_id)
 
         # Sync boost to user_hot immediately so click path sees it
+        # Read fresh user to get updated extra_data with new boost
         redis_conn = await deps.get_redis_or_none()
         if redis_conn:
-            user_hot_key = f"user_hot:{payload.user_id}"
-            boosts_for_hot = {
-                "mega_boost_active": True,
-                "ghost_boost_active": False,
-                "ghost_boost_multiplier": deps.GHOST_BOOST_MULTIPLIER,
-                "daily_infinite_energy_active": False,
-                "task_tap_boost_active": False,
-                "task_tap_boost_multiplier": 1,
-            }
             try:
-                await redis_conn.hset(
-                    user_hot_key, "boosts", json.dumps(boosts_for_hot)
-                )
+                from core.realtime_state import get_all_boost_states
+                from core.utils import parse_extra_data
+
+                # Re-fetch user to get fresh extra_data with the boost we just wrote
+                fresh_user = await deps.get_user_cached(payload.user_id)
+                if fresh_user:
+                    fresh_extra = parse_extra_data(fresh_user.get("extra_data"))
+                    boosts = get_all_boost_states(fresh_extra)
+
+                    # Build normalized boosts for user_hot
+                    boosts_for_hot = {
+                        "mega_boost_active": boosts["mega_boost_active"],
+                        "ghost_boost_active": boosts["ghost_boost_active"],
+                        "ghost_boost_multiplier": boosts["ghost_boost_multiplier"],
+                        "daily_infinite_energy_active": boosts[
+                            "daily_infinite_energy_active"
+                        ],
+                        "task_tap_boost_active": boosts["task_tap_boost_active"],
+                        "task_tap_boost_multiplier": boosts[
+                            "task_tap_boost_multiplier"
+                        ],
+                    }
+
+                    user_hot_key = f"user_hot:{payload.user_id}"
+                    await redis_conn.hset(
+                        user_hot_key, "boosts", json.dumps(boosts_for_hot)
+                    )
             except Exception as e:
                 deps.logger.warning(f"Failed to sync mega boost to user_hot: {e}")
 
@@ -592,21 +608,37 @@ async def activate_ghost_boost_service(
         await deps.invalidate_user_cache(payload.user_id)
 
         # Sync boost to user_hot immediately so click path sees it
+        # Read fresh user to get updated extra_data with new boost
         redis_conn = await deps.get_redis_or_none()
         if redis_conn:
-            user_hot_key = f"user_hot:{payload.user_id}"
-            boosts_for_hot = {
-                "mega_boost_active": False,
-                "ghost_boost_active": True,
-                "ghost_boost_multiplier": deps.GHOST_BOOST_MULTIPLIER,
-                "daily_infinite_energy_active": False,
-                "task_tap_boost_active": False,
-                "task_tap_boost_multiplier": 1,
-            }
             try:
-                await redis_conn.hset(
-                    user_hot_key, "boosts", json.dumps(boosts_for_hot)
-                )
+                from core.realtime_state import get_all_boost_states
+                from core.utils import parse_extra_data
+
+                # Re-fetch user to get fresh extra_data with the boost we just wrote
+                fresh_user = await deps.get_user_cached(payload.user_id)
+                if fresh_user:
+                    fresh_extra = parse_extra_data(fresh_user.get("extra_data"))
+                    boosts = get_all_boost_states(fresh_extra)
+
+                    # Build normalized boosts for user_hot
+                    boosts_for_hot = {
+                        "mega_boost_active": boosts["mega_boost_active"],
+                        "ghost_boost_active": boosts["ghost_boost_active"],
+                        "ghost_boost_multiplier": boosts["ghost_boost_multiplier"],
+                        "daily_infinite_energy_active": boosts[
+                            "daily_infinite_energy_active"
+                        ],
+                        "task_tap_boost_active": boosts["task_tap_boost_active"],
+                        "task_tap_boost_multiplier": boosts[
+                            "task_tap_boost_multiplier"
+                        ],
+                    }
+
+                    user_hot_key = f"user_hot:{payload.user_id}"
+                    await redis_conn.hset(
+                        user_hot_key, "boosts", json.dumps(boosts_for_hot)
+                    )
             except Exception as e:
                 deps.logger.warning(f"Failed to sync ghost boost to user_hot: {e}")
 
