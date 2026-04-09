@@ -15,6 +15,7 @@ from DATABASE.base import add_user, get_user, init_db, record_stars_skin_purchas
 from core.game_config import USER_CACHE_PREFIX
 from core.reengagement import reengagement_loop
 from core.stars_skins import get_stars_skin_price
+from infrastructure.redis import get_redis_or_none
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,7 +53,12 @@ async def cmd_start(message: types.Message) -> None:
 
     user_data = await get_user(user_id)
     if user_data:
-        user_coins = user_data.get("coins", 0)
+        redis_conn = await get_redis_or_none()
+        coins_hot = await redis_conn.get(f"coins_hot:{user_id}") if redis_conn else None
+        if coins_hot is not None:
+            user_coins = int(coins_hot)
+        else:
+            user_coins = int(user_data.get("coins", 0))
     else:
         await add_user(user_id, username, referrer_id)
         user_coins = 0

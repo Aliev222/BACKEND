@@ -390,6 +390,10 @@ async def get_tasks_legacy(user_id: int, request: Request):
 @router_legacy.post("/api/complete-task")
 async def complete_task_legacy(payload: _TaskCompleteRequest, request: Request):
     try:
+        from infrastructure.coins_hot_sync import (
+            get_hot_authoritative_coins as _get_hot_authoritative_coins,
+        )
+
         await _require_telegram_user(request, payload.user_id)
         await _require_dual_rate_limit(
             "complete_task",
@@ -413,26 +417,32 @@ async def complete_task_legacy(payload: _TaskCompleteRequest, request: Request):
             updated_user = await _complete_task_reward_atomically(
                 payload.user_id,
                 task_id,
-                {"coins": int(user.get("coins", 0)) + 25000},
+                {"coins_delta": 25000},
+            )
+            hot_coins = await _get_hot_authoritative_coins(
+                payload.user_id, int(updated_user.get("coins", 0))
             )
             await _invalidate_user_cache(payload.user_id)
             return {
                 "success": True,
                 "message": "🔗 +25000 coins!",
-                "coins": int(updated_user.get("coins", 0)),
+                "coins": hot_coins,
             }
 
         if task_id == "daily_bonus":
             updated_user = await _complete_task_reward_atomically(
                 payload.user_id,
                 task_id,
-                {"coins": int(user.get("coins", 0)) + 25000},
+                {"coins_delta": 25000},
+            )
+            hot_coins = await _get_hot_authoritative_coins(
+                payload.user_id, int(updated_user.get("coins", 0))
             )
             await _invalidate_user_cache(payload.user_id)
             return {
                 "success": True,
                 "message": "🎁 +25000 coins!",
-                "coins": int(updated_user.get("coins", 0)),
+                "coins": hot_coins,
             }
 
         elif task_id == "energy_refill":
@@ -445,13 +455,16 @@ async def complete_task_legacy(payload: _TaskCompleteRequest, request: Request):
                 updated_user = await _complete_task_reward_atomically(
                     payload.user_id,
                     task_id,
-                    {"coins": int(user.get("coins", 0)) + 20000},
+                    {"coins_delta": 20000},
+                )
+                hot_coins = await _get_hot_authoritative_coins(
+                    payload.user_id, int(updated_user.get("coins", 0))
                 )
                 await _invalidate_user_cache(payload.user_id)
                 return {
                     "success": True,
                     "message": "👥 +20000 coins!",
-                    "coins": int(updated_user.get("coins", 0)),
+                    "coins": hot_coins,
                 }
             else:
                 raise HTTPException(status_code=400, detail="Not enough friends")
@@ -488,13 +501,16 @@ async def complete_task_legacy(payload: _TaskCompleteRequest, request: Request):
             updated_user = await _complete_task_reward_atomically(
                 payload.user_id,
                 task_id,
-                {"coins": int(user.get("coins", 0)) + 20000, "extra_data": extra},
+                {"coins_delta": 20000, "extra_data": extra},
+            )
+            hot_coins = await _get_hot_authoritative_coins(
+                payload.user_id, int(updated_user.get("coins", 0))
             )
             await _invalidate_user_cache(payload.user_id)
             return {
                 "success": True,
                 "message": "✅ +20000 coins + skin!",
-                "coins": int(updated_user.get("coins", 0)),
+                "coins": hot_coins,
                 "skin_id": social_skin_id,
                 "verified": task_id == "telegram_sub",
             }

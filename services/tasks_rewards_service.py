@@ -32,7 +32,17 @@ async def complete_task_reward_atomically_service(
 ) -> dict:
     from DATABASE.base import update_extra_data_atomic
 
-    user_updates = user_updates or {}
+    user_updates = dict(user_updates or {})
+    coins_delta_raw = user_updates.pop("coins_delta", None)
+    coins_delta = None
+    if coins_delta_raw is not None:
+        if "coins" in user_updates:
+            raise HTTPException(
+                status_code=400,
+                detail="Use either coins or coins_delta, not both",
+            )
+        coins_delta = int(coins_delta_raw)
+
     sync_delta = 0
     sync_new_coins = None
 
@@ -60,9 +70,14 @@ async def complete_task_reward_atomically_service(
         for field, value in user_updates.items():
             if field != "extra_data":
                 setattr(user_row, field, value)
+        if coins_delta is not None:
+            user_row.coins = int(user_row.coins or 0) + coins_delta
 
         await session.commit()
-        if "coins" in user_updates:
+        if coins_delta is not None:
+            sync_new_coins = int(user_row.coins or 0)
+            sync_delta = coins_delta
+        elif "coins" in user_updates:
             sync_new_coins = int(user_row.coins or 0)
             sync_delta = sync_new_coins - old_coins
 
