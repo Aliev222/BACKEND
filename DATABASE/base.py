@@ -1342,14 +1342,22 @@ async def record_stars_skin_purchase(
         return True
 
 
-async def get_stars_skin_sales_admin_summary(limit: int = 20):
+async def get_stars_skin_sales_admin_summary(limit: int = 20, currency: str | None = None):
     limit = max(1, min(100, int(limit or 20)))
+    currency_filter = (currency or "").strip().upper()
     async with AsyncSessionLocal() as session:
-        total_result = await session.execute(select(func.count(StarsSkinPurchase.id)))
+        total_query = select(func.count(StarsSkinPurchase.id))
+        if currency_filter:
+            total_query = total_query.where(StarsSkinPurchase.currency == currency_filter)
+        total_result = await session.execute(total_query)
+
+        total_amount_query = select(func.coalesce(func.sum(StarsSkinPurchase.stars_amount), 0))
+        if currency_filter:
+            total_amount_query = total_amount_query.where(StarsSkinPurchase.currency == currency_filter)
         total_stars_result = await session.execute(
-            select(func.coalesce(func.sum(StarsSkinPurchase.stars_amount), 0))
+            total_amount_query
         )
-        grouped_result = await session.execute(
+        grouped_query = (
             select(
                 StarsSkinPurchase.skin_id,
                 func.count(StarsSkinPurchase.id),
@@ -1361,15 +1369,19 @@ async def get_stars_skin_sales_admin_summary(limit: int = 20):
                 desc(func.coalesce(func.sum(StarsSkinPurchase.stars_amount), 0)),
             )
         )
-        recent_result = await session.execute(
-            select(StarsSkinPurchase)
-            .order_by(desc(StarsSkinPurchase.created_at))
-            .limit(limit)
-        )
+        if currency_filter:
+            grouped_query = grouped_query.where(StarsSkinPurchase.currency == currency_filter)
+        grouped_result = await session.execute(grouped_query)
+
+        recent_query = select(StarsSkinPurchase).order_by(desc(StarsSkinPurchase.created_at)).limit(limit)
+        if currency_filter:
+            recent_query = recent_query.where(StarsSkinPurchase.currency == currency_filter)
+        recent_result = await session.execute(recent_query)
 
         return {
             "total_purchases": int(total_result.scalar() or 0),
             "total_stars": int(total_stars_result.scalar() or 0),
+            "currency": currency_filter or None,
             "by_skin": [
                 {
                     "skin_id": skin_id,

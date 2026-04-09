@@ -790,11 +790,39 @@ async def admin_rewarded_ads_summary(request: Request, hours: int = 24):
 
 
 @router.get("/api/admin/stars-skins/summary")
-async def admin_stars_skins_summary(request: Request, limit: int = 20):
+async def admin_stars_skins_summary(
+    request: Request, limit: int = 20, currency: str | None = None
+):
     try:
         await require_admin_access(request)
-        summary = await get_stars_skin_sales_admin_summary(limit=limit)
-        return {"success": True, **summary}
+        currency_filter = (currency or "").strip().upper() or None
+        summary = await get_stars_skin_sales_admin_summary(
+            limit=limit, currency=currency_filter
+        )
+        response = {"success": True, **summary}
+        if currency_filter == "TON":
+            total_nano = int(summary.get("total_stars") or 0)
+            response["total_ton_nano"] = total_nano
+            response["total_ton"] = float(total_nano) / float(TON_NANO)
+            response["by_skin"] = [
+                {
+                    **item,
+                    "amount_nano": int(item.get("stars_amount") or 0),
+                    "amount_ton": float(int(item.get("stars_amount") or 0))
+                    / float(TON_NANO),
+                }
+                for item in (summary.get("by_skin") or [])
+            ]
+            response["recent"] = [
+                {
+                    **item,
+                    "amount_nano": int(item.get("stars_amount") or 0),
+                    "amount_ton": float(int(item.get("stars_amount") or 0))
+                    / float(TON_NANO),
+                }
+                for item in (summary.get("recent") or [])
+            ]
+        return response
     except HTTPException:
         raise
     except Exception as e:
