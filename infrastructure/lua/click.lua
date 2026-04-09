@@ -90,28 +90,36 @@ if redis.call('EXISTS', user_hot_key) == 0 then
     )
 end
 
--- CRITICAL: Always update user_hot.boosts with canonical boosts from DB
--- This ensures every click uses fresh boost state, not stale cached boosts
-redis.call('HSET', user_hot_key,
-    'boosts', canonical_boosts_json,
-    'skin_multiplier', tostring(canonical_skin_multiplier)
+local hot_vals = redis.call(
+    'HMGET',
+    user_hot_key,
+    'coins',
+    'energy',
+    'last_energy_ts',
+    'tap_power',
+    'level',
+    'rebirth_count',
+    'click_streak',
+    'suspicion_score',
+    'version',
+    'flags'
 )
 
-local hot_coins = tonumber(redis.call('HGET', user_hot_key, 'coins') or '0')
-local hot_energy = tonumber(redis.call('HGET', user_hot_key, 'energy') or tostring(base_max_energy))
-local hot_last_energy_ts = tonumber(redis.call('HGET', user_hot_key, 'last_energy_ts') or tostring(now_ts))
-local hot_tap_power = tonumber(redis.call('HGET', user_hot_key, 'tap_power') or '1')
-local level = tonumber(redis.call('HGET', user_hot_key, 'level') or '0')
-local rebirth_count = tonumber(redis.call('HGET', user_hot_key, 'rebirth_count') or '0')
-local hot_click_streak = tonumber(redis.call('HGET', user_hot_key, 'click_streak') or '0')
-local hot_suspicion_score = tonumber(redis.call('HGET', user_hot_key, 'suspicion_score') or '0')
-local hot_version = tonumber(redis.call('HGET', user_hot_key, 'version') or tostring(hot_state_version_default))
+local hot_coins = tonumber(hot_vals[1] or '0')
+local hot_energy = tonumber(hot_vals[2] or tostring(base_max_energy))
+local hot_last_energy_ts = tonumber(hot_vals[3] or tostring(now_ts))
+local hot_tap_power = tonumber(hot_vals[4] or '1')
+local level = tonumber(hot_vals[5] or '0')
+local rebirth_count = tonumber(hot_vals[6] or '0')
+local hot_click_streak = tonumber(hot_vals[7] or '0')
+local hot_suspicion_score = tonumber(hot_vals[8] or '0')
+local hot_version = tonumber(hot_vals[9] or tostring(hot_state_version_default))
 local skin_multiplier = canonical_skin_multiplier
 
 -- Use canonical boosts from DB (passed via ARGV), not stale user_hot boosts
 local boosts = json_decode_or_empty(canonical_boosts_json)
 
-local flags = json_decode_or_empty(redis.call('HGET', user_hot_key, 'flags'))
+local flags = json_decode_or_empty(hot_vals[10])
 local click_guard = {}
 if type(flags['click_guard']) == 'table' then
     click_guard = flags['click_guard']
@@ -168,7 +176,16 @@ if task_tap_boost_active then
     coin_per_tap = coin_per_tap * task_tap_boost_multiplier
 end
 
-if redis.call('EXISTS', energy_key) == 0 then
+local energy_vals = redis.call(
+    'HMGET',
+    energy_key,
+    'value',
+    'updated_at',
+    'max_energy',
+    'click_updated_at'
+)
+
+if not energy_vals[1] or energy_vals[1] == false then
     redis.call('HSET', energy_key,
         'value', tostring(hot_energy),
         'updated_at', tostring(now_ts),
@@ -177,10 +194,10 @@ if redis.call('EXISTS', energy_key) == 0 then
     )
 end
 
-local stored_value = tonumber(redis.call('HGET', energy_key, 'value') or tostring(hot_energy))
-local stored_updated = tonumber(redis.call('HGET', energy_key, 'updated_at') or tostring(now_ts))
-local stored_max = tonumber(redis.call('HGET', energy_key, 'max_energy') or tostring(max_energy))
-local click_updated = tonumber(redis.call('HGET', energy_key, 'click_updated_at') or tostring(hot_last_energy_ts))
+local stored_value = tonumber(energy_vals[1] or tostring(hot_energy))
+local stored_updated = tonumber(energy_vals[2] or tostring(now_ts))
+local stored_max = tonumber(energy_vals[3] or tostring(max_energy))
+local click_updated = tonumber(energy_vals[4] or tostring(hot_last_energy_ts))
 
 if stored_max ~= max_energy then
     stored_max = max_energy
@@ -230,9 +247,7 @@ if free_energy_clicks ~= 1 then
     new_energy = math.max(0, current_energy - effective_clicks)
 end
 
-if redis.call('EXISTS', hot_key) == 0 then
-    redis.call('SET', hot_key, tostring(hot_coins))
-end
+redis.call('SETNX', hot_key, tostring(hot_coins))
 
 local new_coins = redis.call('INCRBY', hot_key, gained)
 redis.call('INCRBY', pending_key, gained)

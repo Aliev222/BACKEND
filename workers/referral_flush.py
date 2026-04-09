@@ -37,6 +37,9 @@ FLUSH_INTERVAL = 30  # seconds
 WORKER_NAME = "referral_flush"
 FLUSH_TIMEOUT_SECONDS = 25
 MAX_KEYS_PER_FLUSH = 1000  # Prevent OOM if too many pending keys
+RECOVERY_SCAN_INTERVAL = 60  # seconds
+
+_last_recovery_scan_ts = 0.0
 
 
 async def _ensure_flush_log_table():
@@ -137,30 +140,35 @@ async def flush_referral_pending(redis_conn: redis.Redis) -> int:
     if not moved_data:
         return 0
 
-    # Phase 3: Recovery scan — also process any leftover processing keys
-    recovery_keys = []
-    cursor = 0
-    while True:
-        cursor, keys = await redis_conn.scan(
-            cursor, match="referral_processing:*", count=500
-        )
-        for k in keys:
-            if k not in [md[0] for md in moved_data]:
-                recovery_keys.append(k)
-        if cursor == 0:
-            break
+    # Phase 3: Recovery scan — process leftover processing keys, throttled.
+    global _last_recovery_scan_ts
+    now_ts = time.time()
+    if (now_ts - _last_recovery_scan_ts) >= RECOVERY_SCAN_INTERVAL:
+        _last_recovery_scan_ts = now_ts
+        recovery_keys = []
+        cursor = 0
+        moved_key_set = {md[0] for md in moved_data}
+        while True:
+            cursor, keys = await redis_conn.scan(
+                cursor, match="referral_processing:*", count=500
+            )
+            for k in keys:
+                if k not in moved_key_set:
+                    recovery_keys.append(k)
+            if cursor == 0:
+                break
 
-    for proc_key in recovery_keys:
-        referrer_id = int(proc_key.split(":")[-1])
-        data = await redis_conn.hgetall(proc_key)
-        if data and data.get("coins") and data.get("batch_id"):
-            coins = int(data["coins"])
-            batch_id = data["batch_id"]
-            if coins > 0:
-                moved_data.append((proc_key, referrer_id, coins, batch_id))
+        for proc_key in recovery_keys:
+            referrer_id = int(proc_key.split(":")[-1])
+            data = await redis_conn.hgetall(proc_key)
+            if data and data.get("coins") and data.get("batch_id"):
+                coins = int(data["coins"])
+                batch_id = data["batch_id"]
+                if coins > 0:
+                    moved_data.append((proc_key, referrer_id, coins, batch_id))
 
-    if recovery_keys:
-        log_worker_recovery(WORKER_NAME, len(recovery_keys))
+        if recovery_keys:
+            log_worker_recovery(WORKER_NAME, len(recovery_keys))
 
     # Phase 4: PROCESS (DB) — each batch in its own transaction
     flushed = 0
@@ -286,17 +294,10 @@ async def referral_flush_loop():
                 flushed=flushed,
             )
 
-            # Count pending keys for lag visibility
+            # Count pending users in queue for lag visibility (cheap O(1))
             pending_count = 0
             try:
-                cursor = 0
-                while True:
-                    cursor, keys = await redis_conn.scan(
-                        cursor, match="referral_pending:*", count=500
-                    )
-                    pending_count += len(keys)
-                    if cursor == 0:
-                        break
+                pending_count = int(await redis_conn.zcard("referral_pending_queue") or 0)
             except Exception:
                 pass
 

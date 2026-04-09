@@ -47,6 +47,11 @@ FLUSH_INTERVAL = 30  # seconds
 WORKER_NAME = "coins_flush"
 FLUSH_TIMEOUT_SECONDS = 25
 MAX_KEYS_PER_FLUSH = 1000  # Prevent OOM if too many pending keys
+LEGACY_PENDING_SCAN_INTERVAL = 300  # seconds
+RECOVERY_SCAN_INTERVAL = 60  # seconds
+
+_last_legacy_pending_scan_ts = 0.0
+_last_recovery_scan_ts = 0.0
 
 
 async def _ensure_flush_log_table():
@@ -82,11 +87,18 @@ async def flush_coins_to_db(redis_conn: redis.Redis) -> int:
         "coins_pending_queue", 0, MAX_KEYS_PER_FLUSH - 1
     )
 
+    global _last_legacy_pending_scan_ts, _last_recovery_scan_ts
+    now_ts = time.time()
+
     # Phase 1b: Migration fallback - check for legacy pending keys without queue
     # This handles keys created before ZSET queue was deployed
     legacy_pending_keys = []
-    if len(pending_user_ids) < MAX_KEYS_PER_FLUSH // 2:
+    if (
+        len(pending_user_ids) < MAX_KEYS_PER_FLUSH // 2
+        and (now_ts - _last_legacy_pending_scan_ts) >= LEGACY_PENDING_SCAN_INTERVAL
+    ):
         # Only scan if queue is not full (avoid double work)
+        _last_legacy_pending_scan_ts = now_ts
         cursor = 0
         scan_limit = 100  # Limit legacy scan
         while True:
@@ -173,29 +185,32 @@ async def flush_coins_to_db(redis_conn: redis.Redis) -> int:
     if not moved_data:
         return 0
 
-    # Phase 3: Recovery scan — process any leftover flushing keys
-    flushing_keys = []
-    cursor = 0
-    while True:
-        cursor, keys = await redis_conn.scan(
-            cursor, match="coins_flushing:*", count=500
-        )
-        for k in keys:
-            if k not in [md[0] for md in moved_data]:
-                flushing_keys.append(k)
-        if cursor == 0:
-            break
+    # Phase 3: Recovery scan — process leftover flushing keys, throttled.
+    if (now_ts - _last_recovery_scan_ts) >= RECOVERY_SCAN_INTERVAL:
+        _last_recovery_scan_ts = now_ts
+        flushing_keys = []
+        cursor = 0
+        moved_key_set = {md[0] for md in moved_data}
+        while True:
+            cursor, keys = await redis_conn.scan(
+                cursor, match="coins_flushing:*", count=500
+            )
+            for k in keys:
+                if k not in moved_key_set:
+                    flushing_keys.append(k)
+            if cursor == 0:
+                break
 
-    for flush_key in flushing_keys:
-        parts = flush_key.split(":")
-        user_id = int(parts[2])
-        batch_id = ":".join(parts[3:]) if len(parts) > 3 else f"{user_id}:recovery"
-        delta = await redis_conn.get(flush_key)
-        if delta and int(delta) > 0:
-            moved_data.append((flush_key, user_id, int(delta), batch_id))
+        for flush_key in flushing_keys:
+            parts = flush_key.split(":")
+            user_id = int(parts[2])
+            batch_id = ":".join(parts[3:]) if len(parts) > 3 else f"{user_id}:recovery"
+            delta = await redis_conn.get(flush_key)
+            if delta and int(delta) > 0:
+                moved_data.append((flush_key, user_id, int(delta), batch_id))
 
-    if flushing_keys:
-        log_worker_recovery(WORKER_NAME, len(flushing_keys))
+        if flushing_keys:
+            log_worker_recovery(WORKER_NAME, len(flushing_keys))
 
     # Phase 4: PROCESS (DB) — each batch in its own transaction
     flushed = 0
@@ -389,17 +404,10 @@ async def coins_flush_loop():
 
             loop_ms = (time.monotonic() - loop_start) * 1000
 
-            # Count pending keys for lag visibility
+            # Count pending users in queue for lag visibility (cheap O(1))
             pending_count = 0
             try:
-                cursor = 0
-                while True:
-                    cursor, keys = await redis_conn.scan(
-                        cursor, match="coins_pending:*", count=500
-                    )
-                    pending_count += len(keys)
-                    if cursor == 0:
-                        break
+                pending_count = int(await redis_conn.zcard("coins_pending_queue") or 0)
             except Exception:
                 pass
 
