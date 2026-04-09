@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import time
 from dataclasses import dataclass
@@ -149,7 +149,10 @@ async def process_rebirth_service(payload: Any, request: Any, deps: RebirthServi
 
         next_level = 0
         next_tap_power = get_tap(next_level, next_rebirth_count)
-        next_profit_per_hour = get_profit_per_hour(next_level)
+        current_profit_per_hour = int(user.get("profit_per_hour", 0) or 0)
+        base_next_profit_per_hour = get_profit_per_hour(next_level)
+        # Keep passive income on rebirth; never downgrade hourly value.
+        next_profit_per_hour = max(current_profit_per_hour, base_next_profit_per_hour)
         next_max_energy = get_max_energy(next_level)
         next_energy = min(int(user.get("energy", 0) or 0), next_max_energy)
 

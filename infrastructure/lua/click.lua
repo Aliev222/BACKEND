@@ -1,4 +1,4 @@
-local user_rl_key = KEYS[1]
+﻿local user_rl_key = KEYS[1]
 local ip_rl_key = KEYS[2]
 local idem_key = KEYS[3]
 local energy_key = KEYS[4]
@@ -102,7 +102,8 @@ local hot_vals = redis.call(
     'click_streak',
     'suspicion_score',
     'version',
-    'flags'
+    'flags',
+    'profit_per_hour'
 )
 
 local hot_coins = tonumber(hot_vals[1] or '0')
@@ -114,6 +115,7 @@ local rebirth_count = tonumber(hot_vals[6] or '0')
 local hot_click_streak = tonumber(hot_vals[7] or '0')
 local hot_suspicion_score = tonumber(hot_vals[8] or '0')
 local hot_version = tonumber(hot_vals[9] or tostring(hot_state_version_default))
+local hot_profit_per_hour = tonumber(hot_vals[11] or '0')
 local skin_multiplier = canonical_skin_multiplier
 
 -- Use canonical boosts from DB (passed via ARGV), not stale user_hot boosts
@@ -141,11 +143,15 @@ if computed_regen_seconds <= 0 then
     computed_regen_seconds = 1
 end
 local rebirth_bonus_per_level = 1 + math.max(0, rebirth_count)
-local tap_value = 1 + (level * rebirth_bonus_per_level)
+local tap_value = 1 + math.max(0, rebirth_count) + (level * rebirth_bonus_per_level)
 if tap_value <= 0 then
     tap_value = hot_tap_power
 end
-local profit_per_hour = 100 + (level * 35) + math.floor((1241 * level * level) / 25)
+local computed_profit_per_hour = 100 + (level * 35) + math.floor((1241 * level * level) / 25)
+local profit_per_hour = computed_profit_per_hour
+if hot_profit_per_hour > profit_per_hour then
+    profit_per_hour = hot_profit_per_hour
+end
 
 local mega_boost_active = boosts['mega_boost_active'] == true
 local ghost_boost_active = boosts['ghost_boost_active'] == true

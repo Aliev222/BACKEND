@@ -63,7 +63,8 @@ def get_tap_value(level: int) -> int:
 def get_tap(level: int, rebirth_count: int) -> int:
     lvl = max(0, int(level))
     rebirths = max(0, int(rebirth_count))
-    return 1 + (lvl * (1 + rebirths))
+    # Rebirth gives a permanent +1 base tap per rebirth plus per-level scaling.
+    return 1 + rebirths + (lvl * (1 + rebirths))
 
 
 def get_tap_value_with_rebirth(level: int, rebirth_count: int) -> int:

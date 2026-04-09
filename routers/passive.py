@@ -1,4 +1,4 @@
-"""
+﻿"""
 Passive income and autoclicker routes extracted from legacy.py (Patch 7.3).
 """
 import time
@@ -76,9 +76,11 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
             extra, "passive_boost"
         )
 
-        # Always compute from current progression level so economy tuning changes
-        # apply immediately even for old DB rows with stale profit_per_hour values.
-        base_hour_value = int(get_profit_per_hour(resolve_progression_level(user)))
+        # Use stored hourly value as source of truth (rebirth keeps passive income).
+        # Fallback to computed value only if DB value is empty/invalid.
+        base_hour_value = int(user.get("profit_per_hour", 0) or 0)
+        if base_hour_value <= 0:
+            base_hour_value = int(get_profit_per_hour(resolve_progression_level(user)))
 
         hour_value = (
             base_hour_value * max(1, passive_boost_multiplier)

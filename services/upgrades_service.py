@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+﻿from dataclasses import dataclass
 from datetime import datetime
 import time
 import uuid
@@ -167,7 +167,10 @@ async def apply_global_upgrade_for_user_service(
     new_values = calc_upgrade_value(new_level)
     rebirth_count = max(0, int(user.get("rebirth_count", 0)))
     new_profit_per_tap = get_tap(new_level, rebirth_count)
-    new_profit_per_hour = get_profit_per_hour(new_level)
+    current_profit_per_hour = int(user.get("profit_per_hour", 0) or 0)
+    computed_profit_per_hour = get_profit_per_hour(new_level)
+    # Keep monotonic progression for hourly profit (never decrease after rebirth).
+    new_profit_per_hour = max(current_profit_per_hour, computed_profit_per_hour)
     new_max_energy = get_max_energy(new_level)
     new_coins = current_coins - price
 
