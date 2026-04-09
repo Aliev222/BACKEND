@@ -108,10 +108,17 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://spirix.vercel.app",
+        "https://websitecard.vercel.app",
         "https://web.telegram.org",
+        "https://telegram.org",
         "http://localhost:3000",
         "http://localhost:8080",
+        "http://localhost:5174",
+        "http://127.0.0.1:8080",
+        "http://127.0.0.1:5174",
     ],
+    # Allow Vercel deployments for admin/frontend previews.
+    allow_origin_regex=r"^https://[a-zA-Z0-9-]+\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
