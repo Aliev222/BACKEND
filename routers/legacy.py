@@ -1551,7 +1551,13 @@ async def build_admin_fraud_overview(season_key: str) -> list[dict]:
             reasons.append(
                 f"Suspicious click batches detected (score {click_suspicion_score})"
             )
-        if hard_rejections > 0:
+        last_rejection_at = parse_iso_datetime(click_guard.get("last_rejection_at"))
+        recent_hard_rejection = (
+            hard_rejections > 0
+            and last_rejection_at is not None
+            and (now - last_rejection_at).total_seconds() <= 24 * 3600
+        )
+        if recent_hard_rejection:
             reasons.append(
                 f"Server rejected suspicious click bursts ({hard_rejections})"
             )
