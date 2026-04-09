@@ -11,6 +11,7 @@ Safety:
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 import redis.asyncio as redis
@@ -43,10 +44,18 @@ from workers.worker_health import (
 
 logger = logging.getLogger(__name__)
 
-FLUSH_INTERVAL = 60  # seconds
+FLUSH_INTERVAL = int(os.getenv("TOURNAMENT_FLUSH_INTERVAL_SECONDS", "180"))
 LEADERBOARD_LIMIT = 1000
 WORKER_NAME = "tournament_flush"
 FLUSH_TIMEOUT_SECONDS = 50
+LOCK_TTL_SECONDS = int(
+    os.getenv(
+        "TOURNAMENT_FLUSH_LOCK_TTL_SECONDS", str(max(FLUSH_TIMEOUT_SECONDS + 10, 65))
+    )
+)
+IDLE_BACKOFF_MAX_INTERVAL = int(
+    os.getenv("TOURNAMENT_FLUSH_IDLE_MAX_INTERVAL_SECONDS", "600")
+)
 
 
 async def _ensure_flush_log_table():
@@ -223,12 +232,32 @@ async def tournament_flush_loop():
 
         await worker_heartbeat_init(redis_conn, WORKER_NAME)
 
+        instance_id = uuid.uuid4().hex[:8]
+        empty_streak = 0
         while True:
             loop_start = time.monotonic()
             error = None
             flushed = 0
+            pending_count = 0
+            sleep_seconds = FLUSH_INTERVAL
+            lock_key = f"worker:lock:{WORKER_NAME}"
+            got_lock = False
 
             try:
+                got_lock = bool(
+                    await redis_conn.set(
+                        lock_key, instance_id, ex=LOCK_TTL_SECONDS, nx=True
+                    )
+                )
+                if not got_lock:
+                    empty_streak = min(empty_streak + 1, 6)
+                    sleep_seconds = min(
+                        IDLE_BACKOFF_MAX_INTERVAL,
+                        FLUSH_INTERVAL * (2 ** min(empty_streak, 4)),
+                    )
+                    await asyncio.sleep(sleep_seconds)
+                    continue
+
                 flushed = await asyncio.wait_for(
                     flush_tournament_to_db(redis_conn), timeout=FLUSH_TIMEOUT_SECONDS
                 )
@@ -254,7 +283,6 @@ async def tournament_flush_loop():
             )
 
             # Leaderboard size for lag visibility
-            pending_count = 0
             try:
                 pending_count = await redis_conn.zcard(TOURNAMENT_KEY)
             except Exception:
@@ -275,7 +303,33 @@ async def tournament_flush_loop():
                 error=error,
             )
 
-            await asyncio.sleep(FLUSH_INTERVAL)
+            if flushed > 0 or pending_count > 0:
+                empty_streak = 0
+                sleep_seconds = FLUSH_INTERVAL
+            else:
+                empty_streak = min(empty_streak + 1, 6)
+                sleep_seconds = min(
+                    IDLE_BACKOFF_MAX_INTERVAL,
+                    FLUSH_INTERVAL * (2 ** min(empty_streak, 4)),
+                )
+
+            if got_lock:
+                try:
+                    await redis_conn.eval(
+                        """
+                        if redis.call('GET', KEYS[1]) == ARGV[1] then
+                            return redis.call('DEL', KEYS[1])
+                        end
+                        return 0
+                        """,
+                        1,
+                        lock_key,
+                        instance_id,
+                    )
+                except Exception:
+                    pass
+
+            await asyncio.sleep(sleep_seconds)
 
     except asyncio.CancelledError:
         if redis_conn:
