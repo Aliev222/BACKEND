@@ -18,15 +18,18 @@ import redis.asyncio as redis
 from DATABASE.base import (
     AsyncSessionLocal,
     WeeklyTournamentEntry,
+    User,
     get_weekly_tournament_season_key,
     get_weekly_tournament_season_window,
+    get_weekly_tournament_league,
     ensure_weekly_tournament_season,
 )
 from core.game_config import TOURNAMENT_KEY
+from core.game_logic import resolve_progression_level
 from infrastructure.redis import init_redis, close_redis
 from observability.metrics import observe_worker_loop
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy import text
+from sqlalchemy import text, select
 from datetime import datetime
 from workers.worker_health import (
     worker_heartbeat,
@@ -115,6 +118,23 @@ async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
             )
             return 0
 
+        user_ids = []
+        for entry_data in entries:
+            if isinstance(entry_data, tuple):
+                user_id_str, _ = entry_data
+                try:
+                    user_ids.append(int(user_id_str))
+                except Exception:
+                    continue
+
+        users_by_id = {}
+        if user_ids:
+            users_result = await session.execute(
+                select(User).where(User.user_id.in_(user_ids))
+            )
+            for user_row in users_result.scalars().all():
+                users_by_id[int(user_row.user_id)] = user_row
+
         # Phase 2: Upsert entries (only if log insert succeeded)
         # UPSERT with absolute score ensures repeated processing is safe
         flushed = 0
@@ -130,12 +150,30 @@ async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
             if score <= 0:
                 continue
 
+            user_row = users_by_id.get(user_id)
+            if user_row is not None:
+                user_payload = {
+                    "level": int(getattr(user_row, "level", 0) or 0),
+                    "multitap_level": int(
+                        getattr(user_row, "multitap_level", 0) or 0
+                    ),
+                    "profit_level": int(getattr(user_row, "profit_level", 0) or 0),
+                    "energy_level": int(getattr(user_row, "energy_level", 0) or 0),
+                }
+                display_level = max(1, int(resolve_progression_level(user_payload)) + 1)
+                league = get_weekly_tournament_league(display_level)
+                username = getattr(user_row, "username", None)
+            else:
+                display_level = 1
+                league = "bronze"
+                username = None
+
             insert_stmt = pg_insert(WeeklyTournamentEntry).values(
                 season_key=season_key,
                 user_id=user_id,
-                username=None,
-                display_level=1,
-                league="bronze",
+                username=username,
+                display_level=display_level,
+                league=league,
                 score=score,
                 eligible_for_payout=True,
                 fraud_flag=False,
@@ -151,6 +189,9 @@ async def flush_tournament_to_db(redis_conn: redis.Redis) -> int:
                 ],
                 set_={
                     "score": score,  # Absolute value, not += delta
+                    "username": insert_stmt.excluded.username,
+                    "display_level": insert_stmt.excluded.display_level,
+                    "league": insert_stmt.excluded.league,
                     "updated_at": now,
                 },
             )
