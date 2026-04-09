@@ -1,13 +1,6 @@
 import logging
-import httpx
-from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
-
-from DATABASE.base import User
-from repositories.user_repo import get_user_by_id, update_user_atomic
-from core.stars_skins import get_stars_skin_price
-from core.config import BOT_TOKEN
 
 logger = logging.getLogger(__name__)
 
@@ -113,39 +106,6 @@ async def select_skin(
         "selected_skin": skin_id,
         "multiplier": SKIN_MULTIPLIERS.get(skin_id, 1.0),
     }
-
-
-async def create_stars_invoice(
-    user_id: int,
-    skin_id: str,
-) -> str:
-    if not BOT_TOKEN:
-        raise HTTPException(status_code=500, detail="Bot token not configured")
-
-    price = get_stars_skin_price(skin_id)
-    payload = f"stars_skin:{user_id}:{skin_id}"
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink",
-            json={
-                "title": f"Skin {skin_id}",
-                "description": f"Unlock premium skin {skin_id}",
-                "payload": payload,
-                "currency": "XTR",
-                "prices": [{"label": skin_id, "amount": price}],
-                "provider_token": "",
-            },
-        )
-
-    if response.status_code != 200:
-        raise HTTPException(status_code=502, detail="Invoice creation failed")
-
-    data = response.json()
-    if not data.get("ok") or not data.get("result"):
-        raise HTTPException(status_code=502, detail="Invoice creation failed")
-
-    return data["result"]
 
 
 async def unlock_skin_by_level(

@@ -7,7 +7,6 @@ from repositories.user_repo import get_user_by_id
 from services.skin_service import (
     get_owned_skins,
     select_skin,
-    create_stars_invoice,
     unlock_skin_by_level,
     SKIN_MULTIPLIERS,
 )
@@ -67,18 +66,6 @@ async def select_skin_endpoint(request: Request):
         await session.commit()
 
     return result
-
-
-@router.post("/skins/stars-invoice")
-async def create_invoice(request: Request):
-    telegram_user = await require_telegram_user(request)
-    user_id = int(telegram_user.get("id", 0))
-
-    body = await request.json()
-    skin_id = body.get("skin_id", "")
-
-    invoice_url = await create_stars_invoice(user_id, skin_id)
-    return {"success": True, "invoice_url": invoice_url}
 
 
 @router.post("/skins/unlock-level")

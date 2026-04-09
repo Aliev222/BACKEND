@@ -1,20 +1,18 @@
-import json
 import logging
 import os
 import asyncio
 
 import redis.asyncio as redis
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
 from CONFIG.settings import BOT_TOKEN
-from DATABASE.base import add_user, get_user, init_db, record_stars_skin_purchase, update_user
+from DATABASE.base import add_user, get_user, init_db
 from core.game_config import USER_CACHE_PREFIX
 from core.reengagement import reengagement_loop
-from core.stars_skins import get_stars_skin_price
 from infrastructure.redis import get_redis_or_none
 
 logging.basicConfig(level=logging.INFO)
@@ -88,88 +86,11 @@ async def cmd_start(message: types.Message) -> None:
 
 @dp.pre_checkout_query()
 async def handle_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery) -> None:
-    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-
-
-@dp.message(F.successful_payment)
-async def handle_successful_payment(message: types.Message) -> None:
-    payment = message.successful_payment
-    payload = payment.invoice_payload or ""
-    parts = payload.split(":", 2)
-
-    if len(parts) != 3 or parts[0] != "stars_skin":
-        logger.warning("Unknown payment payload: %s", payload)
-        return
-
-    try:
-        target_user_id = int(parts[1])
-    except ValueError:
-        logger.warning("Invalid Stars payload user id: %s", payload)
-        return
-
-    skin_id = parts[2]
-    expected_price = get_stars_skin_price(skin_id)
-    if expected_price is None:
-        logger.warning("Payment received for unknown Stars skin: %s", skin_id)
-        return
-
-    if payment.currency != "XTR":
-        logger.warning("Unexpected payment currency for %s: %s", skin_id, payment.currency)
-        return
-
-    if payment.total_amount != expected_price:
-        logger.warning(
-            "Unexpected payment amount for %s: got %s expected %s",
-            skin_id,
-            payment.total_amount,
-            expected_price,
-        )
-        return
-
-    if message.from_user.id != target_user_id:
-        logger.warning(
-            "Payment user mismatch: message=%s payload=%s skin=%s",
-            message.from_user.id,
-            target_user_id,
-            skin_id,
-        )
-        return
-
-    user = await get_user(target_user_id)
-    if not user:
-        await add_user(target_user_id, message.from_user.username or f"user_{target_user_id}")
-        user = await get_user(target_user_id)
-    if not user:
-        logger.error("Failed to load user after successful payment: %s", target_user_id)
-        return
-
-    extra = user.get("extra_data", {}) or {}
-    if isinstance(extra, str):
-        try:
-            extra = json.loads(extra)
-        except Exception:
-            extra = {}
-
-    owned_skins = list(extra.get("owned_skins", ["default.pngSP"]))
-    if skin_id not in owned_skins:
-        owned_skins.append(skin_id)
-        extra["owned_skins"] = owned_skins
-        await update_user(target_user_id, {"extra_data": extra})
-        await invalidate_user_cache(target_user_id)
-        logger.info("Granted Stars skin %s to user %s", skin_id, target_user_id)
-    else:
-        logger.info("Stars skin %s already owned by user %s", skin_id, target_user_id)
-
-    await record_stars_skin_purchase(
-        user_id=target_user_id,
-        username=message.from_user.username,
-        skin_id=skin_id,
-        stars_amount=payment.total_amount,
-        currency=payment.currency,
-        telegram_charge_id=getattr(payment, "telegram_payment_charge_id", None),
+    await bot.answer_pre_checkout_query(
+        pre_checkout_query.id,
+        ok=False,
+        error_message="In-app payments are disabled. Use TON purchase in app.",
     )
-
-    await message.answer(f"Skin {skin_id} unlocked.")
 
 
 async def on_startup(bot_instance: Bot) -> None:

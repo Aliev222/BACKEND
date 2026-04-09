@@ -147,7 +147,6 @@ from core.realtime_state import (
     get_all_boost_states,
 )
 from core.telegram_auth import verify_telegram_init_data
-from core.stars_skins import get_stars_skin_price
 from CONFIG.settings import BOT_TOKEN
 from infrastructure.coins_hot_sync import (
     sync_hot_after_db_increment,
@@ -265,6 +264,16 @@ ENABLE_K6_FRAUD_HEURISTICS = (
 DAILY_REWARD_BASE_COINS = 500
 DAILY_REWARD_INFINITE_ENERGY_MINUTES = 10
 DAILY_REWARD_SKIN_ID = "retro.pngSP"
+TON_PAID_SKIN_IDS = {
+    "stars1.pngSP",
+    "stars2.pngSP",
+    "stars3.pngSP",
+    "stars4.pngSP",
+    "stars5.pngSP",
+    "stars6.pngSP",
+    "stars7.pngSP",
+    "stars8.pngSP",
+}
 MEGA_BOOST_MINUTES = 1
 MEGA_BOOST_COOLDOWN_MIN_MINUTES = 10
 MEGA_BOOST_COOLDOWN_MAX_MINUTES = 10
@@ -867,6 +876,10 @@ async def find_unused_ton_skin_payment_tx_hash(
     return None
 
 
+def is_ton_paid_skin(skin_id: str) -> bool:
+    return (skin_id or "").strip() in TON_PAID_SKIN_IDS
+
+
 def _parse_bool_env(name: str, default: bool = False) -> bool:
     raw = (os.getenv(name, "1" if default else "0") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
@@ -1109,38 +1122,6 @@ async def get_telegram_avatar_proxy(user_id: int):
             media_type="image/svg+xml",
             headers={"Cache-Control": "public, max-age=600"},
         )
-
-
-async def create_telegram_stars_invoice_link(
-    *, user_id: int, skin_id: str, price: int
-) -> str:
-    if not BOT_TOKEN:
-        raise HTTPException(status_code=500, detail="Bot token not configured")
-
-    payload = f"stars_skin:{user_id}:{skin_id}"
-    request_body = {
-        "title": f"Skin {skin_id}",
-        "description": f"Unlock premium skin {skin_id}",
-        "payload": payload,
-        "currency": "XTR",
-        "prices": [{"label": skin_id, "amount": price}],
-        "provider_token": "",
-    }
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink",
-            json=request_body,
-        )
-
-    if response.status_code != 200:
-        raise HTTPException(status_code=502, detail="Telegram invoice creation failed")
-
-    data = response.json()
-    if not data.get("ok") or not data.get("result"):
-        raise HTTPException(status_code=502, detail="Telegram invoice creation failed")
-
-    return data["result"]
 
 
 async def verify_telegram_channel_subscription(user_id: int) -> bool:
@@ -3200,55 +3181,13 @@ async def get_weekly_tournament_results_endpoint(
     )
 
 
-@router.post("/api/skins/stars-invoice")
-async def create_skin_stars_invoice(payload: SkinRequest, request: Request):
-    try:
-        await require_telegram_user(request, payload.user_id)
-        await require_user_action_lock("stars_skin_invoice", payload.user_id, ttl=3)
-
-        price = get_stars_skin_price(payload.skin_id)
-        if price is None:
-            raise HTTPException(status_code=400, detail="Skin is not sold for Stars")
-
-        user = await get_user_cached(payload.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        extra = user.get("extra_data", {}) or {}
-        if isinstance(extra, str):
-            try:
-                extra = json.loads(extra)
-            except Exception:
-                extra = {}
-
-        owned_skins = extra.get("owned_skins", [DEFAULT_SKIN_ID])
-        if payload.skin_id in owned_skins:
-            raise HTTPException(status_code=400, detail="Skin already owned")
-
-        invoice_link = await create_telegram_stars_invoice_link(
-            user_id=payload.user_id, skin_id=payload.skin_id, price=price
-        )
-
-        return {
-            "success": True,
-            "invoice_link": invoice_link,
-            "price": price,
-            "skin_id": payload.skin_id,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error creating Stars invoice: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
 @router.post("/api/skins/ton-invoice")
 async def create_skin_ton_invoice(payload: SkinRequest, request: Request):
     try:
         await require_telegram_user(request, payload.user_id)
         await require_user_action_lock("ton_skin_invoice", payload.user_id, ttl=3)
 
-        if get_stars_skin_price(payload.skin_id) is None:
+        if not is_ton_paid_skin(payload.skin_id):
             raise HTTPException(status_code=400, detail="Skin is not sold for TON")
         if not is_valid_ton_wallet_address(TON_SKIN_SELLER_WALLET):
             raise HTTPException(status_code=503, detail="TON seller wallet is not configured")
@@ -3302,7 +3241,7 @@ async def confirm_skin_ton_purchase(payload: SkinRequest, request: Request):
         await require_telegram_user(request, payload.user_id)
         await require_user_action_lock("ton_skin_confirm", payload.user_id, ttl=5)
 
-        if get_stars_skin_price(payload.skin_id) is None:
+        if not is_ton_paid_skin(payload.skin_id):
             raise HTTPException(status_code=400, detail="Skin is not sold for TON")
         if not is_valid_ton_wallet_address(TON_SKIN_SELLER_WALLET):
             raise HTTPException(status_code=503, detail="TON seller wallet is not configured")
