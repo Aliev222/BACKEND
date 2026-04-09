@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 
 # Sync marker for VS Code source control
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, RedirectResponse
 import asyncio
 import base64
 import random
@@ -344,6 +344,11 @@ TON_PROOF_ALLOWED_DOMAINS = tuple(
     for item in (os.getenv("TON_PROOF_ALLOWED_DOMAINS", "") or "").split(",")
     if item.strip()
 )
+DEFAULT_AVATAR_PATH = "/imgg/default_avatar.png"
+AVATAR_META_CACHE_TTL_SECONDS = 3600
+AVATAR_BYTES_CACHE_TTL_SECONDS = 900
+AVATAR_META_CACHE: dict[int, dict] = {}
+AVATAR_BYTES_CACHE: dict[str, dict] = {}
 
 
 def is_valid_ton_wallet_address(value: str) -> bool:
@@ -897,6 +902,97 @@ async def get_online_users_count() -> int:
     except Exception as e:
         logger.warning(f"Online count fetch failed: {e}")
         return 0
+
+
+async def _resolve_telegram_avatar_file_path(user_id: int) -> str | None:
+    if not BOT_TOKEN:
+        return None
+
+    now_ts = time.time()
+    cached = AVATAR_META_CACHE.get(int(user_id))
+    if cached and float(cached.get("expires_at", 0) or 0) > now_ts:
+        return cached.get("file_path")
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            photos_resp = await client.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getUserProfilePhotos",
+                params={"user_id": int(user_id), "limit": 1},
+            )
+            photos_payload = (
+                photos_resp.json() if photos_resp.status_code == 200 else {}
+            )
+            photos = (photos_payload.get("result") or {}).get("photos") or []
+            if not photos:
+                AVATAR_META_CACHE[int(user_id)] = {
+                    "file_path": None,
+                    "expires_at": now_ts + 600,
+                }
+                return None
+
+            # Telegram returns array of sizes; last one is the biggest.
+            best = photos[0][-1] if photos and photos[0] else {}
+            file_id = best.get("file_id")
+            if not file_id:
+                AVATAR_META_CACHE[int(user_id)] = {
+                    "file_path": None,
+                    "expires_at": now_ts + 600,
+                }
+                return None
+
+            file_resp = await client.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                params={"file_id": file_id},
+            )
+            file_payload = file_resp.json() if file_resp.status_code == 200 else {}
+            file_path = (file_payload.get("result") or {}).get("file_path")
+            AVATAR_META_CACHE[int(user_id)] = {
+                "file_path": file_path,
+                "expires_at": now_ts + AVATAR_META_CACHE_TTL_SECONDS,
+            }
+            return file_path
+    except Exception as exc:
+        logger.debug("Avatar resolve failed for user %s: %s", user_id, exc)
+        return None
+
+
+@router.get("/api/avatar/{user_id}")
+async def get_telegram_avatar_proxy(user_id: int):
+    file_path = await _resolve_telegram_avatar_file_path(user_id)
+    if not file_path:
+        return RedirectResponse(url=DEFAULT_AVATAR_PATH, status_code=307)
+
+    now_ts = time.time()
+    bytes_cached = AVATAR_BYTES_CACHE.get(file_path)
+    if bytes_cached and float(bytes_cached.get("expires_at", 0) or 0) > now_ts:
+        return Response(
+            content=bytes_cached.get("content") or b"",
+            media_type=bytes_cached.get("content_type") or "image/jpeg",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            image_resp = await client.get(
+                f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+            )
+        if image_resp.status_code != 200 or not image_resp.content:
+            return RedirectResponse(url=DEFAULT_AVATAR_PATH, status_code=307)
+
+        content_type = image_resp.headers.get("content-type") or "image/jpeg"
+        AVATAR_BYTES_CACHE[file_path] = {
+            "content": image_resp.content,
+            "content_type": content_type,
+            "expires_at": now_ts + AVATAR_BYTES_CACHE_TTL_SECONDS,
+        }
+        return Response(
+            content=image_resp.content,
+            media_type=content_type,
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+    except Exception as exc:
+        logger.debug("Avatar fetch failed for user %s: %s", user_id, exc)
+        return RedirectResponse(url=DEFAULT_AVATAR_PATH, status_code=307)
 
 
 async def create_telegram_stars_invoice_link(
