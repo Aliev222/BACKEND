@@ -18,6 +18,7 @@ import struct
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from sqlalchemy import select, func, update, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from DATABASE.base import (
     User,
@@ -55,6 +56,7 @@ from DATABASE.base import (
     ensure_weekly_tournament_season,
     get_rewarded_ads_admin_summary,
     get_stars_skin_sales_admin_summary,
+    record_stars_skin_purchase,
     get_admin_fraud_reviews,
     upsert_admin_fraud_review,
     record_rewarded_ad_claim,
@@ -220,6 +222,13 @@ REFERRAL_SHARE_RATE = 0.05
 
 REFERRAL_DAILY_SHARE_LIMIT = 50000
 REFERRAL_SPECIAL_SKIN_ID = "refferal.pngSP"
+TON_SKIN_SELLER_WALLET = (os.getenv("TON_SKIN_SELLER_WALLET", "") or "").strip()
+TON_SKIN_PRICE_NANO = max(
+    1, int((os.getenv("TON_SKIN_PRICE_NANO", str(1_000_000_000)) or "1000000000").strip())
+)
+TON_SKIN_CONFIRM_LOOKBACK_SECONDS = max(
+    300, int((os.getenv("TON_SKIN_CONFIRM_LOOKBACK_SECONDS", "86400") or "86400").strip())
+)
 TELEGRAM_VERIFY_CHANNEL = os.getenv("TELEGRAM_VERIFY_CHANNEL", "@Spirit_cliker")
 TELEGRAM_MEMBER_STATUSES = {"member", "administrator", "creator", "restricted"}
 TELEGRAM_BOT_USERNAME = (
@@ -776,6 +785,86 @@ def ton_wallets_equal(left: str | None, right: str | None) -> bool:
     return bool(
         left_variants and right_variants and left_variants.intersection(right_variants)
     )
+
+
+async def fetch_ton_transactions_for_account(
+    account: str, start_utime: int, limit: int = 200
+) -> list[dict]:
+    account = (account or "").strip()
+    if not account:
+        return []
+    params: list[tuple[str, str]] = [
+        ("limit", str(max(1, min(500, int(limit or 200))))),
+        ("sort", "desc"),
+        ("start_utime", str(max(0, int(start_utime or 0)))),
+        ("account", account),
+    ]
+    headers = {}
+    if TON_VERIFIER_API_KEY:
+        headers["X-API-Key"] = TON_VERIFIER_API_KEY
+    async with httpx.AsyncClient(timeout=TON_VERIFIER_TIMEOUT_SECONDS) as client:
+        response = await client.get(
+            f"{TON_VERIFIER_API_BASE}/transactions",
+            params=params,
+            headers=headers,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    if isinstance(payload, dict):
+        if isinstance(payload.get("transactions"), list):
+            return payload["transactions"]
+        if isinstance(payload.get("result"), list):
+            return payload["result"]
+    return []
+
+
+async def find_unused_ton_skin_payment_tx_hash(
+    *,
+    buyer_wallet_address: str,
+    seller_wallet_address: str,
+    required_amount_nano: int,
+    lookback_seconds: int,
+) -> str | None:
+    start_utime = int(time.time()) - max(60, int(lookback_seconds or 0))
+    transactions = await fetch_ton_transactions_for_account(
+        seller_wallet_address,
+        start_utime=start_utime,
+        limit=300,
+    )
+    candidate_hashes: list[str] = []
+    for tx in transactions:
+        in_msg = tx.get("in_msg") or {}
+        source = str(in_msg.get("source") or "")
+        destination = str(in_msg.get("destination") or tx.get("account") or "")
+        value = int(in_msg.get("value") or 0)
+        tx_hash = str(tx.get("hash") or in_msg.get("hash") or tx.get("trace_id") or "").strip()
+        aborted = bool((tx.get("description") or {}).get("aborted"))
+        if aborted or not tx_hash:
+            continue
+        if value != int(required_amount_nano):
+            continue
+        if not ton_wallets_equal(source, buyer_wallet_address):
+            continue
+        if destination and not ton_wallets_equal(destination, seller_wallet_address):
+            continue
+        candidate_hashes.append(tx_hash)
+
+    if not candidate_hashes:
+        return None
+
+    async with AsyncSessionLocal() as session:
+        used_result = await session.execute(
+            select(StarsSkinPurchase.telegram_charge_id).where(
+                StarsSkinPurchase.telegram_charge_id.in_(candidate_hashes)
+            )
+        )
+        used_hashes = {
+            str(row[0]).strip() for row in used_result.all() if row and row[0]
+        }
+    for tx_hash in candidate_hashes:
+        if tx_hash not in used_hashes:
+            return tx_hash
+    return None
 
 
 def _parse_bool_env(name: str, default: bool = False) -> bool:
@@ -3150,6 +3239,138 @@ async def create_skin_stars_invoice(payload: SkinRequest, request: Request):
         raise
     except Exception as e:
         logger.error(f"Error creating Stars invoice: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/api/skins/ton-invoice")
+async def create_skin_ton_invoice(payload: SkinRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("ton_skin_invoice", payload.user_id, ttl=3)
+
+        if get_stars_skin_price(payload.skin_id) is None:
+            raise HTTPException(status_code=400, detail="Skin is not sold for TON")
+        if not is_valid_ton_wallet_address(TON_SKIN_SELLER_WALLET):
+            raise HTTPException(status_code=503, detail="TON seller wallet is not configured")
+
+        user = await get_user_cached(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except Exception:
+                extra = {}
+
+        owned_skins = extra.get("owned_skins", [DEFAULT_SKIN_ID])
+        if payload.skin_id in owned_skins:
+            raise HTTPException(status_code=400, detail="Skin already owned")
+
+        wallet = get_ton_wallet_from_user({"extra_data": extra})
+        if not wallet.get("connected") or not wallet.get("address"):
+            raise HTTPException(status_code=400, detail="Connect TON wallet first")
+
+        valid_until = int(time.time()) + 600
+        return {
+            "success": True,
+            "skin_id": payload.skin_id,
+            "seller_wallet": TON_SKIN_SELLER_WALLET,
+            "price_ton": float(TON_SKIN_PRICE_NANO) / float(TON_NANO),
+            "price_nano": int(TON_SKIN_PRICE_NANO),
+            "transaction": {
+                "validUntil": valid_until,
+                "messages": [
+                    {
+                        "address": TON_SKIN_SELLER_WALLET,
+                        "amount": str(int(TON_SKIN_PRICE_NANO)),
+                    }
+                ],
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating TON skin invoice: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/api/skins/ton-purchase-confirm")
+async def confirm_skin_ton_purchase(payload: SkinRequest, request: Request):
+    try:
+        await require_telegram_user(request, payload.user_id)
+        await require_user_action_lock("ton_skin_confirm", payload.user_id, ttl=5)
+
+        if get_stars_skin_price(payload.skin_id) is None:
+            raise HTTPException(status_code=400, detail="Skin is not sold for TON")
+        if not is_valid_ton_wallet_address(TON_SKIN_SELLER_WALLET):
+            raise HTTPException(status_code=503, detail="TON seller wallet is not configured")
+
+        user = await get_user_cached(payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = user.get("extra_data", {}) or {}
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except Exception:
+                extra = {}
+
+        owned_skins = normalize_owned_skins(extra.get("owned_skins", [DEFAULT_SKIN_ID]))
+        if payload.skin_id in owned_skins:
+            return {
+                "success": True,
+                "already_owned": True,
+                "unlocked": True,
+                "skin_id": payload.skin_id,
+            }
+
+        wallet = get_ton_wallet_from_user({"extra_data": extra})
+        buyer_wallet = (wallet.get("address") or "").strip()
+        if not wallet.get("connected") or not buyer_wallet:
+            raise HTTPException(status_code=400, detail="Connect TON wallet first")
+
+        tx_hash = await find_unused_ton_skin_payment_tx_hash(
+            buyer_wallet_address=buyer_wallet,
+            seller_wallet_address=TON_SKIN_SELLER_WALLET,
+            required_amount_nano=int(TON_SKIN_PRICE_NANO),
+            lookback_seconds=TON_SKIN_CONFIRM_LOOKBACK_SECONDS,
+        )
+        if not tx_hash:
+            raise HTTPException(status_code=404, detail="Payment not found yet")
+
+        purchase_recorded = await record_stars_skin_purchase(
+            user_id=payload.user_id,
+            username=user.get("username"),
+            skin_id=payload.skin_id,
+            stars_amount=int(TON_SKIN_PRICE_NANO),
+            currency="TON",
+            telegram_charge_id=tx_hash,
+        )
+        if not purchase_recorded:
+            raise HTTPException(status_code=409, detail="Payment already used")
+
+        owned_skins.append(payload.skin_id)
+        extra["owned_skins"] = normalize_owned_skins(owned_skins)
+        await update_user(payload.user_id, {"extra_data": extra})
+        await invalidate_user_cache(payload.user_id)
+
+        return {
+            "success": True,
+            "unlocked": True,
+            "skin_id": payload.skin_id,
+            "tx_hash": tx_hash,
+            "price_nano": int(TON_SKIN_PRICE_NANO),
+        }
+    except HTTPException:
+        raise
+    except IntegrityError as e:
+        logger.warning(f"TON skin purchase duplicate: {e}")
+        raise HTTPException(status_code=409, detail="Payment already used")
+    except Exception as e:
+        logger.error(f"Error confirming TON skin purchase: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
