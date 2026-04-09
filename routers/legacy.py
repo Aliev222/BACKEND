@@ -344,7 +344,6 @@ TON_PROOF_ALLOWED_DOMAINS = tuple(
     for item in (os.getenv("TON_PROOF_ALLOWED_DOMAINS", "") or "").split(",")
     if item.strip()
 )
-DEFAULT_AVATAR_PATH = "/imgg/default_avatar.png"
 AVATAR_META_CACHE_TTL_SECONDS = 3600
 AVATAR_BYTES_CACHE_TTL_SECONDS = 900
 AVATAR_META_CACHE: dict[int, dict] = {}
@@ -956,11 +955,31 @@ async def _resolve_telegram_avatar_file_path(user_id: int) -> str | None:
         return None
 
 
+def _build_avatar_fallback_svg(user_id: int) -> bytes:
+    label = str(int(user_id) % 100)
+    svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'>"
+        "<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>"
+        "<stop offset='0%' stop-color='#2a9df4'/>"
+        "<stop offset='100%' stop-color='#1b6fc2'/>"
+        "</linearGradient></defs>"
+        "<rect width='96' height='96' rx='18' fill='url(#g)'/>"
+        "<text x='48' y='58' text-anchor='middle' font-family='Arial, sans-serif' "
+        "font-size='30' fill='#ffffff' font-weight='700'>"
+        f"{label}</text></svg>"
+    )
+    return svg.encode("utf-8")
+
+
 @router.get("/api/avatar/{user_id}")
 async def get_telegram_avatar_proxy(user_id: int):
     file_path = await _resolve_telegram_avatar_file_path(user_id)
     if not file_path:
-        return RedirectResponse(url=DEFAULT_AVATAR_PATH, status_code=307)
+        return Response(
+            content=_build_avatar_fallback_svg(user_id),
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=600"},
+        )
 
     now_ts = time.time()
     bytes_cached = AVATAR_BYTES_CACHE.get(file_path)
@@ -977,7 +996,11 @@ async def get_telegram_avatar_proxy(user_id: int):
                 f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
             )
         if image_resp.status_code != 200 or not image_resp.content:
-            return RedirectResponse(url=DEFAULT_AVATAR_PATH, status_code=307)
+            return Response(
+                content=_build_avatar_fallback_svg(user_id),
+                media_type="image/svg+xml",
+                headers={"Cache-Control": "public, max-age=600"},
+            )
 
         content_type = image_resp.headers.get("content-type") or "image/jpeg"
         AVATAR_BYTES_CACHE[file_path] = {
@@ -992,7 +1015,11 @@ async def get_telegram_avatar_proxy(user_id: int):
         )
     except Exception as exc:
         logger.debug("Avatar fetch failed for user %s: %s", user_id, exc)
-        return RedirectResponse(url=DEFAULT_AVATAR_PATH, status_code=307)
+        return Response(
+            content=_build_avatar_fallback_svg(user_id),
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=600"},
+        )
 
 
 async def create_telegram_stars_invoice_link(
