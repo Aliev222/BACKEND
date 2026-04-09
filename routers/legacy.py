@@ -2776,6 +2776,7 @@ def _build_upgrades_service_deps() -> UpgradesServiceDeps:
         require_user_action_lock=require_user_action_lock,
         get_user=get_user,
         update_user_if_matches=update_user_if_matches,
+        invalidate_user_cache=invalidate_user_cache,
         get_redis_or_none=get_redis_or_none,
         logger=logger,
         GLOBAL_UPGRADE_PRICES=GLOBAL_UPGRADE_PRICES,

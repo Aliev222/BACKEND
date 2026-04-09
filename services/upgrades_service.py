@@ -1,9 +1,12 @@
 from dataclasses import dataclass
 from datetime import datetime
 import time
+import uuid
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
+from sqlalchemy import update, text
+from DATABASE.base import AsyncSessionLocal, User
 from core.upgrades.calculator import calc_upgrade_price, calc_upgrade_value
 from core.game_logic import (
     get_tap,
@@ -21,6 +24,7 @@ class UpgradesServiceDeps:
     require_user_action_lock: Callable[..., Awaitable[Any]]
     get_user: Callable[[int], Awaitable[dict | None]]
     update_user_if_matches: Callable[[int, dict, dict], Awaitable[dict | None]]
+    invalidate_user_cache: Callable[[int], Awaitable[Any]]
     get_redis_or_none: Callable[[], Awaitable[Any]]
     logger: Any
     GLOBAL_UPGRADE_PRICES: list[int]
@@ -29,6 +33,122 @@ class UpgradesServiceDeps:
 
 def get_global_upgrade_level_service(user: dict) -> int:
     return resolve_progression_level(user)
+
+
+async def _flush_user_pending_coins_before_upgrade(
+    user_id: int, deps: UpgradesServiceDeps
+) -> int:
+    """
+    Flush coins_pending:{user_id} into DB before spend checks.
+
+    This makes upgrade spend checks consistent with hot balance while
+    preserving crash safety via coins_flushing + coins_flush_log.
+    """
+    redis_conn = await deps.get_redis_or_none()
+    if not redis_conn:
+        return 0
+
+    batch_id = f"upgrade:{user_id}:{int(time.time() * 1000)}:{uuid.uuid4().hex[:8]}"
+    pending_key = f"coins_pending:{user_id}"
+    flushing_key = f"coins_flushing:{user_id}:{batch_id}"
+
+    # Atomically move pending -> flushing (same pattern as coins worker).
+    move_lua = """
+    local pending_key = KEYS[1]
+    local flushing_key = KEYS[2]
+    local queue_key = KEYS[3]
+    local user_id = ARGV[1]
+
+    local delta = redis.call('GET', pending_key)
+    if not delta then
+      return 0
+    end
+
+    delta = tonumber(delta)
+    if not delta or delta <= 0 then
+      redis.call('DEL', pending_key)
+      redis.call('ZREM', queue_key, user_id)
+      return 0
+    end
+
+    redis.call('DEL', pending_key)
+    redis.call('SET', flushing_key, delta)
+    redis.call('ZREM', queue_key, user_id)
+    return delta
+    """
+
+    try:
+        moved = await redis_conn.eval(
+            move_lua,
+            3,
+            pending_key,
+            flushing_key,
+            "coins_pending_queue",
+            str(user_id),
+        )
+        delta = int(moved or 0)
+    except Exception:
+        return 0
+
+    if delta <= 0:
+        return 0
+
+    # Commit moved delta to DB with idempotency log (worker-compatible).
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS coins_flush_log (
+                        id SERIAL PRIMARY KEY,
+                        batch_id TEXT NOT NULL UNIQUE,
+                        user_id BIGINT NOT NULL,
+                        delta BIGINT NOT NULL,
+                        flushed_at TIMESTAMP DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            log_result = await session.execute(
+                text(
+                    """
+                    INSERT INTO coins_flush_log (batch_id, user_id, delta)
+                    VALUES (:batch_id, :user_id, :delta)
+                    ON CONFLICT (batch_id) DO NOTHING
+                    RETURNING id
+                    """
+                ),
+                {"batch_id": batch_id, "user_id": user_id, "delta": delta},
+            )
+            inserted = log_result.scalar_one_or_none()
+            if inserted is None:
+                await session.rollback()
+                return 0
+
+            row = await session.execute(
+                update(User)
+                .where(User.user_id == user_id)
+                .values(coins=User.coins + delta)
+                .returning(User.coins)
+            )
+            new_coins = row.scalar_one_or_none()
+            if new_coins is None:
+                await session.rollback()
+                return 0
+
+            await session.commit()
+    except Exception:
+        # Keep flushing key for worker recovery path.
+        return 0
+
+    try:
+        await redis_conn.delete(flushing_key)
+        await redis_conn.zrem("coins_pending_queue", str(user_id))
+    except Exception:
+        # DB already committed; cleanup can be retried by worker/recovery.
+        pass
+
+    return delta
 
 
 async def apply_global_upgrade_for_user_service(
@@ -77,6 +197,8 @@ async def apply_global_upgrade_for_user_service(
     )
     if not updated_user:
         raise HTTPException(status_code=409, detail="Upgrade state changed, retry")
+
+    await deps.invalidate_user_cache(user_id)
 
     # CRITICAL: Sync coins_hot after DB decrement (spend)
     from infrastructure.coins_hot_sync import (
@@ -164,6 +286,16 @@ async def process_upgrade_service(
         observe_storage_timing("db", "get_user", "upgrades", time.perf_counter() - t)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+        precheck_level = get_global_upgrade_level_service(user)
+        precheck_price = calc_upgrade_price(precheck_level, deps.GLOBAL_UPGRADE_PRICES)
+        if int(user.get("coins", 0) or 0) < precheck_price:
+            await _flush_user_pending_coins_before_upgrade(payload.user_id, deps)
+            t = time.perf_counter()
+            refreshed = await deps.get_user(payload.user_id)
+            observe_storage_timing("db", "get_user", "upgrades", time.perf_counter() - t)
+            if refreshed:
+                user = refreshed
+
         return await apply_global_upgrade_for_user_service(payload.user_id, user, deps)
     except HTTPException:
         raise
@@ -188,6 +320,16 @@ async def process_upgrade_all_service(
         observe_storage_timing("db", "get_user", "upgrades", time.perf_counter() - t)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+        precheck_level = get_global_upgrade_level_service(user)
+        precheck_price = calc_upgrade_price(precheck_level, deps.GLOBAL_UPGRADE_PRICES)
+        if int(user.get("coins", 0) or 0) < precheck_price:
+            await _flush_user_pending_coins_before_upgrade(payload.user_id, deps)
+            t = time.perf_counter()
+            refreshed = await deps.get_user(payload.user_id)
+            observe_storage_timing("db", "get_user", "upgrades", time.perf_counter() - t)
+            if refreshed:
+                user = refreshed
+
         return await apply_global_upgrade_for_user_service(payload.user_id, user, deps)
     except HTTPException:
         raise
