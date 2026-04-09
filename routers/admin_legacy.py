@@ -853,6 +853,51 @@ async def admin_fraud_overview(request: Request, season_key: str | None = None):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.get("/api/admin/fraud/user/{user_id}/reasons")
+async def admin_fraud_user_reasons(
+    user_id: int, request: Request, season_key: str | None = None
+):
+    try:
+        await require_admin_access(request)
+        effective_season_key = (
+            season_key or get_weekly_tournament_season_key() or ""
+        ).strip()
+        if not effective_season_key:
+            raise HTTPException(status_code=400, detail="season_key is required")
+
+        players = await build_admin_fraud_overview(effective_season_key)
+        row = next((item for item in players if int(item.get("user_id") or 0) == int(user_id)), None)
+        if row is None:
+            return {
+                "success": True,
+                "season_key": effective_season_key,
+                "user_id": int(user_id),
+                "in_overview": False,
+                "fraud_flag": False,
+                "disqualify_from_payout": False,
+                "manual_status": "ok",
+                "manual_reason": None,
+                "reasons": [],
+            }
+
+        return {
+            "success": True,
+            "season_key": effective_season_key,
+            "user_id": int(user_id),
+            "in_overview": True,
+            "fraud_flag": bool(row.get("fraud_flag")),
+            "disqualify_from_payout": bool(row.get("disqualify_from_payout")),
+            "manual_status": row.get("manual_status") or "ok",
+            "manual_reason": row.get("manual_reason"),
+            "reasons": [str(reason) for reason in (row.get("reasons") or [])],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_fraud_user_reasons: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("/api/admin/players/search")
 async def admin_players_search(
     request: Request,
