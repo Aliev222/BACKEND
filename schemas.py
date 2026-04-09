@@ -94,6 +94,17 @@ class AdminWinnerStarsUpdateRequest(BaseModel):
     stars_reward: int = Field(..., ge=0)
 
 
+class AdminGrantCoinsRequest(BaseModel):
+    amount: int = Field(..., ge=1, le=10_000_000_000)
+    reason: Optional[str] = Field(default=None, max_length=256)
+
+
+class AdminGrantSkinRequest(BaseModel):
+    skin_id: str = Field(..., min_length=3, max_length=64)
+    reason: Optional[str] = Field(default=None, max_length=256)
+    select_immediately: bool = False
+
+
 class TonProofDomainRequest(BaseModel):
     lengthBytes: int = Field(..., ge=1, le=512)
     value: str = Field(..., min_length=1, max_length=255)

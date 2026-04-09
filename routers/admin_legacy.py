@@ -69,9 +69,14 @@ from routers.legacy import (
     RECENT_DIAGNOSTIC_ERRORS,
     invalidate_user_cache,
     send_telegram_wallet_reminder_message,
+    LEGACY_SKIN_ID_MAP,
+    VALID_SKIN_IDS,
 )
+from infrastructure.coins_hot_sync import sync_hot_after_db_increment
 from schemas import (
     AdminFraudUpdateRequest,
+    AdminGrantCoinsRequest,
+    AdminGrantSkinRequest,
     AdminTonPayoutSendRequest,
     AdminTonPayoutQueueRequest,
     AdminTonPayoutStatusUpdateRequest,
@@ -1304,6 +1309,126 @@ async def admin_player_detail(
         raise
     except Exception as e:
         logger.error(f"Error in admin_player_detail: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/api/admin/skins/catalog")
+async def admin_skins_catalog(request: Request):
+    try:
+        await require_admin_access(request)
+        return {
+            "success": True,
+            "skins": sorted(str(skin_id) for skin_id in VALID_SKIN_IDS),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_skins_catalog: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/api/admin/players/{user_id}/grant-coins")
+async def admin_grant_player_coins(
+    user_id: int,
+    payload: AdminGrantCoinsRequest,
+    request: Request,
+):
+    try:
+        await require_admin_access(request)
+        amount = int(payload.amount or 0)
+        if amount <= 0:
+            raise HTTPException(status_code=400, detail="amount must be > 0")
+
+        async with AsyncSessionLocal() as session:
+            user_result = await session.execute(
+                select(User).where(User.user_id == user_id)
+            )
+            user = user_result.scalar_one_or_none()
+            if not user:
+                raise HTTPException(status_code=404, detail="Player not found")
+
+            coins_before = int(user.coins or 0)
+            user.coins = coins_before + amount
+            coins_after = int(user.coins or 0)
+            await session.commit()
+
+        hot_after = await sync_hot_after_db_increment(user_id, amount, coins_after)
+        await invalidate_user_cache(user_id)
+
+        return {
+            "success": True,
+            "user_id": int(user_id),
+            "amount": amount,
+            "coins_before": coins_before,
+            "coins_after": coins_after,
+            "hot_coins_after": int(hot_after) if hot_after is not None else coins_after,
+            "reason": (payload.reason or "").strip() or None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_grant_player_coins: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/api/admin/players/{user_id}/grant-skin")
+async def admin_grant_player_skin(
+    user_id: int,
+    payload: AdminGrantSkinRequest,
+    request: Request,
+):
+    try:
+        await require_admin_access(request)
+        raw_skin_id = (payload.skin_id or "").strip()
+        if not raw_skin_id:
+            raise HTTPException(status_code=400, detail="skin_id is required")
+
+        skin_id = LEGACY_SKIN_ID_MAP.get(raw_skin_id, raw_skin_id)
+        if skin_id not in VALID_SKIN_IDS:
+            raise HTTPException(status_code=400, detail="Unknown skin_id")
+
+        async with AsyncSessionLocal() as session:
+            user_result = await session.execute(
+                select(User).where(User.user_id == user_id)
+            )
+            user = user_result.scalar_one_or_none()
+            if not user:
+                raise HTTPException(status_code=404, detail="Player not found")
+
+            extra = parse_extra_data_object(user.extra_data)
+            owned_skins = normalize_owned_skins(
+                extra.get("owned_skins", [DEFAULT_SKIN_ID])
+            )
+            already_owned = skin_id in owned_skins
+            if not already_owned:
+                owned_skins.append(skin_id)
+            extra["owned_skins"] = normalize_owned_skins(owned_skins)
+
+            if bool(payload.select_immediately):
+                extra["selected_skin"] = skin_id
+            extra["selected_skin"] = normalize_selected_skin(
+                extra.get("selected_skin", DEFAULT_SKIN_ID),
+                extra["owned_skins"],
+            )
+
+            user.extra_data = json.dumps(extra)
+            await session.commit()
+
+        await invalidate_user_cache(user_id)
+
+        return {
+            "success": True,
+            "user_id": int(user_id),
+            "skin_id": skin_id,
+            "already_owned": bool(already_owned),
+            "selected_skin": extra.get("selected_skin"),
+            "owned_skins_count": int(len(extra.get("owned_skins", []))),
+            "reason": (payload.reason or "").strip() or None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_grant_player_skin: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
