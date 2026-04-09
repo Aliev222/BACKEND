@@ -27,6 +27,16 @@ from observability.metrics import observe_http_request
 logger = logging.getLogger(__name__)
 
 BOT_MODE = os.getenv("BOT_MODE", "api")
+ALLOW_DEGRADED_START = (
+    os.getenv("ALLOW_DEGRADED_START", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+REDIS_STARTUP_RETRIES = max(
+    1, int((os.getenv("REDIS_STARTUP_RETRIES", "8") or "8").strip())
+)
+REDIS_STARTUP_RETRY_DELAY_SECONDS = max(
+    0.25, float((os.getenv("REDIS_STARTUP_RETRY_DELAY_SECONDS", "1.5") or "1.5").strip())
+)
 WORKER_TASKS = []
 
 
@@ -59,14 +69,34 @@ async def lifespan(app: FastAPI):
         logger.critical("Startup configuration validation failed: %s", e)
         raise
 
-    redis_conn = await init_redis()
-    if BOT_MODE == "api" and redis_conn is None:
+    redis_conn = None
+    for attempt in range(1, REDIS_STARTUP_RETRIES + 1):
+        redis_conn = await init_redis()
+        if redis_conn is not None:
+            if attempt > 1:
+                logger.warning(
+                    "Redis connected on retry attempt %s/%s",
+                    attempt,
+                    REDIS_STARTUP_RETRIES,
+                )
+            break
+        if attempt < REDIS_STARTUP_RETRIES:
+            logger.warning(
+                "Redis unavailable on startup attempt %s/%s, retrying in %.2fs",
+                attempt,
+                REDIS_STARTUP_RETRIES,
+                REDIS_STARTUP_RETRY_DELAY_SECONDS,
+            )
+            await asyncio.sleep(REDIS_STARTUP_RETRY_DELAY_SECONDS)
+
+    if BOT_MODE == "api" and redis_conn is None and not ALLOW_DEGRADED_START:
         logger.critical(
-            "Redis is unavailable at startup while BOT_MODE=api; refusing to start"
+            "Redis unavailable after %s attempts while BOT_MODE=api; refusing to start",
+            REDIS_STARTUP_RETRIES,
         )
         raise RuntimeError("Redis unavailable at startup")
 
-    if BOT_MODE == "api":
+    if BOT_MODE == "api" and redis_conn is not None:
         WORKER_TASKS = [
             asyncio.create_task(coins_flush.coins_flush_loop(), name="coins_flush"),
             asyncio.create_task(
@@ -79,6 +109,11 @@ async def lifespan(app: FastAPI):
         for task in WORKER_TASKS:
             task.add_done_callback(_worker_done_callback)
         logger.info("Background flush workers started (coins, referrals, tournament)")
+    elif BOT_MODE == "api":
+        logger.error(
+            "Starting in degraded mode (no Redis). Workers are not started; "
+            "requests that require Redis will fail until Redis recovers."
+        )
 
     logger.info("SPIRIT API ready")
     yield
