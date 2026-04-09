@@ -125,6 +125,12 @@ class AdminTonPayoutQueueRequest(BaseModel):
     ton_price_usd: float = Field(..., gt=0)
 
 
+class AdminTonPayoutSendRequest(BaseModel):
+    total_fund_ton: float = Field(..., gt=0)
+    dry_run: bool = False
+    note: Optional[str] = Field(default=None, max_length=256)
+
+
 class AdminTonPayoutStatusUpdateRequest(BaseModel):
     user_id: int
     status: str = Field(..., min_length=2, max_length=24)

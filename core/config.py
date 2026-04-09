@@ -60,6 +60,11 @@ TON_VERIFIER_TIMEOUT_SECONDS = max(
     5, int(os.getenv("TON_VERIFIER_TIMEOUT_SECONDS", "30"))
 )
 TON_NANO = 1_000_000_000
+TON_PAYOUT_SENDER_URL = os.getenv("TON_PAYOUT_SENDER_URL", "").strip()
+TON_PAYOUT_SENDER_TOKEN = os.getenv("TON_PAYOUT_SENDER_TOKEN", "").strip()
+TON_PAYOUT_SENDER_TIMEOUT_SECONDS = max(
+    5, int(os.getenv("TON_PAYOUT_SENDER_TIMEOUT_SECONDS", "45"))
+)
 
 # Tournament
 WEEKLY_LEAGUE_ORDER = ("diamond", "gold", "silver", "bronze")

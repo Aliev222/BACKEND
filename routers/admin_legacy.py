@@ -44,6 +44,9 @@ from core.config import (
     WEEKLY_LEAGUE_LEVEL_RANGES,
     WEEKLY_TOP3_PAYOUT_SPLITS,
     TON_NANO,
+    TON_PAYOUT_SENDER_URL,
+    TON_PAYOUT_SENDER_TOKEN,
+    TON_PAYOUT_SENDER_TIMEOUT_SECONDS,
     TON_VERIFIER_API_BASE,
     TON_VERIFIER_API_KEY,
     TON_VERIFIER_TIMEOUT_SECONDS,
@@ -69,6 +72,7 @@ from routers.legacy import (
 )
 from schemas import (
     AdminFraudUpdateRequest,
+    AdminTonPayoutSendRequest,
     AdminTonPayoutQueueRequest,
     AdminTonPayoutStatusUpdateRequest,
     AdminTonPayoutBulkStatusUpdateRequest,
@@ -157,6 +161,82 @@ def match_ton_queue_rows_to_transactions(
             matched_user_ids.add(int(row.user_id))
             break
     return matched_rows, matched_user_ids
+
+
+def allocate_ton_nano_by_weights(
+    candidates: list[dict], total_fund_ton: float
+) -> tuple[dict[int, int], int]:
+    total_nano = max(0, int(round(float(total_fund_ton or 0) * TON_NANO)))
+    if total_nano <= 0 or not candidates:
+        return {}, total_nano
+    total_weight = sum(max(0, int(item.get("payout_cents") or 0)) for item in candidates)
+    if total_weight <= 0:
+        return {}, total_nano
+
+    allocations: dict[int, int] = {}
+    remainders: list[tuple[int, int, int]] = []
+    allocated_sum = 0
+    for item in candidates:
+        user_id = int(item["user_id"])
+        weight = max(0, int(item.get("payout_cents") or 0))
+        numerator = total_nano * weight
+        base_amount = numerator // total_weight
+        remainder = numerator % total_weight
+        allocations[user_id] = int(base_amount)
+        allocated_sum += int(base_amount)
+        remainders.append((int(remainder), int(item.get("rank") or 999999), user_id))
+
+    left = max(0, total_nano - allocated_sum)
+    if left > 0:
+        remainders.sort(key=lambda x: (-x[0], x[1], x[2]))
+        for idx in range(left):
+            _, _, user_id = remainders[idx % len(remainders)]
+            allocations[user_id] = allocations.get(user_id, 0) + 1
+    return allocations, total_nano
+
+
+async def send_ton_payouts_with_sender_service(
+    season_key: str, payouts: list[dict], note: str | None = None
+) -> dict[int, dict]:
+    if not TON_PAYOUT_SENDER_URL:
+        return {}
+    headers = {"Content-Type": "application/json"}
+    if TON_PAYOUT_SENDER_TOKEN:
+        headers["Authorization"] = f"Bearer {TON_PAYOUT_SENDER_TOKEN}"
+    payload = {
+        "season_key": season_key,
+        "note": (note or "").strip() or None,
+        "payouts": [
+            {
+                "user_id": int(item["user_id"]),
+                "wallet_address": str(item["wallet_address"]),
+                "amount_nano": int(item["ton_amount_nano"]),
+                "rank": int(item.get("rank") or 0),
+                "league": str(item.get("league") or ""),
+            }
+            for item in payouts
+        ],
+    }
+    async with httpx.AsyncClient(timeout=TON_PAYOUT_SENDER_TIMEOUT_SECONDS) as client:
+        response = await client.post(
+            TON_PAYOUT_SENDER_URL,
+            headers=headers,
+            json=payload,
+        )
+        response.raise_for_status()
+        body = response.json()
+    raw_results = body.get("results") if isinstance(body, dict) else None
+    if not isinstance(raw_results, list):
+        return {}
+    results_by_user: dict[int, dict] = {}
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        user_id = int(item.get("user_id") or 0)
+        if user_id <= 0:
+            continue
+        results_by_user[user_id] = item
+    return results_by_user
 
 
 async def build_weekly_ton_payout_candidates(
@@ -1637,6 +1717,274 @@ async def admin_build_ton_payout_queue(
         raise
     except Exception as e:
         logger.error(f"Error in admin_build_ton_payout_queue: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/api/admin/weekly-tournament/season/{season_key}/ton-payouts/send")
+async def admin_send_ton_payouts(
+    season_key: str, payload: AdminTonPayoutSendRequest, request: Request
+):
+    try:
+        await require_admin_access(request)
+        season_rows = await list_weekly_tournament_seasons(limit=52)
+        season = next(
+            (item for item in season_rows if item["season_key"] == season_key), None
+        )
+        if not season:
+            raise HTTPException(status_code=404, detail="Season not found")
+        if str(season.get("status") or "").lower() != "finalized":
+            raise HTTPException(
+                status_code=400,
+                detail="Payout send is allowed only for finalized seasons",
+            )
+
+        winners = await get_weekly_tournament_winners(season_key)
+        if not winners:
+            return {
+                "success": True,
+                "season_key": season_key,
+                "sender_configured": bool(TON_PAYOUT_SENDER_URL),
+                "queued": 0,
+                "submitted": 0,
+                "failed": 0,
+                "created": 0,
+                "skipped_without_wallet": 0,
+                "skipped_without_payout": 0,
+                "skipped_locked": 0,
+                "total_fund_ton": float(payload.total_fund_ton),
+                "total_fund_nano": int(round(float(payload.total_fund_ton) * TON_NANO)),
+            }
+
+        user_ids = [int(item["user_id"]) for item in winners]
+        wallet_map: dict[int, dict] = {}
+        async with AsyncSessionLocal() as session:
+            users_result = await session.execute(
+                select(User).where(User.user_id.in_(user_ids))
+            )
+            for row in users_result.scalars().all():
+                extra_data = {}
+                if row.extra_data:
+                    try:
+                        extra_data = json.loads(row.extra_data)
+                    except json.JSONDecodeError:
+                        extra_data = {}
+                wallet = get_ton_wallet_from_user({"extra_data": extra_data})
+                if wallet["connected"] and wallet["verified"] and wallet["address"]:
+                    wallet_map[int(row.user_id)] = wallet
+
+        skipped_without_wallet = 0
+        skipped_without_payout = 0
+        candidates: list[dict] = []
+        for winner in winners:
+            user_id = int(winner["user_id"])
+            payout_cents = int(winner.get("payout_cents") or 0)
+            if (
+                payout_cents <= 0
+                or not bool(winner.get("eligible_for_payout", True))
+                or bool(winner.get("fraud_flag", False))
+            ):
+                skipped_without_payout += 1
+                continue
+            wallet = wallet_map.get(user_id)
+            if not wallet:
+                skipped_without_wallet += 1
+                continue
+            candidates.append(
+                {
+                    "user_id": user_id,
+                    "username": winner.get("username"),
+                    "league": winner.get("league") or "bronze",
+                    "rank": int(winner.get("rank") or 0),
+                    "payout_cents": payout_cents,
+                    "wallet_address": wallet["address"],
+                }
+            )
+
+        allocations, total_fund_nano = allocate_ton_nano_by_weights(
+            candidates, float(payload.total_fund_ton)
+        )
+        if not allocations:
+            return {
+                "success": True,
+                "season_key": season_key,
+                "sender_configured": bool(TON_PAYOUT_SENDER_URL),
+                "queued": 0,
+                "submitted": 0,
+                "failed": 0,
+                "created": 0,
+                "skipped_without_wallet": skipped_without_wallet,
+                "skipped_without_payout": skipped_without_payout,
+                "skipped_locked": 0,
+                "total_fund_ton": float(payload.total_fund_ton),
+                "total_fund_nano": total_fund_nano,
+            }
+
+        dry_run_rows = []
+        for item in candidates:
+            amount_nano = int(allocations.get(int(item["user_id"]), 0))
+            if amount_nano <= 0:
+                continue
+            dry_run_rows.append(
+                {
+                    "user_id": int(item["user_id"]),
+                    "rank": int(item["rank"]),
+                    "league": str(item["league"]),
+                    "wallet_address": str(item["wallet_address"]),
+                    "ton_amount_nano": amount_nano,
+                }
+            )
+        if payload.dry_run:
+            dry_run_rows.sort(key=lambda row: (row["league"], row["rank"], row["user_id"]))
+            return {
+                "success": True,
+                "season_key": season_key,
+                "preview": True,
+                "sender_configured": bool(TON_PAYOUT_SENDER_URL),
+                "total_fund_ton": float(payload.total_fund_ton),
+                "total_fund_nano": total_fund_nano,
+                "queued": len(dry_run_rows),
+                "skipped_without_wallet": skipped_without_wallet,
+                "skipped_without_payout": skipped_without_payout,
+                "payouts": dry_run_rows,
+            }
+
+        created = 0
+        queued = 0
+        skipped_locked = 0
+        queued_payloads: list[dict] = []
+        queued_user_ids: list[int] = []
+        async with AsyncSessionLocal() as session:
+            existing_result = await session.execute(
+                select(WeeklyTournamentTonPayout).where(
+                    WeeklyTournamentTonPayout.season_key == season_key
+                )
+            )
+            existing_rows = {
+                int(row.user_id): row for row in existing_result.scalars().all()
+            }
+            for item in candidates:
+                user_id = int(item["user_id"])
+                ton_amount_nano = int(allocations.get(user_id) or 0)
+                if ton_amount_nano <= 0:
+                    continue
+                row = existing_rows.get(user_id)
+                if row is None:
+                    row = WeeklyTournamentTonPayout(
+                        season_key=season_key,
+                        user_id=user_id,
+                        username=item.get("username"),
+                        league=item.get("league") or "bronze",
+                        rank=int(item.get("rank") or 0),
+                        wallet_address=item["wallet_address"],
+                        payout_cents=int(item.get("payout_cents") or 0),
+                        ton_amount_nano=ton_amount_nano,
+                        ton_price_usd_micros=0,
+                        status="queued",
+                        note=(payload.note or "").strip() or None,
+                    )
+                    session.add(row)
+                    existing_rows[user_id] = row
+                    created += 1
+                else:
+                    existing_status = str(row.status or "").strip().lower()
+                    if existing_status not in {"", "queued", "failed", "cancelled"}:
+                        skipped_locked += 1
+                        continue
+                    row.username = item.get("username")
+                    row.league = item.get("league") or row.league
+                    row.rank = int(item.get("rank") or row.rank or 0)
+                    row.wallet_address = item["wallet_address"]
+                    row.payout_cents = int(item.get("payout_cents") or 0)
+                    row.ton_amount_nano = ton_amount_nano
+                    row.ton_price_usd_micros = 0
+                    row.status = "queued"
+                    row.tx_hash = None
+                    row.note = (payload.note or "").strip() or None
+                    row.updated_at = datetime.utcnow()
+                queued += 1
+                queued_user_ids.append(user_id)
+                queued_payloads.append(
+                    {
+                        "user_id": user_id,
+                        "league": item.get("league"),
+                        "rank": int(item.get("rank") or 0),
+                        "wallet_address": item["wallet_address"],
+                        "ton_amount_nano": ton_amount_nano,
+                    }
+                )
+            await session.commit()
+
+        submitted = 0
+        failed = 0
+        sender_error = None
+        if TON_PAYOUT_SENDER_URL and queued_payloads:
+            try:
+                sender_results = await send_ton_payouts_with_sender_service(
+                    season_key=season_key,
+                    payouts=queued_payloads,
+                    note=payload.note,
+                )
+                if sender_results:
+                    async with AsyncSessionLocal() as session:
+                        rows_result = await session.execute(
+                            select(WeeklyTournamentTonPayout).where(
+                                WeeklyTournamentTonPayout.season_key == season_key,
+                                WeeklyTournamentTonPayout.user_id.in_(queued_user_ids),
+                            )
+                        )
+                        rows = rows_result.scalars().all()
+                        for row in rows:
+                            user_id = int(row.user_id)
+                            result = sender_results.get(user_id)
+                            if not result:
+                                continue
+                            ok = bool(result.get("ok"))
+                            tx_hash = str(result.get("tx_hash") or "").strip() or None
+                            error_text = str(result.get("error") or "").strip()
+                            row.status = "submitted" if ok else "failed"
+                            row.tx_hash = tx_hash
+                            row.note = (
+                                " | ".join(
+                                    part
+                                    for part in [row.note or "", error_text]
+                                    if part
+                                )
+                                or row.note
+                            )
+                            row.updated_at = datetime.utcnow()
+                            if ok:
+                                submitted += 1
+                            else:
+                                failed += 1
+                        await session.commit()
+            except httpx.HTTPError as e:
+                sender_error = str(e)
+                logger.error(f"TON sender service error: {e}")
+
+        if not TON_PAYOUT_SENDER_URL:
+            sender_error = (
+                "TON_PAYOUT_SENDER_URL is not configured, payouts remain in queued status"
+            )
+
+        return {
+            "success": True,
+            "season_key": season_key,
+            "sender_configured": bool(TON_PAYOUT_SENDER_URL),
+            "sender_error": sender_error,
+            "total_fund_ton": float(payload.total_fund_ton),
+            "total_fund_nano": total_fund_nano,
+            "created": created,
+            "queued": queued,
+            "submitted": submitted,
+            "failed": failed,
+            "skipped_without_wallet": skipped_without_wallet,
+            "skipped_without_payout": skipped_without_payout,
+            "skipped_locked": skipped_locked,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in admin_send_ton_payouts: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
