@@ -72,7 +72,11 @@ def get_tap_value_with_rebirth(level: int, rebirth_count: int) -> int:
 
 def get_hour_value(level: int) -> int:
     level = max(0, int(level))
-    return 100 + (level * 35) + (level * level * 7)
+    # Target economy tuning:
+    # level 100 -> exactly 500_000 per hour.
+    # Quadratic term is (1241/25) * level^2, calculated with integer math.
+    quadratic = (1241 * level * level) // 25
+    return 100 + (level * 35) + quadratic
 
 
 def get_profit_per_hour(level: int) -> int:

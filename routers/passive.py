@@ -76,12 +76,9 @@ async def passive_income(payload: PassiveIncomeRequest, request: Request):
             extra, "passive_boost"
         )
 
-        base_hour_value = int(
-            user.get(
-                "profit_per_hour",
-                get_profit_per_hour(resolve_progression_level(user)),
-            )
-        )
+        # Always compute from current progression level so economy tuning changes
+        # apply immediately even for old DB rows with stale profit_per_hour values.
+        base_hour_value = int(get_profit_per_hour(resolve_progression_level(user)))
 
         hour_value = (
             base_hour_value * max(1, passive_boost_multiplier)

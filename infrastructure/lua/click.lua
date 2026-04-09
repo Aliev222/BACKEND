@@ -145,7 +145,7 @@ local tap_value = 1 + (level * rebirth_bonus_per_level)
 if tap_value <= 0 then
     tap_value = hot_tap_power
 end
-local profit_per_hour = 100 + (level * 35) + (level * level * 7)
+local profit_per_hour = 100 + (level * 35) + math.floor((1241 * level * level) / 25)
 
 local mega_boost_active = boosts['mega_boost_active'] == true
 local ghost_boost_active = boosts['ghost_boost_active'] == true
