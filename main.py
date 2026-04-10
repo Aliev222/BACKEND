@@ -113,7 +113,6 @@ async def handle_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery) 
 
 async def main() -> None:
     await init_db()
-    logger.info("START_PHOTO_URL is %s", "set" if START_PHOTO_URL else "empty")
     reengagement_task = None
     if REENGAGEMENT_RUNTIME == "polling":
         from core.reengagement import reengagement_loop

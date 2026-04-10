@@ -147,7 +147,6 @@ def main() -> None:
 
     port = int(os.environ.get("PORT", 8001))
     logger.info("Starting webhook bot on port %s", port)
-    logger.info("START_PHOTO_URL is %s", "set" if START_PHOTO_URL else "empty")
     web.run_app(app, host="0.0.0.0", port=port)
 
 
