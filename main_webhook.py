@@ -78,9 +78,9 @@ async def cmd_start(message: types.Message) -> None:
     )
 
     caption = (
-        f"Welcome, {username}!\n\n"
-        f"Your click coins: {user_coins}\n"
-        f"Tap the button below to open the game."
+        f"👋 Welcome, {username}!\n\n"
+        f"🪙 Your click coins: {user_coins}\n"
+        f"🚀 Tap the button below to open the game."
     )
 
     if START_PHOTO_URL:
