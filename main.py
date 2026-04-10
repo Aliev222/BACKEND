@@ -26,6 +26,7 @@ REDIS_URL = os.getenv("REDIS_URL")
 REENGAGEMENT_RUNTIME = (
     (os.getenv("REENGAGEMENT_RUNTIME", "webhook") or "webhook").strip().lower()
 )
+START_PHOTO_URL = (os.getenv("START_PHOTO_URL") or "").strip()
 
 
 async def invalidate_user_cache(user_id: int) -> None:
@@ -80,12 +81,24 @@ async def cmd_start(message: types.Message) -> None:
         ]
     )
 
-    await message.answer(
+    caption = (
         f"Welcome, {username}!\n\n"
         f"Your click coins: {user_coins}\n"
-        f"Tap the button below to open the game.",
-        reply_markup=keyboard,
+        f"Tap the button below to open the game."
     )
+
+    if START_PHOTO_URL:
+        try:
+            await message.answer_photo(
+                photo=START_PHOTO_URL,
+                caption=caption,
+                reply_markup=keyboard,
+            )
+            return
+        except Exception as exc:
+            logger.warning("Failed to send /start photo, fallback to text: %s", exc)
+
+    await message.answer(caption, reply_markup=keyboard)
 
 
 @dp.pre_checkout_query()
@@ -100,6 +113,7 @@ async def handle_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery) 
 
 async def main() -> None:
     await init_db()
+    logger.info("START_PHOTO_URL is %s", "set" if START_PHOTO_URL else "empty")
     reengagement_task = None
     if REENGAGEMENT_RUNTIME == "polling":
         from core.reengagement import reengagement_loop

@@ -23,6 +23,7 @@ dp = Dispatcher()
 REDIS_URL = os.getenv("REDIS_URL")
 reengagement_task = None
 REENGAGEMENT_RUNTIME = (os.getenv("REENGAGEMENT_RUNTIME", "webhook") or "webhook").strip().lower()
+START_PHOTO_URL = (os.getenv("START_PHOTO_URL") or "").strip()
 
 
 async def invalidate_user_cache(user_id: int) -> None:
@@ -76,12 +77,24 @@ async def cmd_start(message: types.Message) -> None:
         ]
     )
 
-    await message.answer(
+    caption = (
         f"Welcome, {username}!\n\n"
         f"Your click coins: {user_coins}\n"
-        f"Tap the button below to open the game.",
-        reply_markup=keyboard,
+        f"Tap the button below to open the game."
     )
+
+    if START_PHOTO_URL:
+        try:
+            await message.answer_photo(
+                photo=START_PHOTO_URL,
+                caption=caption,
+                reply_markup=keyboard,
+            )
+            return
+        except Exception as exc:
+            logger.warning("Failed to send /start photo, fallback to text: %s", exc)
+
+    await message.answer(caption, reply_markup=keyboard)
 
 
 @dp.pre_checkout_query()
@@ -134,6 +147,7 @@ def main() -> None:
 
     port = int(os.environ.get("PORT", 8001))
     logger.info("Starting webhook bot on port %s", port)
+    logger.info("START_PHOTO_URL is %s", "set" if START_PHOTO_URL else "empty")
     web.run_app(app, host="0.0.0.0", port=port)
 
 
