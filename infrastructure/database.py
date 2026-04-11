@@ -15,10 +15,13 @@ if DATABASE_URL.startswith("postgresql://"):
 elif DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 
-POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "20"))
-MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "40"))
+POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "50"))
+MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "100"))
 POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "1800"))
 POOL_TIMEOUT = int(os.getenv("DB_POOL_TIMEOUT", "30"))
+DB_SSL = os.getenv("DB_SSL", "1").strip().lower() in {"1", "true", "yes", "on", "require"}
+
+connect_args = {"ssl": True} if DB_SSL else {}
 
 engine = create_async_engine(
     DATABASE_URL,
@@ -28,7 +31,7 @@ engine = create_async_engine(
     pool_recycle=POOL_RECYCLE,
     pool_timeout=POOL_TIMEOUT,
     pool_pre_ping=True,
-    connect_args={"ssl": True},
+    connect_args=connect_args,
 )
 
 AsyncSessionLocal = async_sessionmaker(

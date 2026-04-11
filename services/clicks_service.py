@@ -10,6 +10,12 @@ from infrastructure.click_executor import process_click_lua
 from observability.metrics import observe_storage_error, observe_storage_timing
 
 
+CLICK_RL_USER_LIMIT = int(os.getenv("CLICK_RL_USER_LIMIT", "90"))
+CLICK_RL_IP_LIMIT = int(os.getenv("CLICK_RL_IP_LIMIT", "180"))
+CLICK_RL_WINDOW_SECONDS = int(os.getenv("CLICK_RL_WINDOW_SECONDS", "60"))
+CLICK_IDEMPOTENCY_TTL_SECONDS = int(os.getenv("CLICK_IDEMPOTENCY_TTL_SECONDS", "86400"))
+
+
 def _is_trace_enabled() -> bool:
     return (os.getenv("CLICK_TRACE_TIMING", "0") or "0").strip().lower() in {
         "1",
@@ -168,6 +174,7 @@ class ClicksServiceDeps:
     require_telegram_user: Callable[..., Awaitable[Any]]
     require_dual_rate_limit: Callable[..., Awaitable[Any]]
     get_user: Callable[[int], Awaitable[dict | None]]
+    get_user_cached: Callable[[int], Awaitable[dict | None]]
     acquire_idempotency_key: Callable[[str, int], Awaitable[bool]]
     get_request_ip: Callable[[Any], str]
     get_redis_or_none: Callable[[], Awaitable[Any]]
@@ -254,38 +261,10 @@ async def process_clicks_batch_service(
         request_ip = deps.get_request_ip(request)
         user_hot_key = f"user_hot:{payload.user_id}"
 
-        # CRITICAL: Build canonical boosts from authoritative DB state
-        # Pass directly to Lua to guarantee next-click sees fresh boosts
-        import json
-
-        from core.boost_sync import build_normalized_user_hot_boosts
-        from core.utils import parse_extra_data
-
-        # Read fresh user data from DB to get accurate boost expiration times
-        user = await deps.get_user(payload.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        extra = parse_extra_data(user.get("extra_data"))
-
-        # === FIX: canonical boosts + canonical skin multiplier from DB ===
-        owned_skins = deps.normalize_owned_skins(
-            extra.get("owned_skins", [deps.DEFAULT_SKIN_ID])
-        )
-        selected_skin = deps.normalize_selected_skin(
-            extra.get("selected_skin", deps.DEFAULT_SKIN_ID),
-            owned_skins,
-        )
-        skin_multiplier = float(deps.SKIN_MULTIPLIERS.get(selected_skin, 1.0))
-        if skin_multiplier < 1.0:
-            skin_multiplier = 1.0
-
-        # Build canonical boosts JSON from authoritative DB state
-        # This will be passed directly to Lua as the source of truth
-        canonical_boosts = build_normalized_user_hot_boosts(
-            extra, deps.GHOST_BOOST_MULTIPLIER
-        )
-        canonical_boosts_json = json.dumps(canonical_boosts)
+        # Click hot-path avoids profile/cache reads.
+        # Lua derives boosts/skin from user_hot and falls back to these defaults.
+        canonical_boosts_json = ""
+        skin_multiplier = 0
 
         keys = [
             f"rl:clicks:{payload.user_id}",
@@ -302,10 +281,10 @@ async def process_clicks_batch_service(
             user_hot_key,
         ]
         args = [
-            "90",
-            "180",
-            "60",
-            "86400",
+            str(CLICK_RL_USER_LIMIT),
+            str(CLICK_RL_IP_LIMIT),
+            str(CLICK_RL_WINDOW_SECONDS),
+            str(CLICK_IDEMPOTENCY_TTL_SECONDS),
             str(now.timestamp()),
             now.isoformat(),
             str(safe_requested_clicks),

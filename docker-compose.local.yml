@@ -1,0 +1,38 @@
+services:
+  spirit-postgres:
+    image: postgres:16-alpine
+    container_name: spirit-postgres-local
+    restart: unless-stopped
+    command: ["postgres", "-c", "max_connections=500"]
+    environment:
+      POSTGRES_DB: spirit_local
+      POSTGRES_USER: spirit
+      POSTGRES_PASSWORD: spirit
+    ports:
+      - "54329:5432"
+    volumes:
+      - spirit_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spirit -d spirit_local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  spirit-redis:
+    image: redis:7-alpine
+    container_name: spirit-redis-local
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - spirit_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  spirit_postgres_data:
+  spirit_redis_data:

@@ -30,11 +30,17 @@ from infrastructure.coins_hot_sync import (
 )
 
 import ssl
+import os
 from urllib.parse import urlparse
 
 _ssl_context = ssl.create_default_context()
 _ssl_context.check_hostname = False
 _ssl_context.verify_mode = ssl.CERT_NONE
+
+POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "50"))
+MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "100"))
+POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "1800"))
+POOL_TIMEOUT = int(os.getenv("DB_POOL_TIMEOUT", "30"))
 
 
 # Determine if SSL should be used based on database URL
@@ -75,10 +81,25 @@ def _should_use_ssl(db_url: str) -> bool:
 # Create engine with appropriate SSL configuration
 if _should_use_ssl(DATABASE_URL):
     engine = create_async_engine(
-        DATABASE_URL, echo=False, connect_args={"ssl": _ssl_context}
+        DATABASE_URL,
+        echo=False,
+        connect_args={"ssl": _ssl_context},
+        pool_size=POOL_SIZE,
+        max_overflow=MAX_OVERFLOW,
+        pool_recycle=POOL_RECYCLE,
+        pool_timeout=POOL_TIMEOUT,
+        pool_pre_ping=True,
     )
 else:
-    engine = create_async_engine(DATABASE_URL, echo=False)
+    engine = create_async_engine(
+        DATABASE_URL,
+        echo=False,
+        pool_size=POOL_SIZE,
+        max_overflow=MAX_OVERFLOW,
+        pool_recycle=POOL_RECYCLE,
+        pool_timeout=POOL_TIMEOUT,
+        pool_pre_ping=True,
+    )
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 

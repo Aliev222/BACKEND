@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Sequence
 
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,8 @@ class ClickResult:
 
 
 _LUA_PATH = Path(__file__).resolve().parent / "lua" / "click.lua"
-_CLICK_LUA = _LUA_PATH.read_text(encoding="utf-8")
+_CLICK_LUA = _LUA_PATH.read_text(encoding="utf-8-sig")
+_CLICK_LUA_SHA: str | None = None
 
 
 async def process_click_lua(
@@ -45,7 +47,20 @@ async def process_click_lua(
     keys: Sequence[str],
     args: Sequence[str],
 ) -> ClickResult:
-    raw = await redis.eval(_CLICK_LUA, len(keys), *keys, *args)
+    global _CLICK_LUA_SHA
+
+    if _CLICK_LUA_SHA is None:
+        _CLICK_LUA_SHA = await redis.script_load(_CLICK_LUA)
+
+    try:
+        raw = await redis.evalsha(_CLICK_LUA_SHA, len(keys), *keys, *args)
+    except ResponseError as exc:
+        # Redis may evict script cache after restart; load and retry once.
+        if "NOSCRIPT" not in str(exc).upper():
+            raise
+        _CLICK_LUA_SHA = await redis.script_load(_CLICK_LUA)
+        raw = await redis.evalsha(_CLICK_LUA_SHA, len(keys), *keys, *args)
+
     values = list(raw or [])
     while len(values) < 21:
         values.append(0)

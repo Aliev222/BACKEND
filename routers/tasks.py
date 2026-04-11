@@ -310,6 +310,27 @@ from routers.legacy import (
     VideoTaskClaimRequest as _VideoTaskClaimRequest,
 )
 
+_CPA_TASK_DEFINITIONS = {
+    "cpa_reg_offer_1": {
+        "id": "cpa_reg_offer_1",
+        "title": "Register in Partner Offer A",
+        "reward": 120000,
+        "type": "cpa_registration",
+    },
+    "cpa_reg_offer_2": {
+        "id": "cpa_reg_offer_2",
+        "title": "Register in Partner Offer B",
+        "reward": 180000,
+        "type": "cpa_registration",
+    },
+    "cpa_reg_offer_3": {
+        "id": "cpa_reg_offer_3",
+        "title": "Register in Partner Offer C",
+        "reward": 250000,
+        "type": "cpa_registration",
+    },
+}
+
 
 @router_legacy.get("/api/tasks/{user_id}")
 async def get_tasks_legacy(user_id: int, request: Request):
@@ -559,6 +580,115 @@ async def get_video_tasks_status_legacy(user_id: int, request: Request):
         raise
     except Exception as e:
         logger_legacy.error(f"Error in get_video_tasks_status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router_legacy.get("/api/cpa/tasks/{user_id}")
+async def get_cpa_tasks_status_legacy(user_id: int, request: Request):
+    try:
+        await _require_telegram_user(request, user_id)
+        user = await _get_user_cached(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = _parse_extra_data(user.get("extra_data"))
+        cpa_state = extra.get("cpa_tasks", {}) or {}
+        tasks = []
+
+        for task_id, task_def in _CPA_TASK_DEFINITIONS.items():
+            state = cpa_state.get(task_id, {}) or {}
+            status = str(state.get("status") or "idle").lower()
+            tasks.append(
+                {
+                    "id": task_id,
+                    "title": task_def["title"],
+                    "reward": task_def["reward"],
+                    "type": task_def["type"],
+                    "status": status,
+                    "pending": status == "pending",
+                    "rejected": status == "rejected",
+                    "completed": status == "confirmed",
+                    "attempts": int(state.get("attempts") or 0),
+                    "started_at": state.get("started_at"),
+                    "confirmed_at": state.get("confirmed_at"),
+                    "rejected_at": state.get("rejected_at"),
+                }
+            )
+
+        return {"success": True, "tasks": tasks}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger_legacy.error(f"Error in get_cpa_tasks_status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router_legacy.post("/api/cpa/tasks/start")
+async def start_cpa_task_legacy(request: Request):
+    try:
+        payload = await request.json()
+        user_id = int(payload.get("user_id") or 0)
+        task_id = str(payload.get("task_id") or "").strip()
+
+        if user_id <= 0:
+            raise HTTPException(status_code=400, detail="Invalid user_id")
+        if task_id not in _CPA_TASK_DEFINITIONS:
+            raise HTTPException(status_code=400, detail="Unknown CPA task")
+
+        await _require_telegram_user(request, user_id)
+        await _require_dual_rate_limit(
+            "cpa_task_start",
+            request,
+            user_id,
+            20,
+            60,
+            ip_limit=40,
+        )
+        await _require_user_action_lock(f"cpa_task_start:{task_id}", user_id, ttl=2)
+
+        user = await _get_user_cached(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        extra = _parse_extra_data(user.get("extra_data"))
+        cpa_tasks = extra.get("cpa_tasks", {}) or {}
+        existing = cpa_tasks.get(task_id, {}) or {}
+        current_status = str(existing.get("status") or "").lower()
+        if current_status == "confirmed":
+            return {
+                "success": True,
+                "status": "confirmed",
+                "completed": True,
+                "pending": False,
+                "rejected": False,
+            }
+
+        attempts = int(existing.get("attempts") or 0) + 1
+        now_iso = datetime.utcnow().isoformat()
+        cpa_tasks[task_id] = {
+            **existing,
+            "status": "pending",
+            "attempts": attempts,
+            "started_at": now_iso,
+            "updated_at": now_iso,
+        }
+        extra["cpa_tasks"] = cpa_tasks
+        await _update_user(user_id, {"extra_data": extra})
+        await _invalidate_user_cache(user_id)
+
+        return {
+            "success": True,
+            "status": "pending",
+            "completed": False,
+            "pending": True,
+            "rejected": False,
+            "attempts": attempts,
+            "started_at": now_iso,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger_legacy.error(f"Error in start_cpa_task: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

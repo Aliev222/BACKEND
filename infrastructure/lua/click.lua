@@ -29,11 +29,8 @@ local regen_seconds = tonumber(ARGV[15])
 local user_id = ARGV[16]
 local base_max_energy = tonumber(ARGV[17])
 local ghost_boost_multiplier_default = tonumber(ARGV[18])
-local canonical_boosts_json = ARGV[19] or '{}'
-local canonical_skin_multiplier = tonumber(ARGV[20] or '1')
-if canonical_skin_multiplier < 1 then
-    canonical_skin_multiplier = 1
-end
+local canonical_boosts_json = ARGV[19] or ''
+local canonical_skin_multiplier = tonumber(ARGV[20] or '0')
 local hot_state_version_default = 1
 
 local function json_decode_or_empty(raw)
@@ -72,6 +69,14 @@ if not idempotent_ok then
 end
 
 if redis.call('EXISTS', user_hot_key) == 0 then
+    local init_skin_multiplier = canonical_skin_multiplier
+    if init_skin_multiplier < 1 then
+        init_skin_multiplier = 1
+    end
+    local init_boosts_json = canonical_boosts_json
+    if not init_boosts_json or init_boosts_json == '' then
+        init_boosts_json = '{}'
+    end
     redis.call('HSET', user_hot_key,
         'coins', '0',
         'energy', tostring(base_max_energy),
@@ -84,8 +89,8 @@ if redis.call('EXISTS', user_hot_key) == 0 then
         'click_streak', '0',
         'suspicion_score', '0',
         'version', tostring(hot_state_version_default),
-        'skin_multiplier', tostring(canonical_skin_multiplier),
-        'boosts', canonical_boosts_json,
+        'skin_multiplier', tostring(init_skin_multiplier),
+        'boosts', init_boosts_json,
         'flags', '{}'
     )
 end
@@ -103,7 +108,9 @@ local hot_vals = redis.call(
     'suspicion_score',
     'version',
     'flags',
-    'profit_per_hour'
+    'profit_per_hour',
+    'skin_multiplier',
+    'boosts'
 )
 
 local hot_coins = tonumber(hot_vals[1] or '0')
@@ -116,10 +123,23 @@ local hot_click_streak = tonumber(hot_vals[7] or '0')
 local hot_suspicion_score = tonumber(hot_vals[8] or '0')
 local hot_version = tonumber(hot_vals[9] or tostring(hot_state_version_default))
 local hot_profit_per_hour = tonumber(hot_vals[11] or '0')
-local skin_multiplier = canonical_skin_multiplier
+local hot_skin_multiplier = tonumber(hot_vals[12] or '1')
+if hot_skin_multiplier < 1 then
+    hot_skin_multiplier = 1
+end
 
--- Use canonical boosts from DB (passed via ARGV), not stale user_hot boosts
-local boosts = json_decode_or_empty(canonical_boosts_json)
+local skin_multiplier = canonical_skin_multiplier
+if skin_multiplier < 1 then
+    skin_multiplier = hot_skin_multiplier
+end
+if skin_multiplier < 1 then
+    skin_multiplier = 1
+end
+
+local boosts = json_decode_or_empty(hot_vals[13])
+if canonical_boosts_json and canonical_boosts_json ~= '' then
+    boosts = json_decode_or_empty(canonical_boosts_json)
+end
 
 local flags = json_decode_or_empty(hot_vals[10])
 local click_guard = {}

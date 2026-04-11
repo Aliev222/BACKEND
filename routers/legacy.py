@@ -113,6 +113,8 @@ from core.game_config import (
     UPGRADE_PRICES,
     USER_CACHE_PREFIX,
     USER_CACHE_TTL,
+    USER_CACHE_MISS_MARKER,
+    USER_CACHE_MISS_TTL,
 )
 from core.game_logic import (
     build_energy_payload,
@@ -1625,10 +1627,13 @@ _USER_CACHE_EXCLUDE_FIELDS = frozenset(
 
 async def get_user_cached(user_id: int) -> dict | None:
     conn = await get_redis_or_none()
+    cache_key = f"{USER_CACHE_PREFIX}{user_id}"
     if conn:
         try:
-            cached = await conn.get(f"{USER_CACHE_PREFIX}{user_id}")
+            cached = await conn.get(cache_key)
             if cached:
+                if cached == USER_CACHE_MISS_MARKER:
+                    return None
                 try:
                     return json.loads(cached)
                 except Exception:
@@ -1638,9 +1643,13 @@ async def get_user_cached(user_id: int) -> dict | None:
 
     user = await get_user(user_id)
     if not user:
+        if conn:
+            try:
+                await conn.setex(cache_key, USER_CACHE_MISS_TTL, USER_CACHE_MISS_MARKER)
+            except Exception as e:
+                logger.warning("User negative cache write failed for %s: %s", user_id, e)
         return None
 
-    conn = await get_redis_or_none()
     if conn:
         try:
             # Filter out hot-state fields before caching
@@ -1648,7 +1657,7 @@ async def get_user_cached(user_id: int) -> dict | None:
                 k: v for k, v in user.items() if k not in _USER_CACHE_EXCLUDE_FIELDS
             }
             await conn.setex(
-                f"{USER_CACHE_PREFIX}{user_id}",
+                cache_key,
                 USER_CACHE_TTL,
                 json.dumps(cache_data, default=str),
             )
@@ -2197,15 +2206,8 @@ async def create_debug_session(payload: UserIdRequest):
         raise HTTPException(status_code=404, detail="Not found")
 
     user_id = int(payload.user_id)
-    username = None
-    try:
-        user = await get_user(user_id)
-        if user:
-            username = user.get("username")
-    except Exception:
-        username = None
-
-    token, _expires_at = issue_session_token({"id": user_id, "username": username})
+    # Debug helper should not depend on DB availability under load.
+    token, _expires_at = issue_session_token({"id": user_id, "username": None})
     return {"token": token}
 
 
@@ -3002,6 +3004,7 @@ def _build_clicks_service_deps() -> ClicksServiceDeps:
         require_telegram_user=require_telegram_user,
         require_dual_rate_limit=require_dual_rate_limit,
         get_user=get_user,
+        get_user_cached=get_user_cached,
         acquire_idempotency_key=acquire_idempotency_key,
         get_request_ip=get_request_ip,
         get_redis_or_none=get_redis_or_none,
