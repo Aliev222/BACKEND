@@ -1,9 +1,17 @@
+import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
 from observability.metrics import observe_storage_error, observe_storage_timing
+
+PROFILE_STATE_CACHE_PREFIX = "user:state:rt:"
+PROFILE_STATE_CACHE_TTL_MS = max(
+    0,
+    int(float(os.getenv("PROFILE_STATE_CACHE_TTL_SECONDS", "1.5")) * 1000),
+)
 
 
 @dataclass(frozen=True)
@@ -92,6 +100,28 @@ async def get_user_data_service(
 ):
     try:
         await deps.require_telegram_user(request, user_id)
+        redis_conn = await deps.get_redis_or_none()
+        state_cache_key = f"{PROFILE_STATE_CACHE_PREFIX}{user_id}"
+
+        if redis_conn and PROFILE_STATE_CACHE_TTL_MS > 0:
+            try:
+                t = time.perf_counter()
+                cached_state = await redis_conn.get(state_cache_key)
+                observe_storage_timing(
+                    "redis",
+                    "profile_state_cache_get",
+                    "profile",
+                    time.perf_counter() - t,
+                    outcome="hit" if cached_state else "miss",
+                )
+                if cached_state:
+                    decoded_state = json.loads(cached_state)
+                    if isinstance(decoded_state, dict):
+                        return decoded_state
+            except Exception:
+                # Cache is best-effort: profile assembly must continue on any failure.
+                pass
+
         t = time.perf_counter()
         user = await deps.get_user_cached(user_id)
         observe_storage_timing("db", "get_user_cached", "profile", time.perf_counter() - t)
@@ -99,7 +129,6 @@ async def get_user_data_service(
             raise HTTPException(status_code=404, detail="User not found")
         await deps.touch_user_activity(user_id, user)
 
-        redis_conn = await deps.get_redis_or_none()
         if redis_conn:
             t = time.perf_counter()
             hot_exists = await redis_conn.exists(f"coins_hot:{user_id}")
@@ -118,6 +147,23 @@ async def get_user_data_service(
         state = await deps.build_realtime_player_state(user_id)
         if state is None:
             raise HTTPException(status_code=404, detail="User not found")
+
+        if redis_conn and PROFILE_STATE_CACHE_TTL_MS > 0:
+            try:
+                t = time.perf_counter()
+                await redis_conn.psetex(
+                    state_cache_key,
+                    PROFILE_STATE_CACHE_TTL_MS,
+                    json.dumps(state),
+                )
+                observe_storage_timing(
+                    "redis",
+                    "profile_state_cache_set",
+                    "profile",
+                    time.perf_counter() - t,
+                )
+            except Exception:
+                pass
 
         return state
 
